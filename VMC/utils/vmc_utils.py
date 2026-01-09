@@ -51,13 +51,16 @@ def batched_eval(
     """
     if batch_size <= 0:
         raise ValueError("batch_size must be positive.")
+    if samples.ndim == 0:
+        raise ValueError("samples must have a batch dimension.")
     n_samples = int(samples.shape[0])
+    trailing_shape = samples.shape[1:]
     pad = (-n_samples) % batch_size
     if pad:
-        padding = jnp.zeros((pad, samples.shape[1]), dtype=samples.dtype)
+        padding = jnp.zeros((pad, *trailing_shape), dtype=samples.dtype)
         samples = jnp.concatenate([samples, padding], axis=0)
     num_batches = samples.shape[0] // batch_size
-    batches = samples.reshape(num_batches, batch_size, samples.shape[1])
+    batches = samples.reshape(num_batches, batch_size, *trailing_shape)
 
     def scan_fn(_, batch):
         return None, eval_fn(batch)

@@ -17,6 +17,8 @@ import jax.numpy as jnp
 from flax import nnx
 from netket.utils import timing
 
+from VMC.utils.utils import spin_to_occupancy
+
 if TYPE_CHECKING:
     from jax.typing import DTypeLike
 
@@ -43,57 +45,62 @@ logger = logging.getLogger(__name__)
 class ContractionStrategy(abc.ABC):
     """Abstract base class for MPO-to-MPS contraction strategies."""
 
+    def __init__(self, truncate_bond_dimension: int):
+        if truncate_bond_dimension <= 0:
+            raise ValueError("truncate_bond_dimension must be positive.")
+        self.truncate_bond_dimension = truncate_bond_dimension
+
     @abc.abstractmethod
-    def apply(self, mps: tuple, mpo: tuple, chi: int | None) -> tuple:
+    def apply(self, mps: tuple, mpo: tuple) -> tuple:
         """Apply MPO to MPS with this strategy.
 
         Args:
             mps: Boundary MPS as tuple of tensors.
             mpo: Row MPO as tuple of tensors.
-            chi: Truncation bond dimension.
 
         Returns:
             New MPS tuple after applying the MPO.
         """
 
+    def with_truncate_bond_dimension(
+        self, truncate_bond_dimension: int
+    ) -> "ContractionStrategy":
+        """Return a strategy instance that uses the requested truncation size."""
+        if truncate_bond_dimension <= 0:
+            raise ValueError("truncate_bond_dimension must be positive.")
+        if self.truncate_bond_dimension == truncate_bond_dimension:
+            return self
+        return type(self)(truncate_bond_dimension=truncate_bond_dimension)
+
 
 class NoTruncation(ContractionStrategy):
     """No truncation strategy - exact contraction."""
 
-    def apply(self, mps: tuple, mpo: tuple, chi: int | None) -> tuple:
+    def __init__(self):
+        super().__init__(truncate_bond_dimension=1)
+
+    def apply(self, mps: tuple, mpo: tuple) -> tuple:
         return _apply_mpo_exact(mps, mpo)
 
 
 class ZipUp(ContractionStrategy):
     """Zip-up truncation strategy - on-the-fly SVD truncation."""
 
-    def apply(self, mps: tuple, mpo: tuple, chi: int | None) -> tuple:
-        return _apply_mpo_zip_up(mps, mpo, chi)
+    def __init__(self, truncate_bond_dimension: int):
+        super().__init__(truncate_bond_dimension=truncate_bond_dimension)
+
+    def apply(self, mps: tuple, mpo: tuple) -> tuple:
+        return _apply_mpo_zip_up(mps, mpo, self.truncate_bond_dimension)
 
 
 class DensityMatrix(ContractionStrategy):
     """Density-matrix truncation strategy - TEBD-style truncation."""
 
-    def apply(self, mps: tuple, mpo: tuple, chi: int | None) -> tuple:
-        return _apply_mpo_density_matrix(mps, mpo, chi)
+    def __init__(self, truncate_bond_dimension: int):
+        super().__init__(truncate_bond_dimension=truncate_bond_dimension)
 
-
-def _normalize_strategy(strategy: ContractionStrategy | None) -> ContractionStrategy:
-    """Normalize a strategy specification into a strategy instance.
-
-    Args:
-        strategy: Strategy instance or None (defaults to ZipUp).
-
-    Returns:
-        Strategy instance.
-    """
-    if strategy is None:
-        return ZipUp()
-    if isinstance(strategy, ContractionStrategy):
-        return strategy
-    raise TypeError(
-        f"strategy must be None or a ContractionStrategy instance, got {type(strategy)}"
-    )
+    def apply(self, mps: tuple, mpo: tuple) -> tuple:
+        return _apply_mpo_density_matrix(mps, mpo, self.truncate_bond_dimension)
 
 
 @jax.jit
@@ -109,16 +116,15 @@ def _apply_mpo_exact(mps: tuple, mpo: tuple) -> tuple:
 
 
 @functools.partial(jax.jit, static_argnums=(2,))
-def _apply_mpo_zip_up(mps: tuple, mpo: tuple, chi: int | None) -> tuple:
+def _apply_mpo_zip_up(
+    mps: tuple, mpo: tuple, truncate_bond_dimension: int
+) -> tuple:
     """Apply MPO with on-the-fly SVD truncation (zip-up).
 
     This avoids the large intermediate bond growth of the two-stage
     apply-then-truncate approach and keeps the right bond of each
-    intermediate MPS bounded by `chi`.
+    intermediate MPS bounded by `truncate_bond_dimension`.
     """
-    if chi is None:
-        return _apply_mpo_exact(mps, mpo)
-
     new = []
     carry = None  # shape (bond, Dr_prev, wr_prev) propagated to the right
 
@@ -150,7 +156,7 @@ def _apply_mpo_zip_up(mps: tuple, mpo: tuple, chi: int | None) -> tuple:
         svd_eps = jnp.array(1e-7, dtype=mat.dtype)
         mat = mat + svd_eps * jnp.eye(mat.shape[0], mat.shape[1], dtype=mat.dtype)
         U, S, Vh = jnp.linalg.svd(mat, full_matrices=False)
-        k = S.shape[0] if chi is None else min(int(chi), int(S.shape[0]))
+        k = min(truncate_bond_dimension, S.shape[0])
         U = U[:, :k]
         S = S[:k]
         Vh = Vh[:k, :]
@@ -168,15 +174,14 @@ def _apply_mpo_zip_up(mps: tuple, mpo: tuple, chi: int | None) -> tuple:
 
 
 @functools.partial(jax.jit, static_argnums=(2,))
-def _apply_mpo_density_matrix(mps: tuple, mpo: tuple, chi: int | None) -> tuple:
+def _apply_mpo_density_matrix(
+    mps: tuple, mpo: tuple, truncate_bond_dimension: int
+) -> tuple:
     """Density-matrix truncation while applying an MPO to an MPS.
 
     Uses the right reduced density matrix to select the dominant
     eigenvectors (TEBD-style).
     """
-    if chi is None:
-        return _apply_mpo_exact(mps, mpo)
-
     new = []
     carry = None  # shape (bond, Dr_prev, wr_prev)
 
@@ -202,7 +207,7 @@ def _apply_mpo_density_matrix(mps: tuple, mpo: tuple, chi: int | None) -> tuple:
         rho = theta.conj().T @ theta  # (Dr*wr, Dr*wr)
         evals, evecs = jnp.linalg.eigh(rho)
         order = jnp.argsort(evals)[::-1]
-        k = min(int(chi), int(rho.shape[0]))
+        k = min(truncate_bond_dimension, rho.shape[0])
         vecs_k = evecs[:, order[:k]]
 
         theta_projected = theta @ vecs_k  # (left_dim*phys, k)
@@ -245,7 +250,6 @@ def _forward_with_cache(
     tensors: Any,
     spins: jax.Array,
     shape: tuple[int, int],
-    chi: int | None,
     strategy: ContractionStrategy,
 ) -> tuple[jax.Array, list[tuple]]:
     """Forward pass that caches all intermediate boundary MPSs.
@@ -254,7 +258,6 @@ def _forward_with_cache(
         tensors: Nested list of PEPS site tensors.
         spins: Physical indices array with shape (n_rows, n_cols).
         shape: Grid shape (n_rows, n_cols).
-        chi: Truncation bond dimension.
         strategy: Contraction strategy instance.
 
     Returns:
@@ -273,7 +276,7 @@ def _forward_with_cache(
 
     for row in range(n_rows):
         mpo = _build_row_mpo_static(tensors, spins[row], row, n_cols)
-        boundary = strategy.apply(boundary, mpo, chi)
+        boundary = strategy.apply(boundary, mpo)
         top_envs.append(boundary)
 
     # Contract final boundary to get amplitude
@@ -284,7 +287,6 @@ def _forward_with_cache(
 def _apply_mpo_from_below(
     bottom_mps: tuple,
     mpo: tuple,
-    chi: int | None,
     strategy: ContractionStrategy,
 ) -> tuple:
     """Apply MPO to boundary MPS from below (for backward sweep).
@@ -295,7 +297,6 @@ def _apply_mpo_from_below(
     Args:
         bottom_mps: Current bottom boundary MPS.
         mpo: Row MPO with tensors of shape (left, right, up, down).
-        chi: Truncation bond dimension.
         strategy: Contraction strategy instance.
 
     Returns:
@@ -303,7 +304,7 @@ def _apply_mpo_from_below(
     """
     # Transpose MPO tensors to swap up/down: (left, right, up, down) -> (left, right, down, up)
     mpo_transposed = tuple(jnp.transpose(w, (0, 1, 3, 2)) for w in mpo)
-    return strategy.apply(bottom_mps, mpo_transposed, chi)
+    return strategy.apply(bottom_mps, mpo_transposed)
 
 
 def _contract_column_transfer(
@@ -450,7 +451,6 @@ def _compute_all_gradients(
     tensors: Any,
     spins: jax.Array,
     shape: tuple[int, int],
-    chi: int | None,
     strategy: ContractionStrategy,
     top_envs: list[tuple],
 ) -> list[list[jax.Array]]:
@@ -460,7 +460,6 @@ def _compute_all_gradients(
         tensors: Nested list of PEPS site tensors.
         spins: Physical indices array with shape (n_rows, n_cols).
         shape: Grid shape (n_rows, n_cols).
-        chi: Truncation bond dimension.
         strategy: Contraction strategy instance.
         top_envs: Cached top boundary MPSs from forward pass.
 
@@ -486,15 +485,14 @@ def _compute_all_gradients(
         grads[row] = row_grads
 
         # Update bottom_env by contracting this row from below
-        bottom_env = _apply_mpo_from_below(bottom_env, mpo, chi, strategy)
+        bottom_env = _apply_mpo_from_below(bottom_env, mpo, strategy)
 
     return grads
 
 
 def make_peps_amplitude(
     shape: tuple[int, int],
-    chi: int | None,
-    strategy: ContractionStrategy | None = None,
+    strategy: ContractionStrategy,
 ):
     """Create a PEPS amplitude function with custom VJP for the given configuration.
 
@@ -503,23 +501,26 @@ def make_peps_amplitude(
 
     Args:
         shape: Grid shape (n_rows, n_cols).
-        chi: Truncation bond dimension, or None for no truncation.
-        strategy: Contraction strategy instance (None defaults to ZipUp).
+        strategy: Contraction strategy instance.
 
     Returns:
         A function `(tensors, sample) -> amplitude` with a custom VJP.
     """
-    strategy = _normalize_strategy(strategy)
+    if not isinstance(strategy, ContractionStrategy):
+        raise TypeError(
+            "strategy must be a ContractionStrategy instance, "
+            f"got {type(strategy)}"
+        )
 
     @jax.custom_vjp
     def amplitude_fn(tensors: Any, sample: jax.Array) -> jax.Array:
         """Compute PEPS amplitude with custom VJP."""
-        return SimplePEPS._single_amplitude(tensors, sample, shape, chi, strategy)
+        return SimplePEPS._single_amplitude(tensors, sample, shape, strategy)
 
     def amplitude_fwd(tensors: Any, sample: jax.Array) -> tuple[jax.Array, tuple]:
         """Forward pass returning residuals."""
-        spins = ((sample + 1) // 2).astype(jnp.int32).reshape(shape)
-        amp, top_envs = _forward_with_cache(tensors, spins, shape, chi, strategy)
+        spins = spin_to_occupancy(sample).reshape(shape)
+        amp, top_envs = _forward_with_cache(tensors, spins, shape, strategy)
         residuals = (tensors, spins, top_envs)
         return amp, residuals
 
@@ -530,7 +531,7 @@ def make_peps_amplitude(
 
         # Compute all environment-based gradients
         env_grads = _compute_all_gradients(
-            tensors, spins, shape, chi, strategy, top_envs
+            tensors, spins, shape, strategy, top_envs
         )
 
         # Build gradients matching the pytree structure of `tensors`.
@@ -557,15 +558,14 @@ def peps_amplitude(
     tensors: Any,
     sample: jax.Array,
     shape: tuple[int, int],
-    chi: int | None,
-    strategy: ContractionStrategy | None = None,
+    strategy: ContractionStrategy,
 ) -> jax.Array:
     """Convenience wrapper around `make_peps_amplitude`.
 
     For JAX transforms (`grad`, `jacrev`, `vmap`) prefer calling
-    `make_peps_amplitude(shape, chi, strategy)` once and reusing it.
+    `make_peps_amplitude(shape, strategy)` once and reusing it.
     """
-    amp_fn = make_peps_amplitude(shape, chi, strategy)
+    amp_fn = make_peps_amplitude(shape, strategy)
     return amp_fn(tensors, sample)
 
 
@@ -573,9 +573,9 @@ class SimplePEPS(nnx.Module):
     """Open-boundary PEPS on a rectangular grid contracted with a boundary MPS.
 
     Each site tensor has shape (phys_dim, up, down, left, right) with boundary
-    bonds set to dimension 1. The truncation bond-dimension `chi` (default D^2)
-    is independent from the PEPS virtual bond dimension `bond_dim`; set `chi<=0`
-    to disable truncation.
+    bonds set to dimension 1. Truncation behavior is controlled by the
+    contraction strategy (for example, ZipUp(truncate_bond_dimension=...)).
+    The default strategy is ZipUp(truncate_bond_dimension=bond_dim**2).
     """
 
     def __init__(
@@ -584,7 +584,6 @@ class SimplePEPS(nnx.Module):
         rngs: nnx.Rngs,
         shape: tuple[int, int],
         bond_dim: int,
-        chi: int | None = None,
         contraction_strategy: ContractionStrategy | None = None,
         dtype: "DTypeLike" = jnp.complex128,
     ):
@@ -594,22 +593,23 @@ class SimplePEPS(nnx.Module):
             rngs: Flax NNX random key generator.
             shape: Grid shape (n_rows, n_cols).
             bond_dim: Virtual bond dimension.
-            chi: Truncation bond dimension (default: bond_dim^2, <=0 disables).
-            contraction_strategy: Contraction strategy instance (default: ZipUp).
+            contraction_strategy: Contraction strategy instance (default: ZipUp
+                with truncate_bond_dimension=bond_dim**2).
             dtype: Data type for tensors (default: complex128).
         """
         self.shape = (int(shape[0]), int(shape[1]))
         self.bond_dim = int(bond_dim)
         self.dtype = jnp.dtype(dtype)
-        # Truncation bond dimension is typically D^2; allow override and
-        # disable truncation with chi<=0.
-        if chi is None:
-            self.chi = int(bond_dim * bond_dim)
-        elif chi <= 0:
-            self.chi = None
-        else:
-            self.chi = int(chi)
-        self.strategy: ContractionStrategy = _normalize_strategy(contraction_strategy)
+        if contraction_strategy is None:
+            contraction_strategy = ZipUp(
+                truncate_bond_dimension=self.bond_dim * self.bond_dim
+            )
+        if not isinstance(contraction_strategy, ContractionStrategy):
+            raise TypeError(
+                "contraction_strategy must be a ContractionStrategy instance, "
+                f"got {type(contraction_strategy)}"
+            )
+        self.strategy = contraction_strategy
 
         # Determine real dtype for random initialization
         is_complex = jnp.issubdtype(self.dtype, jnp.complexfloating)
@@ -660,9 +660,7 @@ class SimplePEPS(nnx.Module):
 
     @staticmethod
     @functools.partial(jax.jit, static_argnums=(1,))
-    def _truncate_mps(mps, chi):
-        if chi is None:
-            return mps
+    def _truncate_mps(mps, truncate_bond_dimension):
         mps = list(mps)
         for i in range(len(mps) - 1):
             left, phys, right = mps[i].shape
@@ -670,7 +668,7 @@ class SimplePEPS(nnx.Module):
             svd_eps = jnp.array(1e-7, dtype=mat.dtype)
             mat = mat + svd_eps * jnp.eye(mat.shape[0], mat.shape[1], dtype=mat.dtype)
             u, s, vh = jnp.linalg.svd(mat, full_matrices=False)
-            k = min(chi, s.shape[0])
+            k = min(truncate_bond_dimension, s.shape[0])
             u = u[:, :k]
             s = s[:k]
             vh = vh[:k, :]
@@ -685,13 +683,12 @@ class SimplePEPS(nnx.Module):
         return _contract_bottom_common(mps)
 
     @staticmethod
-    @functools.partial(jax.jit, static_argnames=("shape", "strategy", "chi"))
+    @functools.partial(jax.jit, static_argnames=("shape", "strategy"))
     def _single_amplitude(
         tensors,
         sample: jax.Array,
         shape: tuple[int, int],
-        chi: int | None,
-        strategy: ContractionStrategy | None = None,
+        strategy: ContractionStrategy,
     ) -> jax.Array:
         """Compute a single PEPS amplitude for a spin configuration.
 
@@ -699,21 +696,19 @@ class SimplePEPS(nnx.Module):
             tensors: Nested list of PEPS site tensors.
             sample: Spin configuration with shape (n_sites,).
             shape: Grid shape (rows, cols).
-            chi: Truncation bond dimension, or None for no truncation.
-            strategy: Contraction strategy instance (defaults to ZipUp).
+            strategy: Contraction strategy instance.
 
         Returns:
             Complex amplitude scalar.
         """
-        strategy = _normalize_strategy(strategy)
-        spins = ((sample + 1) // 2).astype(jnp.int32).reshape(shape)
+        spins = spin_to_occupancy(sample).reshape(shape)
         boundary = tuple(
             jnp.ones((1, 1, 1), dtype=jnp.asarray(tensors[0][0]).dtype)
             for _ in range(shape[1])
         )
         for row in range(shape[0]):
             mpo = SimplePEPS._build_row_mpo(tensors, spins[row], row, shape[1])
-            boundary = strategy.apply(boundary, mpo, chi)
+            boundary = strategy.apply(boundary, mpo)
         return SimplePEPS._contract_bottom(boundary)
 
     @nnx.jit
@@ -728,10 +723,11 @@ class SimplePEPS(nnx.Module):
         """
         amps = jax.vmap(
             lambda s: self._single_amplitude(
-                self.tensors, s, self.shape, self.chi, self.strategy
+                self.tensors, s, self.shape, self.strategy
             )
         )(x)
         return jnp.log(amps)
+
 
 
 def test_gradient_correctness():
@@ -745,7 +741,7 @@ def test_gradient_correctness():
     bond_dim = 2
 
     rngs = nnx.Rngs(42)
-    model = SimplePEPS(rngs=rngs, shape=shape, bond_dim=bond_dim, chi=0)
+    model = SimplePEPS(rngs=rngs, shape=shape, bond_dim=bond_dim)
     tensors = model.tensors
 
     sample = jnp.array([1, -1, -1, 1], dtype=jnp.int32)
@@ -773,7 +769,7 @@ def test_gradient_correctness():
     # Test 1: Compare custom VJP gradient with no-truncation autodiff
     logger.info("\n1. Comparing custom VJP (no truncation) with autodiff...")
 
-    amp_fn = make_peps_amplitude(shape, None, NoTruncation())
+    amp_fn = make_peps_amplitude(shape, NoTruncation())
 
     def amplitude_custom_vjp(flat_params):
         tensors_nested = flat_to_tensors(flat_params, tensors)
@@ -782,7 +778,7 @@ def test_gradient_correctness():
     def amplitude_autodiff(flat_params):
         tensors_nested = flat_to_tensors(flat_params, tensors)
         return SimplePEPS._single_amplitude(
-            tensors_nested, sample, shape, chi=None, strategy=NoTruncation()
+            tensors_nested, sample, shape, NoTruncation()
         )
 
     flat_params = tensors_to_flat(tensors)
@@ -811,8 +807,10 @@ def test_gradient_correctness():
 
     # Test 3: Test with zip-up truncation strategy
     logger.info("\n3. Testing custom VJP with zip-up truncation...")
-    chi_test = 4
-    amp_fn_zipup = make_peps_amplitude(shape, chi_test, ZipUp())
+    truncate_bond_dimension_test = 4
+    amp_fn_zipup = make_peps_amplitude(
+        shape, ZipUp(truncate_bond_dimension=truncate_bond_dimension_test)
+    )
 
     def amplitude_zipup_custom(flat_params):
         tensors_nested = flat_to_tensors(flat_params, tensors)
@@ -831,7 +829,9 @@ def test_gradient_correctness():
 
     # Test 4: Test with density matrix truncation strategy
     logger.info("\n4. Testing custom VJP with density matrix truncation...")
-    amp_fn_dm = make_peps_amplitude(shape, chi_test, DensityMatrix())
+    amp_fn_dm = make_peps_amplitude(
+        shape, DensityMatrix(truncate_bond_dimension=truncate_bond_dimension_test)
+    )
 
     def amplitude_dm_custom(flat_params):
         tensors_nested = flat_to_tensors(flat_params, tensors)
@@ -856,14 +856,14 @@ def test_gradient_correctness():
 if __name__ == "__main__":
     shape = (4, 4)
     bond_dim = 8
-    chi_trunc = bond_dim * bond_dim
+    truncate_bond_dimension = bond_dim * bond_dim
 
     sample = jnp.array(
         [1, -1, -1, -1, 1, 1, 1, -1, -1, 1, -1, 1, -1, 1, -1, 1], dtype=jnp.int32
     )
 
     rngs = nnx.Rngs(1)
-    model = SimplePEPS(rngs=rngs, shape=shape, bond_dim=bond_dim, chi=0)
+    model = SimplePEPS(rngs=rngs, shape=shape, bond_dim=bond_dim)
     tensors = model.tensors
 
     def timed(name, fn):
@@ -875,24 +875,30 @@ if __name__ == "__main__":
     amp_no_trunc, t_no = timed(
         "no_trunc",
         lambda: SimplePEPS._single_amplitude(
-            tensors, sample, shape, chi=None, strategy=NoTruncation()
+            tensors, sample, shape, NoTruncation()
         ),
     )
     amp_zip, t_zip = timed(
         "zip_up",
         lambda: SimplePEPS._single_amplitude(
-            tensors, sample, shape, chi=chi_trunc, strategy=ZipUp()
+            tensors,
+            sample,
+            shape,
+            ZipUp(truncate_bond_dimension=truncate_bond_dimension),
         ),
     )
     amp_dm, t_dm = timed(
         "density_matrix",
         lambda: SimplePEPS._single_amplitude(
-            tensors, sample, shape, chi=chi_trunc, strategy=DensityMatrix()
+            tensors,
+            sample,
+            shape,
+            DensityMatrix(truncate_bond_dimension=truncate_bond_dimension),
         ),
     )
 
     # Explicit apply-then-truncate path.
-    spins = ((sample + 1) // 2).astype(jnp.int32).reshape(shape)
+    spins = spin_to_occupancy(sample).reshape(shape)
     boundary = tuple(
         jnp.ones((1, 1, 1), dtype=jnp.asarray(tensors[0][0]).dtype)
         for _ in range(shape[1])
@@ -903,7 +909,9 @@ if __name__ == "__main__":
         for row in range(shape[0]):
             mpo = SimplePEPS._build_row_mpo(tensors, spins[row], row, shape[1])
             boundary_local = SimplePEPS._apply_mpo(boundary_local, mpo)
-            boundary_local = SimplePEPS._truncate_mps(boundary_local, chi_trunc)
+            boundary_local = SimplePEPS._truncate_mps(
+                boundary_local, truncate_bond_dimension
+            )
         return SimplePEPS._contract_bottom(boundary_local)
 
     amp_apply_trunc, t_apply = timed("apply_truncate", apply_then_truncate)
@@ -912,7 +920,8 @@ if __name__ == "__main__":
         return f"{float(jnp.real(z)):+.6f}{float(jnp.imag(z)):+.6f}j"
 
     logger.info(
-        "=== PEPS contraction consistency check (4x4, bond_dim=8, chi=D^2) ==="
+        "=== PEPS contraction consistency check (4x4, bond_dim=8, "
+        "truncate_bond_dimension=D^2) ==="
     )
     logger.info("sample spins: %s", sample)
     logger.info("amp no trunc   : %s  (t=%.3es)", _fmt(amp_no_trunc), t_no)

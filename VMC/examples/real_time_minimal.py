@@ -346,12 +346,11 @@ def _peps_boundary_mps(n_cols: int, dtype: jnp.dtype) -> tuple[jax.Array, ...]:
     return tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
 
 
-@functools.partial(jax.jit, static_argnames=("shape", "chi", "strategy"))
+@functools.partial(jax.jit, static_argnames=("shape", "strategy"))
 def peps_gibbs_sweep(
     tensors: list[list[jax.Array]],
     spins: jax.Array,
     shape: tuple[int, int],
-    chi: int | None,
     strategy,
     key: jax.Array,
 ) -> tuple[jax.Array, jax.Array]:
@@ -364,7 +363,7 @@ def peps_gibbs_sweep(
     for row in range(n_rows - 1, -1, -1):
         bottom_envs[row] = bottom_env
         mpo_row = _build_row_mpo_static(tensors, spins[row], row, n_cols)
-        bottom_env = _apply_mpo_from_below(bottom_env, mpo_row, chi, strategy)
+        bottom_env = _apply_mpo_from_below(bottom_env, mpo_row, strategy)
 
     top_env = _peps_boundary_mps(n_cols, dtype)
     for row in range(n_rows):
@@ -421,7 +420,7 @@ def peps_gibbs_sweep(
 
         # Update top boundary with the updated row (reuse environments in sweep).
         mpo_row = _build_row_mpo_static(tensors, spins[row], row, n_cols)
-        top_env = strategy.apply(top_env, mpo_row, chi)
+        top_env = strategy.apply(top_env, mpo_row)
 
     return spins, key
 
@@ -452,7 +451,6 @@ def peps_sequential_sample(
                 tensors,
                 spins,
                 shape,
-                model.chi,
                 model.strategy,
                 key,
             )

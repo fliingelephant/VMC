@@ -27,6 +27,7 @@ from VMC.models.peps import (
 from VMC.preconditioners import SRPreconditioner
 from VMC.examples.real_time import build_heisenberg_square
 from VMC.utils.vmc_utils import flatten_samples, get_apply_fun
+from VMC.utils.utils import occupancy_to_spin
 
 logger = logging.getLogger(__name__)
 
@@ -262,7 +263,7 @@ def _sequential_sample_mps_with_envs(
         )
 
     samples = jnp.stack(samples, axis=1)
-    spins = 2 * samples - 1
+    spins = occupancy_to_spin(samples)
     return spins.astype(jnp.int32)
 
 
@@ -308,7 +309,7 @@ def random_flip_sample(
     if init_samples is None:
         key, subkey = jax.random.split(key)
         bits = jax.random.bernoulli(subkey, p=0.5, shape=(n_samples, n_sites))
-        samples = 2 * bits.astype(jnp.int32) - 1
+        samples = occupancy_to_spin(bits.astype(jnp.int32))
     else:
         samples = init_samples
         if samples.shape != (n_samples, n_sites):
@@ -346,12 +347,11 @@ def _peps_boundary_mps(n_cols: int, dtype: jnp.dtype) -> tuple[jax.Array, ...]:
     return tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
 
 
-@functools.partial(jax.jit, static_argnames=("shape", "chi", "strategy"))
+@functools.partial(jax.jit, static_argnames=("shape", "strategy"))
 def peps_gibbs_sweep(
     tensors: list[list[jax.Array]],
     spins: jax.Array,
     shape: tuple[int, int],
-    chi: int | None,
     strategy,
     key: jax.Array,
 ) -> tuple[jax.Array, jax.Array]:
@@ -364,7 +364,7 @@ def peps_gibbs_sweep(
     for row in range(n_rows - 1, -1, -1):
         bottom_envs[row] = bottom_env
         mpo_row = _build_row_mpo_static(tensors, spins[row], row, n_cols)
-        bottom_env = _apply_mpo_from_below(bottom_env, mpo_row, chi, strategy)
+        bottom_env = _apply_mpo_from_below(bottom_env, mpo_row, strategy)
 
     top_env = _peps_boundary_mps(n_cols, dtype)
     for row in range(n_rows):
@@ -421,7 +421,7 @@ def peps_gibbs_sweep(
 
         # Update top boundary with the updated row (reuse environments in sweep).
         mpo_row = _build_row_mpo_static(tensors, spins[row], row, n_cols)
-        top_env = strategy.apply(top_env, mpo_row, chi)
+        top_env = strategy.apply(top_env, mpo_row)
 
     return spins, key
 
@@ -452,14 +452,13 @@ def peps_sequential_sample(
                 tensors,
                 spins,
                 shape,
-                model.chi,
                 model.strategy,
                 key,
             )
         spins_batch.append(spins.reshape(n_sites))
 
     spins_batch = jnp.stack(spins_batch, axis=0)
-    spins_batch = 2 * spins_batch - 1
+    spins_batch = occupancy_to_spin(spins_batch)
     return spins_batch.astype(jnp.int32), key
 
 

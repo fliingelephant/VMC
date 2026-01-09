@@ -4,16 +4,24 @@ from __future__ import annotations
 from VMC import config  # noqa: F401 - JAX config must be imported first
 
 import logging
-from typing import Callable, Sequence
+from typing import Callable, Iterator, Sequence
 
 import jax
 import jax.numpy as jnp
 
+from VMC.utils.utils import occupancy_to_spin, spin_to_occupancy  # noqa: F401
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "DiscardBlockedSampler",
     "IndependentSetSampler",
+    "all_config_batches",
     "build_neighbor_arrays",
+    "config_codes",
+    "enumerate_all_configs",
+    "enumerate_independent_sets_grid",
+    "grid_edges",
     "independent_set_violations",
     "occupancy_to_spin",
     "spin_to_occupancy",
@@ -64,16 +72,90 @@ def build_neighbor_arrays(
     return neighbors, mask
 
 
-def occupancy_to_spin(occupancies: jax.Array) -> jax.Array:
-    """Convert 0/1 occupancy variables into -1/+1 spins."""
-    occupancies = jnp.asarray(occupancies)
-    return 2 * occupancies - 1
+def grid_edges(n_rows: int, n_cols: int) -> list[tuple[int, int]]:
+    """Return undirected edges for a 2D square lattice."""
+    if n_rows <= 0 or n_cols <= 0:
+        raise ValueError("grid dimensions must be positive.")
+    edges = []
+    for r in range(n_rows):
+        for c in range(n_cols):
+            idx = r * n_cols + c
+            if r + 1 < n_rows:
+                edges.append((idx, (r + 1) * n_cols + c))
+            if c + 1 < n_cols:
+                edges.append((idx, r * n_cols + (c + 1)))
+    return edges
 
 
-def spin_to_occupancy(spins: jax.Array) -> jax.Array:
-    """Convert -1/+1 spins into 0/1 occupancy variables."""
-    spins = jnp.asarray(spins)
-    return ((spins + 1) // 2).astype(jnp.int32)
+def _valid_row_masks(n_cols: int) -> tuple[list[int], jax.Array]:
+    masks = []
+    bits = []
+    for mask in range(1 << n_cols):
+        if mask & (mask << 1):
+            continue
+        masks.append(mask)
+        bits.append([(mask >> c) & 1 for c in range(n_cols)])
+    return masks, jnp.asarray(bits, dtype=jnp.int32)
+
+
+def enumerate_independent_sets_grid(n_rows: int, n_cols: int) -> jax.Array:
+    """Enumerate all independent sets on a 2D grid as occupancies."""
+    if n_rows <= 0 or n_cols <= 0:
+        raise ValueError("grid dimensions must be positive.")
+    masks, row_bits = _valid_row_masks(n_cols)
+    sequences: list[tuple[int, ...]] = [()]
+    for _ in range(n_rows):
+        new_sequences = []
+        for seq in sequences:
+            prev_mask = masks[seq[-1]] if seq else None
+            for idx, mask in enumerate(masks):
+                if prev_mask is None or (mask & prev_mask) == 0:
+                    new_sequences.append(seq + (idx,))
+        sequences = new_sequences
+
+    n_states = len(sequences)
+    samples = jnp.zeros((n_states, n_rows * n_cols), dtype=jnp.int32)
+    for state_idx, seq in enumerate(sequences):
+        for row_idx, mask_idx in enumerate(seq):
+            start = row_idx * n_cols
+            samples = samples.at[state_idx, start : start + n_cols].set(
+                row_bits[mask_idx]
+            )
+    return samples
+
+
+def config_codes(samples: jax.Array) -> jax.Array:
+    """Encode occupancy configurations as integer codes."""
+    bits = samples.astype(jnp.uint32)
+    shifts = jnp.arange(bits.shape[1], dtype=jnp.uint32)
+    return jnp.sum(bits * (jnp.uint32(1) << shifts), axis=-1)
+
+
+def enumerate_all_configs(num_sites: int) -> jax.Array:
+    """Enumerate all 0/1 configurations for a given number of sites."""
+    if num_sites <= 0:
+        raise ValueError("num_sites must be positive.")
+    shifts = jnp.arange(num_sites, dtype=jnp.uint32)
+    indices = jnp.arange(1 << num_sites, dtype=jnp.uint32)
+    occupancies = (indices[:, None] >> shifts) & jnp.uint32(1)
+    return occupancies.astype(jnp.int32)
+
+
+def all_config_batches(
+    num_sites: int, *, batch_size: int
+) -> Iterator[tuple[jax.Array, jax.Array]]:
+    """Generate all configurations in batches as occupancies and codes."""
+    if num_sites <= 0:
+        raise ValueError("num_sites must be positive.")
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive.")
+    total = 1 << num_sites
+    shifts = jnp.arange(num_sites, dtype=jnp.uint32)
+    for start in range(0, total, batch_size):
+        size = min(batch_size, total - start)
+        indices = jnp.arange(start, start + size, dtype=jnp.uint32)
+        occupancies = (indices[:, None] >> shifts) & jnp.uint32(1)
+        yield occupancies.astype(jnp.int32), indices
 
 
 def _blocked_counts(
@@ -91,6 +173,45 @@ def independent_set_violations(
     """Check for independent-set violations in a batch of samples."""
     blocked = _blocked_counts(samples, neighbors, mask)
     return jnp.any((samples == 1) & (blocked > 0), axis=-1)
+
+
+def _prepare_samples(
+    init_samples: jax.Array | None,
+    n_samples: int,
+    num_sites: int,
+    neighbors: jax.Array,
+    mask: jax.Array,
+) -> jax.Array:
+    """Initialize samples and validate independent-set constraints."""
+    if init_samples is None:
+        samples = jnp.zeros((n_samples, num_sites), dtype=jnp.int32)
+    else:
+        samples = jnp.asarray(init_samples, dtype=jnp.int32)
+        if samples.ndim == 1:
+            samples = jnp.tile(samples[None, :], (n_samples, 1))
+        if samples.shape != (n_samples, num_sites):
+            raise ValueError(
+                "init_samples must have shape "
+                f"({n_samples}, {num_sites}), got {samples.shape}."
+            )
+
+    violations = independent_set_violations(samples, neighbors, mask)
+    if bool(jnp.any(violations)):
+        raise ValueError("init_samples must contain only independent sets.")
+    return samples
+
+
+def _evaluate_log_prob(
+    log_prob_fn: Callable[[jax.Array], jax.Array],
+    samples: jax.Array,
+) -> jax.Array:
+    """Evaluate log_prob_fn and validate the output shape."""
+    log_prob = jnp.real(jnp.asarray(log_prob_fn(samples), dtype=jnp.float64))
+    if log_prob.shape != (samples.shape[0],):
+        raise ValueError(
+            f"log_prob_fn must return shape ({samples.shape[0]},), got {log_prob.shape}."
+        )
+    return log_prob
 
 
 class IndependentSetSampler:
@@ -144,27 +265,10 @@ class IndependentSetSampler:
         if not log_prob_is_batched:
             log_prob_fn = jax.vmap(log_prob_fn)
 
-        if init_samples is None:
-            samples = jnp.zeros((n_samples, self._num_sites), dtype=jnp.int32)
-        else:
-            samples = jnp.asarray(init_samples, dtype=jnp.int32)
-            if samples.ndim == 1:
-                samples = jnp.tile(samples[None, :], (n_samples, 1))
-            if samples.shape != (n_samples, self._num_sites):
-                raise ValueError(
-                    "init_samples must have shape "
-                    f"({n_samples}, {self._num_sites}), got {samples.shape}."
-                )
-
-        violations = independent_set_violations(samples, self._neighbors, self._mask)
-        if bool(jnp.any(violations)):
-            raise ValueError("init_samples must contain only independent sets.")
-
-        log_prob = jnp.real(jnp.asarray(log_prob_fn(samples), dtype=jnp.float64))
-        if log_prob.shape != (n_samples,):
-            raise ValueError(
-                f"log_prob_fn must return shape ({n_samples},), got {log_prob.shape}."
-            )
+        samples = _prepare_samples(
+            init_samples, n_samples, self._num_sites, self._neighbors, self._mask
+        )
+        log_prob = _evaluate_log_prob(log_prob_fn, samples)
 
         batch_idx = jnp.arange(n_samples)
 
@@ -197,6 +301,73 @@ class IndependentSetSampler:
                 - batch_log_prob
                 + jnp.log(n_flippable)
                 - jnp.log(n_flippable_prop)
+            )
+            accept = jax.random.uniform(key_u, (n_samples,)) < jnp.exp(
+                jnp.minimum(0.0, log_accept)
+            )
+            batch_samples = jnp.where(accept[:, None], proposed, batch_samples)
+            batch_log_prob = jnp.where(accept, log_prob_prop, batch_log_prob)
+            return (batch_samples, batch_log_prob, key_out), accept
+
+        (samples, log_prob, key), accepts = jax.lax.scan(
+            sweep, (samples, log_prob, key), None, length=int(n_sweeps)
+        )
+        acceptance = jnp.mean(accepts)
+        return samples, log_prob, key, acceptance
+
+
+class DiscardBlockedSampler:
+    """Metropolis sampler that discards blocked proposals."""
+
+    def __init__(self, num_sites: int, edges: Sequence[tuple[int, int]]):
+        if num_sites <= 0:
+            raise ValueError("num_sites must be positive.")
+        self._num_sites = int(num_sites)
+        self._neighbors, self._mask = build_neighbor_arrays(num_sites, edges)
+
+    @property
+    def num_sites(self) -> int:
+        return self._num_sites
+
+    def sample(
+        self,
+        log_prob_fn: Callable[[jax.Array], jax.Array],
+        *,
+        n_samples: int,
+        n_sweeps: int,
+        key: jax.Array,
+        init_samples: jax.Array | None = None,
+    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+        """Run Metropolis-Hastings sweeps with invalid moves rejected."""
+        if n_samples <= 0:
+            raise ValueError("n_samples must be positive.")
+        if n_sweeps <= 0:
+            raise ValueError("n_sweeps must be positive.")
+
+        samples = _prepare_samples(
+            init_samples, n_samples, self._num_sites, self._neighbors, self._mask
+        )
+        log_prob = _evaluate_log_prob(log_prob_fn, samples)
+
+        batch_idx = jnp.arange(n_samples)
+
+        def sweep(carry, _):
+            batch_samples, batch_log_prob, key_in = carry
+            key_out, key_site, key_u = jax.random.split(key_in, 3)
+            site_idx = jax.random.randint(
+                key_site, (n_samples,), 0, self._num_sites
+            )
+
+            proposed = batch_samples.at[batch_idx, site_idx].set(
+                1 - batch_samples[batch_idx, site_idx]
+            )
+            invalid = independent_set_violations(proposed, self._neighbors, self._mask)
+            log_prob_prop = jnp.real(
+                jnp.asarray(log_prob_fn(proposed), dtype=jnp.float64)
+            )
+
+            log_accept = jnp.where(
+                invalid, -jnp.inf, log_prob_prop - batch_log_prob
             )
             accept = jax.random.uniform(key_u, (n_samples,)) < jnp.exp(
                 jnp.minimum(0.0, log_accept)

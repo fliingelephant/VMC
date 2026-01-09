@@ -12,7 +12,7 @@ import jax.numpy as jnp
 from flax import nnx
 
 from VMC.models.mps import SimpleMPS
-from VMC.models.peps import NoTruncation, SimplePEPS
+from VMC.models.peps import SimplePEPS, ZipUp
 from VMC.utils import (
     DiscardBlockedSampler,
     IndependentSetSampler,
@@ -37,6 +37,7 @@ SEEDS = (0, 1, 2)
 
 MPS_BOND_DIM = 4
 PEPS_BOND_DIM = 1
+PEPS_TRUNCATE_BOND_DIM = 2 * PEPS_BOND_DIM**2
 DTYPE = jnp.complex128
 METRICS: list[dict[str, float | int | str]] = []
 
@@ -761,7 +762,9 @@ def main() -> None:
             rngs=nnx.Rngs(seed),
             shape=shape_full,
             bond_dim=PEPS_BOND_DIM,
-            contraction_strategy=NoTruncation(),
+            contraction_strategy=ZipUp(
+                truncate_bond_dimension=PEPS_TRUNCATE_BOND_DIM
+            ),
             dtype=DTYPE,
         )
         peps_full_log_prob = build_log_prob_fn(peps_full)
@@ -809,7 +812,9 @@ def main() -> None:
             rngs=nnx.Rngs(seed),
             shape=shape_fullsum,
             bond_dim=PEPS_BOND_DIM,
-            contraction_strategy=NoTruncation(),
+            contraction_strategy=ZipUp(
+                truncate_bond_dimension=PEPS_TRUNCATE_BOND_DIM
+            ),
             dtype=DTYPE,
         )
         peps_fullsum_log_prob = build_log_prob_fn(peps_fullsum)
@@ -831,7 +836,9 @@ def main() -> None:
                 rngs=nnx.Rngs(seed),
                 shape=cfg["shape"],
                 bond_dim=PEPS_BOND_DIM,
-                contraction_strategy=NoTruncation(),
+                contraction_strategy=ZipUp(
+                    truncate_bond_dimension=PEPS_TRUNCATE_BOND_DIM
+                ),
                 dtype=DTYPE,
             )
             peps_compare_log_prob = build_log_prob_fn(peps_compare)

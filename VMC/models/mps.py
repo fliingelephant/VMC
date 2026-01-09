@@ -13,6 +13,8 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
+from VMC.utils.utils import spin_to_occupancy
+
 if TYPE_CHECKING:
     from jax.typing import DTypeLike
 
@@ -99,7 +101,7 @@ class SimpleMPS(nnx.Module):
         Returns:
             Complex amplitudes with shape (batch,).
         """
-        indices = ((samples + 1) // 2).astype(jnp.int32)  # Map spins {-1, 1} -> {0, 1}
+        indices = spin_to_occupancy(samples)  # Map spins {-1, 1} -> {0, 1}
         state = jnp.ones((indices.shape[0], 1), dtype=tensors[0].dtype)
         for site, tensor in enumerate(tensors):
             mats = tensor[indices[:, site]]  # (batch, D_left, D_right)

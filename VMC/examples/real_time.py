@@ -26,6 +26,7 @@ from VMC.models.mps import SimpleMPS
 from VMC.models.peps import SimplePEPS
 from VMC.preconditioners import solve_cholesky
 from VMC.utils.vmc_utils import get_apply_fun
+from VMC.utils.utils import occupancy_to_spin
 
 
 logger = logging.getLogger(__name__)
@@ -91,7 +92,7 @@ def dense_exact_dynamics(psi0, hi, H, dt, n_steps):
 
 def random_bitstring(key, n_sites: int):
     bits = jax.random.bernoulli(key, p=0.5, shape=(n_sites,)).astype(jnp.int32)
-    spins = 2 * bits - 1
+    spins = occupancy_to_spin(bits)
     return spins
 
 
@@ -435,8 +436,8 @@ def main():
     n_sites = length * length
     mps_bond = 16
     peps_bond = 4
-    # Use zip-up PEPS contraction with a moderate truncation chi.
-    chi = peps_bond * peps_bond
+    # Use zip-up PEPS contraction with a moderate truncation dimension.
+    truncate_bond_dimension = peps_bond * peps_bond
     T = 0.02
     n_steps = 10  # dt = T / n_steps = 0.002
 

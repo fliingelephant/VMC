@@ -811,6 +811,7 @@ def test_gradient_correctness():
     amp_fn_zipup = make_peps_amplitude(
         shape, ZipUp(truncate_bond_dimension=truncate_bond_dimension_test)
     )
+    grad_zipup = None
 
     def amplitude_zipup_custom(flat_params):
         tensors_nested = flat_to_tensors(flat_params, tensors)
@@ -832,6 +833,7 @@ def test_gradient_correctness():
     amp_fn_dm = make_peps_amplitude(
         shape, DensityMatrix(truncate_bond_dimension=truncate_bond_dimension_test)
     )
+    grad_dm = None
 
     def amplitude_dm_custom(flat_params):
         tensors_nested = flat_to_tensors(flat_params, tensors)
@@ -847,6 +849,26 @@ def test_gradient_correctness():
         logger.info("   PASS: Density matrix truncation works with custom VJP!")
     except Exception as exc:
         logger.warning("   FAIL: Density matrix error: %s", exc)
+
+    # Test 5: Compare truncation custom VJP gradients to exact no-truncation autodiff
+    logger.info(
+        "\n5. Comparing truncation gradients to no-truncation autodiff..."
+    )
+    for name, grad in (
+        ("ZipUp", grad_zipup),
+        ("DensityMatrix", grad_dm),
+    ):
+        if grad is None:
+            logger.warning("   %s: skipped (gradient not available)", name)
+            continue
+        trunc_rel_error = jnp.linalg.norm(grad - grad_autodiff) / (
+            jnp.linalg.norm(grad_autodiff) + 1e-10
+        )
+        logger.info(
+            "   %s vs no-truncation rel diff: %.6e",
+            name,
+            float(trunc_rel_error),
+        )
 
     logger.info("\n%s", "=" * 60)
     logger.info("Custom VJP tests complete")

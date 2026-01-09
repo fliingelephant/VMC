@@ -27,6 +27,7 @@ from VMC.models.peps import (
 from VMC.preconditioners import SRPreconditioner
 from VMC.examples.real_time import build_heisenberg_square
 from VMC.utils.vmc_utils import flatten_samples, get_apply_fun
+from VMC.utils.utils import occupancy_to_spin
 
 logger = logging.getLogger(__name__)
 
@@ -262,7 +263,7 @@ def _sequential_sample_mps_with_envs(
         )
 
     samples = jnp.stack(samples, axis=1)
-    spins = 2 * samples - 1
+    spins = occupancy_to_spin(samples)
     return spins.astype(jnp.int32)
 
 
@@ -308,7 +309,7 @@ def random_flip_sample(
     if init_samples is None:
         key, subkey = jax.random.split(key)
         bits = jax.random.bernoulli(subkey, p=0.5, shape=(n_samples, n_sites))
-        samples = 2 * bits.astype(jnp.int32) - 1
+        samples = occupancy_to_spin(bits.astype(jnp.int32))
     else:
         samples = init_samples
         if samples.shape != (n_samples, n_sites):
@@ -457,7 +458,7 @@ def peps_sequential_sample(
         spins_batch.append(spins.reshape(n_sites))
 
     spins_batch = jnp.stack(spins_batch, axis=0)
-    spins_batch = 2 * spins_batch - 1
+    spins_batch = occupancy_to_spin(spins_batch)
     return spins_batch.astype(jnp.int32), key
 
 

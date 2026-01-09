@@ -633,7 +633,7 @@ class SimplePEPS(nnx.Module):
 
                 if is_complex:
                     key_re, key_im = rngs.params(), rngs.params()
-                    tensor_val = (
+                    tensor_val = 1/2 * (
                         jax.random.uniform(key_re, shape_rc, dtype=real_dtype)
                         + complex_unit
                         * jax.random.uniform(key_im, shape_rc, dtype=real_dtype)

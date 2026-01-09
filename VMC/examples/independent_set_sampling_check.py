@@ -48,6 +48,9 @@ SWEEP_FACTOR_PEPS_FULLSUM = 80
 SWEEP_FACTOR_MPS_COMPARE = 20
 SWEEP_FACTOR_PEPS_COMPARE = 40
 
+TFIM_COUPLING = 1.0
+TFIM_FIELD = 0.5
+
 
 def get_mh_metrics() -> list[dict[str, float | int | str]]:
     """Return collected MH statistical metrics."""
@@ -154,6 +157,39 @@ def heisenberg_local_energy(
         return energy_acc, None
 
     energy, _ = jax.lax.scan(scan_fn, energy, edge_idx)
+    return energy
+
+
+def tfim_local_energy(
+    log_amp_fn,
+    spins: jax.Array,
+    edges: Sequence[tuple[int, int]],
+    *,
+    coupling: float,
+    field: float,
+) -> jax.Array:
+    """Compute transverse-field Ising local energy for a batch of spins."""
+    log_amp = batched_eval(log_amp_fn, spins, batch_size=BATCH_SIZE)
+    energy = jnp.zeros((spins.shape[0],), dtype=log_amp.dtype)
+    if len(edges) > 0:
+        edge_idx = jnp.asarray(edges, dtype=jnp.int32)
+        s_i = spins[:, edge_idx[:, 0]]
+        s_j = spins[:, edge_idx[:, 1]]
+        energy = energy + 0.25 * coupling * jnp.sum(s_i * s_j, axis=1)
+
+    site_idx = jnp.arange(spins.shape[1], dtype=jnp.int32)
+
+    def scan_fn(energy_acc, site):
+        s_i = spins[:, site]
+        flipped = spins.at[:, site].set(-s_i)
+        log_amp_flipped = batched_eval(
+            log_amp_fn, flipped, batch_size=BATCH_SIZE
+        )
+        ratio = jnp.exp(log_amp_flipped - log_amp)
+        energy_acc = energy_acc + 0.5 * field * ratio
+        return energy_acc, None
+
+    energy, _ = jax.lax.scan(scan_fn, energy, site_idx)
     return energy
 
 
@@ -513,6 +549,14 @@ def run_energy_check(
     full_spins = occupancy_to_spin(full_samples)
     local_energy_full = heisenberg_local_energy(log_amp_fn, full_spins, edges)
     exact_energy = weighted_mean(log_prob_full, local_energy_full)
+    local_energy_full_tfim = tfim_local_energy(
+        log_amp_fn,
+        full_spins,
+        edges,
+        coupling=TFIM_COUPLING,
+        field=TFIM_FIELD,
+    )
+    exact_energy_tfim = weighted_mean(log_prob_full, local_energy_full_tfim)
 
     samples, _, _, acceptance = sampler.sample(
         log_prob_fn,
@@ -526,20 +570,46 @@ def run_energy_check(
         log_amp_fn, sample_spins, edges
     )
     mean_energy, err_energy = sample_mean_and_error(local_energy_samples)
+    local_energy_samples_tfim = tfim_local_energy(
+        log_amp_fn,
+        sample_spins,
+        edges,
+        coupling=TFIM_COUPLING,
+        field=TFIM_FIELD,
+    )
+    mean_energy_tfim, err_energy_tfim = sample_mean_and_error(
+        local_energy_samples_tfim
+    )
 
     logger.info(
-        "%s seed=%d energy acceptance=%.3f energy=%.6f exact=%.6f",
+        "%s seed=%d Heisenberg acceptance=%.3f energy=%.6f exact=%.6f",
         model_name,
         seed,
         float(acceptance),
         float(mean_energy),
         float(jnp.real(exact_energy)),
     )
+    logger.info(
+        "%s seed=%d TFIM(J=%.2f,h=%.2f) acceptance=%.3f energy=%.6f exact=%.6f",
+        model_name,
+        seed,
+        TFIM_COUPLING,
+        TFIM_FIELD,
+        float(acceptance),
+        float(mean_energy_tfim),
+        float(jnp.real(exact_energy_tfim)),
+    )
     assert_match(
-        f"{model_name} seed={seed} energy",
+        f"{model_name} seed={seed} Heisenberg energy",
         mean_energy,
         jnp.real(exact_energy),
         err_energy,
+    )
+    assert_match(
+        f"{model_name} seed={seed} TFIM energy",
+        mean_energy_tfim,
+        jnp.real(exact_energy_tfim),
+        err_energy_tfim,
     )
 
 

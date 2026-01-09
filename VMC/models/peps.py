@@ -62,6 +62,16 @@ class ContractionStrategy(abc.ABC):
             New MPS tuple after applying the MPO.
         """
 
+    def with_truncate_bond_dimension(
+        self, truncate_bond_dimension: int
+    ) -> "ContractionStrategy":
+        """Return a strategy instance that uses the requested truncation size."""
+        if truncate_bond_dimension <= 0:
+            raise ValueError("truncate_bond_dimension must be positive.")
+        if self.truncate_bond_dimension == truncate_bond_dimension:
+            return self
+        return type(self)(truncate_bond_dimension=truncate_bond_dimension)
+
 
 class NoTruncation(ContractionStrategy):
     """No truncation strategy - exact contraction."""

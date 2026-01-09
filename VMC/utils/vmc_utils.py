@@ -63,7 +63,10 @@ def batched_eval(
         return None, eval_fn(batch)
 
     _, output_batches = jax.lax.scan(scan_fn, None, batches)
-    outputs = output_batches.reshape(-1)[:n_samples]
+    output_shape = output_batches.shape
+    outputs = output_batches.reshape(
+        output_shape[0] * output_shape[1], *output_shape[2:]
+    )[:n_samples]
     return outputs
 
 

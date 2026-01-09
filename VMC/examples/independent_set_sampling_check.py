@@ -155,7 +155,6 @@ def heisenberg_local_energy(
         ratio = jnp.exp(log_amp_flipped - log_amp)
         energy_acc = energy_acc + 0.5 * jnp.where(s_i != s_j, ratio, 0.0)
         return energy_acc, None
-
     energy, _ = jax.lax.scan(scan_fn, energy, edge_idx)
     return energy
 

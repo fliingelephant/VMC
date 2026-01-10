@@ -5,14 +5,16 @@ The goal is to reuse environments aggressively while keeping the transition kern
 
 ## What was implemented
 
-- **MPS**: `_sequential_mh_mps_sweep` in `examples/real_time_minimal.py` performs one sweep.
+- **MPS**: `_sequential_mps_sweep` in `samplers/sequential.py` performs one sweep.
+  `sequential_sample_mps` wraps burn-in and sampling loops.
   - Precompute right environments for the current configuration.
   - Sweep sites left-to-right, propose a single-spin flip, and accept with
     `min(1, |psi_new|^2 / |psi_old|^2)`.
   - Update the left environment immediately after acceptance so later sites reuse the cache.
   - Tensors are padded to a uniform bond dimension so the sweep can run inside a JAX scan.
 
-- **PEPS**: `peps_sequential_sweep` in `examples/real_time_minimal.py` performs one sweep.
+- **PEPS**: `peps_sequential_sweep` in `samplers/sequential.py` performs one sweep.
+  `peps_sequential_sample` wraps burn-in and sampling loops.
   - Build bottom environments once per sweep.
   - For each row, build right environments once and reuse a left environment while moving left-to-right.
   - Propose a single-spin flip at each site and accept with the same ratio.

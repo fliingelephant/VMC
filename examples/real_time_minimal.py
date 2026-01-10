@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from VMC import config  # noqa: F401 - JAX config must be imported first
 
-import functools
 import logging
 import time
 
@@ -15,16 +14,9 @@ from flax import nnx
 
 from VMC.drivers.custom_driver import CustomTDVP_SR, RealTime
 from VMC.models.mps import SimpleMPS
-from VMC.models.peps import (
-    SimplePEPS,
-    _apply_mpo_from_below,
-    _build_row_mpo_static,
-    _compute_single_gradient,
-    _contract_column_transfer,
-    _contract_left_partial,
-    _contract_right_partial,
-)
+from VMC.models.peps import SimplePEPS
 from VMC.preconditioners import SRPreconditioner
+from VMC.samplers.sequential import peps_sequential_sample, sequential_sample_mps
 from VMC.examples.real_time import build_heisenberg_square
 from VMC.utils.vmc_utils import flatten_samples, get_apply_fun
 
@@ -192,115 +184,6 @@ def _rk4_update_with_samples(
     return params_new, stats
 
 
-def _pad_mps_tensors(
-    tensors: list[jax.Array],
-    bond_dim: int,
-) -> jax.Array:
-    """Pad MPS tensors to a uniform bond dimension for JAX scans."""
-    padded = []
-    for tensor in tensors:
-        left_dim = tensor.shape[1]
-        right_dim = tensor.shape[2]
-        block = jnp.zeros((2, bond_dim, bond_dim), dtype=tensor.dtype)
-        block = block.at[:, :left_dim, :right_dim].set(tensor)
-        padded.append(block)
-    return jnp.stack(padded, axis=0)
-
-
-@functools.partial(jax.jit, static_argnames=("n_sites",))
-def _sequential_mh_mps_sweep(
-    tensors: jax.Array,
-    indices: jax.Array,
-    *,
-    key: jax.Array,
-    n_sites: int,
-) -> tuple[jax.Array, jax.Array]:
-    """Run a sequential Metropolis sweep with fixed site order."""
-    bond_dim = tensors.shape[-1]
-    right_end = jnp.zeros((bond_dim,), dtype=tensors.dtype)
-    right_end = right_end.at[0].set(1.0)
-
-    site_ids_rev = jnp.arange(n_sites - 1, -1, -1)
-
-    def right_step(carry, site):
-        tensor = tensors[site, indices[site]]
-        right_env = jnp.einsum("ij,j->i", tensor, carry)
-        return right_env, right_env
-
-    _, right_envs_rev = jax.lax.scan(right_step, right_end, site_ids_rev)
-    right_envs = jnp.flip(right_envs_rev, axis=0)
-    right_envs = jnp.concatenate([right_envs, right_end[None, :]], axis=0)
-
-    left_env0 = right_end
-    site_ids = jnp.arange(n_sites)
-
-    def sweep_step(carry, site):
-        indices, left_env, key = carry
-        right_env = right_envs[site + 1]
-        cur_idx = indices[site]
-        flip_idx = 1 - cur_idx
-        tensor_cur = tensors[site, cur_idx]
-        tensor_flip = tensors[site, flip_idx]
-        amp_cur = jnp.einsum("i,ij,j->", left_env, tensor_cur, right_env)
-        amp_flip = jnp.einsum("i,ij,j->", left_env, tensor_flip, right_env)
-        weight_cur = jnp.abs(amp_cur) ** 2
-        weight_flip = jnp.abs(amp_flip) ** 2
-        ratio = jnp.where(
-            weight_cur > 0.0,
-            weight_flip / weight_cur,
-            jnp.where(weight_flip > 0.0, jnp.inf, 0.0),
-        )
-
-        key, subkey = jax.random.split(key)
-        accept = jax.random.uniform(subkey) < jnp.minimum(1.0, ratio)
-        new_idx = jnp.where(accept, flip_idx, cur_idx)
-        indices = indices.at[site].set(new_idx)
-
-        tensor_sel = jnp.where(accept, tensor_flip, tensor_cur)
-        left_env = jnp.einsum("i,ij->j", left_env, tensor_sel)
-        return (indices, left_env, key), None
-
-    (indices, _, key), _ = jax.lax.scan(
-        sweep_step, (indices, left_env0, key), site_ids
-    )
-    return indices, key
-
-
-def sequential_sample_mps(
-    model: SimpleMPS,
-    *,
-    n_samples: int,
-    key: jax.Array,
-    n_sweeps: int = 1,
-) -> jax.Array:
-    """Sample spins from an MPS with sequential Metropolis sweeps."""
-    if n_samples <= 0:
-        raise ValueError("n_samples must be positive.")
-    if n_sweeps <= 0:
-        raise ValueError("n_sweeps must be positive.")
-    tensors = [jnp.asarray(t) for t in model.tensors]
-    n_sites = len(tensors)
-    tensors_padded = _pad_mps_tensors(tensors, model.bond_dim)
-    spins_batch = []
-
-    key, subkey = jax.random.split(key)
-    indices = jax.random.bernoulli(subkey, 0.5, shape=(n_sites,)).astype(jnp.int32)
-
-    for _ in range(int(n_samples)):
-        for _ in range(int(n_sweeps)):
-            indices, key = _sequential_mh_mps_sweep(
-                tensors_padded,
-                indices,
-                key=key,
-                n_sites=n_sites,
-            )
-        spins_batch.append(indices)
-
-    spins_batch = jnp.stack(spins_batch, axis=0)
-    spins_batch = 2 * spins_batch - 1
-    return spins_batch.astype(jnp.int32)
-
-
 def random_flip_sample(
     vstate: nk.vqs.MCState,
     *,
@@ -358,132 +241,6 @@ def random_flip_sample(
     )
     acceptance = jnp.mean(accepts)
     return samples, logpsi, key, acceptance
-
-
-def _peps_boundary_mps(n_cols: int, dtype: jnp.dtype) -> tuple[jax.Array, ...]:
-    return tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
-
-
-@functools.partial(jax.jit, static_argnames=("shape", "chi", "strategy"))
-def peps_sequential_sweep(
-    tensors: list[list[jax.Array]],
-    spins: jax.Array,
-    shape: tuple[int, int],
-    chi: int | None,
-    strategy,
-    key: jax.Array,
-) -> tuple[jax.Array, jax.Array]:
-    """Run one sequential Metropolis sweep over PEPS sites."""
-    n_rows, n_cols = shape
-    dtype = tensors[0][0].dtype
-
-    bottom_envs = [None] * n_rows
-    bottom_env = _peps_boundary_mps(n_cols, dtype)
-    for row in range(n_rows - 1, -1, -1):
-        bottom_envs[row] = bottom_env
-        mpo_row = _build_row_mpo_static(tensors, spins[row], row, n_cols)
-        bottom_env = _apply_mpo_from_below(bottom_env, mpo_row, chi, strategy)
-
-    top_env = _peps_boundary_mps(n_cols, dtype)
-    for row in range(n_rows):
-        bottom_env = bottom_envs[row]
-        mpo_row = _build_row_mpo_static(tensors, spins[row], row, n_cols)
-
-        transfers = []
-        for col in range(n_cols):
-            transfer = _contract_column_transfer(
-                top_env[col], mpo_row[col], bottom_env[col]
-            )
-            transfers.append(transfer)
-
-        right_envs = [None] * n_cols
-        right_envs[n_cols - 1] = jnp.ones((1, 1, 1), dtype=dtype)
-        env = right_envs[n_cols - 1]
-        for col in range(n_cols - 2, -1, -1):
-            env = _contract_right_partial(transfers[col + 1], env)
-            right_envs[col] = env
-
-        left_env = jnp.ones((1, 1, 1), dtype=dtype)
-        for col in range(n_cols):
-            env_grad = _compute_single_gradient(
-                left_env,
-                right_envs[col],
-                top_env[col],
-                bottom_env[col],
-                mpo_row[col].shape,
-            )
-            site_tensor = tensors[row][col]
-            def amp_for_phys(site_tensor_phys: jax.Array) -> jax.Array:
-                mpo = jnp.transpose(site_tensor_phys, (2, 3, 0, 1))
-                return jnp.einsum("udlr,lrud->", env_grad, mpo)
-
-            amps = jax.vmap(amp_for_phys, in_axes=0)(site_tensor)
-            weights = jnp.abs(amps) ** 2
-            weights = jnp.maximum(weights, 0.0)
-            cur_idx = spins[row, col]
-            flip_idx = 1 - cur_idx
-            weight_cur = weights[cur_idx]
-            weight_flip = weights[flip_idx]
-            ratio = jnp.where(
-                weight_cur > 0.0,
-                weight_flip / weight_cur,
-                jnp.where(weight_flip > 0.0, jnp.inf, 0.0),
-            )
-
-            key, subkey = jax.random.split(key)
-            accept = jax.random.uniform(subkey) < jnp.minimum(1.0, ratio)
-            new_idx = jnp.where(accept, flip_idx, cur_idx)
-            spins = spins.at[row, col].set(new_idx)
-
-            mpo_sel = jnp.transpose(site_tensor[new_idx], (2, 3, 0, 1))
-            transfer = _contract_column_transfer(
-                top_env[col], mpo_sel, bottom_env[col]
-            )
-            left_env = _contract_left_partial(left_env, transfer)
-
-        # Update top boundary with the updated row (reuse environments in sweep).
-        mpo_row = _build_row_mpo_static(tensors, spins[row], row, n_cols)
-        top_env = strategy.apply(top_env, mpo_row, chi)
-
-    return spins, key
-
-
-def peps_sequential_sample(
-    model: SimplePEPS,
-    *,
-    n_samples: int,
-    key: jax.Array,
-    n_sweeps: int = 1,
-) -> tuple[jax.Array, jax.Array]:
-    """Generate samples using sequential Metropolis sweeps."""
-    if n_samples <= 0:
-        raise ValueError("n_samples must be positive.")
-    if n_sweeps <= 0:
-        raise ValueError("n_sweeps must be positive.")
-
-    shape = model.shape
-    n_sites = int(shape[0] * shape[1])
-    tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
-    spins_batch = []
-
-    key, subkey = jax.random.split(key)
-    spins = jax.random.bernoulli(subkey, 0.5, shape=shape).astype(jnp.int32)
-
-    for _ in range(int(n_samples)):
-        for _ in range(int(n_sweeps)):
-            spins, key = peps_sequential_sweep(
-                tensors,
-                spins,
-                shape,
-                model.chi,
-                model.strategy,
-                key,
-            )
-        spins_batch.append(spins.reshape(n_sites))
-
-    spins_batch = jnp.stack(spins_batch, axis=0)
-    spins_batch = 2 * spins_batch - 1
-    return spins_batch.astype(jnp.int32), key
 
 
 def minimal_real_time_mcmc_demo(

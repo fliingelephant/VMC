@@ -33,7 +33,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from examples.real_time_minimal import sequential_sample_mps, peps_sequential_sample
+from VMC.samplers.sequential import peps_sequential_sample, sequential_sample_mps
 from models.mps import SimpleMPS
 from models.peps import SimplePEPS
 

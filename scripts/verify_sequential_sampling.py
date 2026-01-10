@@ -35,14 +35,8 @@ import jax.numpy as jnp
 import netket as nk
 
 from examples.real_time import build_heisenberg_square
-from examples.real_time_minimal import (
-    _sequential_mh_mps_sweep,
-    _pad_mps_tensors,
-    peps_sequential_sweep,
-    random_flip_sample,
-    sequential_sample_mps,
-    peps_sequential_sample,
-)
+from examples.real_time_minimal import random_flip_sample
+from VMC.samplers.sequential import peps_sequential_sample, sequential_sample_mps
 from models.mps import SimpleMPS
 from models.peps import SimplePEPS
 from utils.vmc_utils import get_apply_fun
@@ -75,30 +69,13 @@ def _sequential_mps_samples(
     burn_in: int,
     key: jax.Array,
 ) -> jax.Array:
-    tensors = [jnp.asarray(t) for t in model.tensors]
-    n_sites = len(tensors)
-    tensors_padded = _pad_mps_tensors(tensors, model.bond_dim)
-    key, subkey = jax.random.split(key)
-    indices = jax.random.bernoulli(subkey, 0.5, shape=(n_sites,)).astype(jnp.int32)
-    for _ in range(int(burn_in)):
-        indices, key = _sequential_mh_mps_sweep(
-            tensors_padded,
-            indices,
-            key=key,
-            n_sites=n_sites,
-        )
-    samples = []
-    for _ in range(int(n_samples)):
-        for _ in range(int(n_sweeps)):
-            indices, key = _sequential_mh_mps_sweep(
-                tensors_padded,
-                indices,
-                key=key,
-                n_sites=n_sites,
-            )
-        samples.append(indices)
-    samples = jnp.stack(samples, axis=0)
-    return 2 * samples - 1
+    return sequential_sample_mps(
+        model,
+        n_samples=n_samples,
+        n_sweeps=n_sweeps,
+        burn_in=burn_in,
+        key=key,
+    )
 
 
 def _sequential_peps_samples(
@@ -109,33 +86,14 @@ def _sequential_peps_samples(
     burn_in: int,
     key: jax.Array,
 ) -> jax.Array:
-    shape = model.shape
-    tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
-    key, subkey = jax.random.split(key)
-    spins = jax.random.bernoulli(subkey, 0.5, shape=shape).astype(jnp.int32)
-    for _ in range(int(burn_in)):
-        spins, key = peps_sequential_sweep(
-            tensors,
-            spins,
-            shape,
-            model.chi,
-            model.strategy,
-            key,
-        )
-    samples = []
-    for _ in range(int(n_samples)):
-        for _ in range(int(n_sweeps)):
-            spins, key = peps_sequential_sweep(
-                tensors,
-                spins,
-                shape,
-                model.chi,
-                model.strategy,
-                key,
-            )
-        samples.append(spins.reshape(-1))
-    samples = jnp.stack(samples, axis=0)
-    return 2 * samples - 1
+    samples, _ = peps_sequential_sample(
+        model,
+        n_samples=n_samples,
+        n_sweeps=n_sweeps,
+        burn_in=burn_in,
+        key=key,
+    )
+    return samples
 
 
 def _build_vstate(

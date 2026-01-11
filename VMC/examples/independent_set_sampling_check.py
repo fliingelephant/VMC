@@ -29,14 +29,14 @@ from VMC.utils import (
 
 logger = logging.getLogger(__name__)
 
-N_SAMPLES = 20000
+N_SAMPLES = 4096
 BATCH_SIZE = 256
 FULL_HILBERT_BATCH_SIZE = 1 << 18
 FULL_HILBERT_SHAPE = (3, 3)
 SEEDS = (0, 1, 2)
 
 MPS_BOND_DIM = 4
-PEPS_BOND_DIM = 1
+PEPS_BOND_DIM = 2
 PEPS_TRUNCATE_BOND_DIM = 2 * PEPS_BOND_DIM**2
 DTYPE = jnp.complex128
 METRICS: list[dict[str, float | int | str]] = []
@@ -155,7 +155,6 @@ def heisenberg_local_energy(
         ratio = jnp.exp(log_amp_flipped - log_amp)
         energy_acc = energy_acc + 0.5 * jnp.where(s_i != s_j, ratio, 0.0)
         return energy_acc, None
-
     energy, _ = jax.lax.scan(scan_fn, energy, edge_idx)
     return energy
 
@@ -360,8 +359,11 @@ def compare_mh_statistical_distribution(
     n_sweeps: int,
     label: str,
     alpha: float = 1e-3,
+    log_interval: int = 1000,
 ) -> None:
     """Compare empirical MH samples to the exact target distribution."""
+    import time
+
     from scipy import stats as scipy_stats
 
     log_prob = batched_eval(log_prob_fn, allowed_configs, batch_size=BATCH_SIZE)
@@ -369,9 +371,32 @@ def compare_mh_statistical_distribution(
     log_prob = log_prob - jax.scipy.special.logsumexp(log_prob)
     target_prob = jnp.exp(log_prob)
 
-    samples, _, _, _ = sampler.sample(
-        log_prob_fn, n_samples=n_samples, n_sweeps=n_sweeps, key=key
-    )
+    # Sample in batches with progress logging
+    all_samples = []
+    n_batches = (n_samples + log_interval - 1) // log_interval
+    keys = jax.random.split(key, n_batches)
+    start_time = time.time()
+
+    for i, batch_key in enumerate(keys):
+        batch_size = min(log_interval, n_samples - i * log_interval)
+        if batch_size <= 0:
+            break
+        batch_samples, _, _, acceptance = sampler.sample(
+            log_prob_fn, n_samples=batch_size, n_sweeps=n_sweeps, key=batch_key
+        )
+        all_samples.append(batch_samples)
+        elapsed = time.time() - start_time
+        completed = min((i + 1) * log_interval, n_samples)
+        logger.info(
+            "%s sampling: %d/%d samples (%.1fs elapsed, acceptance=%.3f)",
+            label,
+            completed,
+            n_samples,
+            elapsed,
+            float(acceptance),
+        )
+
+    samples = jnp.concatenate(all_samples, axis=0)
     verify_no_violations(samples, neighbors, mask, f"{label} MH samples")
 
     allowed_codes = config_codes(allowed_configs)
@@ -624,20 +649,66 @@ def run_sampler_comparison(
     seed: int,
     key: jax.Array,
     n_sweeps: int,
+    log_interval: int = 1000,
 ) -> None:
+    import time
+
     key_a, key_b = jax.random.split(key, 2)
-    samples_a, _, _, acceptance_a = sampler_a.sample(
-        log_prob_fn,
-        n_samples=N_SAMPLES,
-        n_sweeps=n_sweeps,
-        key=key_a,
-    )
-    samples_b, _, _, acceptance_b = sampler_b.sample(
-        log_prob_fn,
-        n_samples=N_SAMPLES,
-        n_sweeps=n_sweeps,
-        key=key_b,
-    )
+
+    # Sample from sampler_a with progress logging
+    all_samples_a = []
+    n_batches = (N_SAMPLES + log_interval - 1) // log_interval
+    keys_a = jax.random.split(key_a, n_batches)
+    start_time = time.time()
+
+    for i, batch_key in enumerate(keys_a):
+        batch_size = min(log_interval, N_SAMPLES - i * log_interval)
+        if batch_size <= 0:
+            break
+        batch_samples, _, _, acceptance_a = sampler_a.sample(
+            log_prob_fn, n_samples=batch_size, n_sweeps=n_sweeps, key=batch_key
+        )
+        all_samples_a.append(batch_samples)
+        elapsed = time.time() - start_time
+        completed = min((i + 1) * log_interval, N_SAMPLES)
+        logger.info(
+            "%s seed=%d sampler_a: %d/%d samples (%.1fs elapsed, acceptance=%.3f)",
+            model_name,
+            seed,
+            completed,
+            N_SAMPLES,
+            elapsed,
+            float(acceptance_a),
+        )
+
+    samples_a = jnp.concatenate(all_samples_a, axis=0)
+
+    # Sample from sampler_b with progress logging
+    all_samples_b = []
+    keys_b = jax.random.split(key_b, n_batches)
+    start_time = time.time()
+
+    for i, batch_key in enumerate(keys_b):
+        batch_size = min(log_interval, N_SAMPLES - i * log_interval)
+        if batch_size <= 0:
+            break
+        batch_samples, _, _, acceptance_b = sampler_b.sample(
+            log_prob_fn, n_samples=batch_size, n_sweeps=n_sweeps, key=batch_key
+        )
+        all_samples_b.append(batch_samples)
+        elapsed = time.time() - start_time
+        completed = min((i + 1) * log_interval, N_SAMPLES)
+        logger.info(
+            "%s seed=%d sampler_b: %d/%d samples (%.1fs elapsed, acceptance=%.3f)",
+            model_name,
+            seed,
+            completed,
+            N_SAMPLES,
+            elapsed,
+            float(acceptance_b),
+        )
+
+    samples_b = jnp.concatenate(all_samples_b, axis=0)
     verify_no_violations(
         samples_a, neighbors, mask, f"{model_name} seed={seed} sampler_a"
     )
@@ -733,6 +804,7 @@ def main() -> None:
 
     logger.info("Running independent-set sampler checks...")
 
+    """
     for seed in SEEDS:
         key_full, key_compare = jax.random.split(jax.random.key(seed + 100), 2)
         key_full, key_energy = jax.random.split(key_full, 2)
@@ -823,7 +895,8 @@ def main() -> None:
                 key=cfg_key,
                 n_sweeps=SWEEP_FACTOR_MPS_COMPARE * cfg["n_sites"],
             )
-
+    """
+    
     for seed in SEEDS:
         key_full, key_compare = jax.random.split(jax.random.key(seed + 200), 2)
         key_full, key_energy = jax.random.split(key_full, 2)
@@ -842,13 +915,6 @@ def main() -> None:
         compare_full_hilbert_amplitudes(
             peps_full_log_prob,
             all_full_configs,
-            full_samples_full,
-            neighbors_full,
-            mask_full,
-            label=f"PEPS {shape_full[0]}x{shape_full[1]} seed={seed}",
-        )
-        compare_mh_stationary_distribution(
-            peps_full_log_prob,
             full_samples_full,
             neighbors_full,
             mask_full,

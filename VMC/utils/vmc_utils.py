@@ -8,7 +8,7 @@ from __future__ import annotations
 from VMC import config  # noqa: F401 - JAX config must be imported first
 
 import functools
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 import jax
 import jax.numpy as jnp
@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "flatten_samples",
+    "batched_eval",
     "build_dense_jac",
     "build_dense_jac_from_state",
     "get_apply_fun",
@@ -35,6 +36,41 @@ def flatten_samples(samples: jax.Array) -> jax.Array:
     """
     samples = jnp.asarray(samples)
     return samples.reshape(-1, samples.shape[-1])
+
+
+def batched_eval(
+    eval_fn: Callable[[jax.Array], jax.Array],
+    samples: jax.Array,
+    *,
+    batch_size: int,
+) -> jax.Array:
+    """Evaluate eval_fn in fixed-size chunks of batch_size using jax.lax.scan.
+
+    This pads samples to a multiple of batch_size, scans over chunks, and
+    trims the result back to the original sample count.
+    """
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive.")
+    if samples.ndim == 0:
+        raise ValueError("samples must have a batch dimension.")
+    n_samples = int(samples.shape[0])
+    trailing_shape = samples.shape[1:]
+    pad = (-n_samples) % batch_size
+    if pad:
+        padding = jnp.zeros((pad, *trailing_shape), dtype=samples.dtype)
+        samples = jnp.concatenate([samples, padding], axis=0)
+    num_batches = samples.shape[0] // batch_size
+    batches = samples.reshape(num_batches, batch_size, *trailing_shape)
+
+    def scan_fn(_, batch):
+        return None, eval_fn(batch)
+
+    _, output_batches = jax.lax.scan(scan_fn, None, batches)
+    output_shape = output_batches.shape
+    outputs = output_batches.reshape(
+        output_shape[0] * output_shape[1], *output_shape[2:]
+    )[:n_samples]
+    return outputs
 
 
 def get_apply_fun(state: "MCState") -> tuple[Any, dict, dict, dict]:

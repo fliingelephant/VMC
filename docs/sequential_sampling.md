@@ -5,7 +5,7 @@ The goal is to reuse environments aggressively while keeping the transition kern
 
 ## What was implemented
 
-- **MPS**: `_sequential_mps_sweep` in `samplers/sequential.py` performs one sweep.
+- **MPS**: `_sequential_mps_sweep` in `VMC/samplers/sequential.py` performs one sweep.
   `sequential_sample_mps` wraps burn-in and sampling loops.
   - Precompute right environments for the current configuration.
   - Sweep sites left-to-right, propose a single-spin flip, and accept with
@@ -13,7 +13,7 @@ The goal is to reuse environments aggressively while keeping the transition kern
   - Update the left environment immediately after acceptance so later sites reuse the cache.
   - Tensors are padded to a uniform bond dimension so the sweep can run inside a JAX scan.
 
-- **PEPS**: `peps_sequential_sweep` in `samplers/sequential.py` performs one sweep.
+- **PEPS**: `peps_sequential_sweep` in `VMC/samplers/sequential.py` performs one sweep.
   `peps_sequential_sample` wraps burn-in and sampling loops.
   - Build bottom environments once per sweep.
   - For each row, build right environments once and reuse a left environment while moving left-to-right.
@@ -25,40 +25,23 @@ configuration.
 
 ## Verify script
 
-`scripts/verify_sequential_sampling.py` compares sequential sampling against FullSum and NetKet
+`examples/verify_sequential_mh.py` compares sequential sampling against FullSum and NetKet
 MetropolisLocal.
 
-Defaults follow your request (3x3 FullSum; 5x5/8x8/10x10 MH) and use large sample counts.
+Defaults follow your request (3x3 FullSum; 5x5/8x8 MH) and use large sample counts.
 
 Examples:
 
 ```bash
-./.venv/bin/python scripts/verify_sequential_sampling.py --model peps
+VMC_LOG_LEVEL=INFO ./.venv/bin/python examples/verify_sequential_mh.py
 ```
 
 ```bash
-./.venv/bin/python scripts/verify_sequential_sampling.py --model peps --nsamples 8192 --sweeps 20 --burn-in 400
+VMC_LOG_LEVEL=INFO ./.venv/bin/python -m VMC.examples.verify_sequential_mh
 ```
 
-```bash
-./.venv/bin/python scripts/verify_sequential_sampling.py --model mps --fullsum-size 3 --mh-sizes 5 8 10
-```
-
-The script prints energy mean/std for sequential vs NetKet MH and reports the FullSum baseline
+The script logs energy mean/std for sequential vs NetKet MH and reports the FullSum baseline
 for the 3x3 case.
-
-## Timing benchmark
-
-You can also time sequential sampling against random single-spin flips:
-
-```bash
-./.venv/bin/python scripts/verify_sequential_sampling.py --model peps --benchmark --benchmark-size 4
-```
-
-Notes:
-- `--sweeps` is the number of sequential full-lattice sweeps between samples.
-- The benchmark compares against `random_flip_sample` using `random_sweeps = sweeps * n_sites`
-  so the random sampler attempts the same number of single-spin proposals.
 
 ## Unit tests
 

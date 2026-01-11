@@ -40,3 +40,15 @@ tpu_cache/
 
 # macOS
 .DS_Store
+
+# LaTeX
+*.synctex.gz
+*.aux
+*.log
+*.out
+*.toc
+*.bbl
+*.blg
+*.fls
+*.fdb_latexmk
+*.synctex.gz

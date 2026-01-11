@@ -1,41 +1,19 @@
 """Unit tests for sequential sampling."""
 from __future__ import annotations
 
-import importlib.util
-import sys
 import unittest
-from pathlib import Path
 
 import numpy as np
 
-
-def _bootstrap_vmc() -> None:
-    root = Path(__file__).resolve().parents[1]
-    if str(root) not in sys.path:
-        sys.path.insert(0, str(root))
-    if "VMC" in sys.modules:
-        return
-    spec = importlib.util.spec_from_file_location(
-        "VMC",
-        root / "__init__.py",
-        submodule_search_locations=[str(root)],
-    )
-    if spec is None or spec.loader is None:
-        raise RuntimeError("Failed to bootstrap VMC package.")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["VMC"] = module
-    spec.loader.exec_module(module)
-
-
-_bootstrap_vmc()
+from VMC import config  # noqa: F401 - JAX config must be imported first
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
 
 from VMC.samplers.sequential import peps_sequential_sample, sequential_sample_mps
-from models.mps import SimpleMPS
-from models.peps import SimplePEPS
+from VMC.models.mps import SimpleMPS
+from VMC.models.peps import SimplePEPS
 
 
 def _spins_to_index(spins: np.ndarray) -> int:
@@ -107,7 +85,6 @@ class SequentialSamplingTest(unittest.TestCase):
                 tensors,
                 jnp.asarray(sample),
                 shape,
-                model.chi,
                 model.strategy,
             )
             amps.append(amp)

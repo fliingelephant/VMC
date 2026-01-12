@@ -16,7 +16,7 @@ from VMC.drivers.custom_driver import CustomTDVP_SR, RealTime
 from VMC.models.mps import SimpleMPS
 from VMC.models.peps import SimplePEPS
 from VMC.preconditioners import SRPreconditioner
-from VMC.samplers.sequential import peps_sequential_sample, sequential_sample_mps
+from VMC.samplers.sequential import sequential_sample
 from VMC.examples.real_time import build_heisenberg_square
 from VMC.utils.vmc_utils import flatten_samples, get_apply_fun
 
@@ -489,7 +489,7 @@ def minimal_real_time_sequential_demo(
     for step in range(n_steps):
         t_start = time.perf_counter()
         key, subkey = jax.random.split(key)
-        seq_samples = sequential_sample_mps(
+        seq_samples = sequential_sample(
             vstate.model,
             n_samples=vstate.n_samples,
             key=subkey,
@@ -697,11 +697,12 @@ def minimal_real_time_peps_sequential_demo(
 
     for step in range(n_steps):
         t_start = time.perf_counter()
-        flat_samples, key = peps_sequential_sample(
+        flat_samples, key = sequential_sample(
             vstate.model,
             n_samples=vstate.n_samples,
             key=key,
             n_sweeps=n_sweeps,
+            return_key=True,
         )
         sample_time = time.perf_counter() - t_start
         sample_time_total += sample_time

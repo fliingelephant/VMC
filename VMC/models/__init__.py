@@ -9,7 +9,6 @@ from VMC.models.peps import (
     SimplePEPS,
     ZipUp,
     make_peps_amplitude,
-    peps_amplitude,
 )
 
 __all__ = [
@@ -20,5 +19,4 @@ __all__ = [
     "SimplePEPS",
     "ZipUp",
     "make_peps_amplitude",
-    "peps_amplitude",
 ]

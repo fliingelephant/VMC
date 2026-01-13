@@ -27,10 +27,12 @@ import jax.numpy as jnp
 import jax.scipy as jsp
 from flax import nnx
 
+from VMC.core import _value_and_grad_batch
 from VMC.models.mps import SimpleMPS
 from VMC.models.peps import SimplePEPS, ZipUp
 from VMC.samplers.sequential import sequential_sample
-from VMC.utils import build_dense_jac
+from VMC.utils.smallo import params_per_site
+from VMC.utils.vmc_utils import flatten_samples
 
 if TYPE_CHECKING:
     pass
@@ -350,12 +352,15 @@ def verify_smallo_correctness_mps(
     phys_dim = model.phys_dim
 
     _log_verify("Building full Jacobian O (uncentered)...")
-    O_raw = build_dense_jac(model, samples, full_gradient=True)
+    samples_flat = flatten_samples(samples)
+    amps, grads, _ = _value_and_grad_batch(model, samples_flat, full_gradient=True)
+    O_raw = grads / amps[:, None]
     _log_verify("  O_raw shape: %s", O_raw.shape)
 
     # Build small-o (also uncentered)
     _log_verify("Building small-o Jacobian (uncentered)...")
-    o, p = build_dense_jac(model, samples, full_gradient=False)
+    amps, grads, p = _value_and_grad_batch(model, samples_flat, full_gradient=False)
+    o = grads / amps[:, None]
     _log_verify("  o shape: %s, p shape: %s", o.shape, p.shape)
 
     # Compute OOdag_full directly from uncentered O
@@ -391,12 +396,7 @@ def verify_smallo_correctness_mps(
     dv = jax.random.normal(key, (n_samples,), dtype=jnp.complex128)
     dv = dv / jnp.sqrt(n_samples)
 
-    # Compute params_per_site for MPS
-    params_per_site = []
-    for site in range(n_sites):
-        left_dim = 1 if site == 0 else bond_dim
-        right_dim = 1 if site == n_sites - 1 else bond_dim
-        params_per_site.append(left_dim * right_dim)
+    pps = params_per_site(model)
 
     # Full solve: use centered T
     T_full_reg = T_full + diag_shift * jnp.eye(n_samples, dtype=T_full.dtype)
@@ -408,7 +408,7 @@ def verify_smallo_correctness_mps(
     # Small-o: solve and recover updates in full space
     T_smallo_reg = T_smallo + diag_shift * jnp.eye(n_samples, dtype=T_smallo.dtype)
     y_smallo = jsp.linalg.solve(T_smallo_reg, dv, assume_a="pos")
-    updates_smallo = recover_updates_smallo(o, p, y_smallo, phys_dim, params_per_site)
+    updates_smallo = recover_updates_smallo(o, p, y_smallo, phys_dim, pps)
 
     # Compare y vectors (should match since T matrices match)
     y_diff = jnp.linalg.norm(y_full - y_smallo)
@@ -508,12 +508,15 @@ def verify_smallo_correctness_peps(
     phys_dim = 2
 
     _log_verify("Building full Jacobian O for PEPS (uncentered)...")
-    O_raw = build_dense_jac(model, samples, full_gradient=True)
+    samples_flat = flatten_samples(samples)
+    amps, grads, _ = _value_and_grad_batch(model, samples_flat, full_gradient=True)
+    O_raw = grads / amps[:, None]
     _log_verify("  O_raw shape: %s", O_raw.shape)
 
     # Build small-o (also uncentered)
     _log_verify("Building small-o Jacobian for PEPS (uncentered)...")
-    o, p = build_dense_jac(model, samples, full_gradient=False)
+    amps, grads, p = _value_and_grad_batch(model, samples_flat, full_gradient=False)
+    o = grads / amps[:, None]
     _log_verify("  o shape: %s, p shape: %s", o.shape, p.shape)
 
     # Compute OOdag_full directly from uncentered O
@@ -549,15 +552,7 @@ def verify_smallo_correctness_peps(
     dv = jax.random.normal(key, (n_samples,), dtype=jnp.complex128)
     dv = dv / jnp.sqrt(n_samples)
 
-    # Compute params_per_site for PEPS
-    params_per_site = []
-    for r in range(shape[0]):
-        for c in range(shape[1]):
-            up = 1 if r == 0 else bond_dim
-            down = 1 if r == shape[0] - 1 else bond_dim
-            left = 1 if c == 0 else bond_dim
-            right = 1 if c == shape[1] - 1 else bond_dim
-            params_per_site.append(up * down * left * right)
+    pps = params_per_site(model)
 
     # Full solve
     T_full_reg = T_full + diag_shift * jnp.eye(n_samples, dtype=T_full.dtype)
@@ -568,7 +563,7 @@ def verify_smallo_correctness_peps(
     # Small-o: solve and recover updates in full space
     T_smallo_reg = T_smallo + diag_shift * jnp.eye(n_samples, dtype=T_smallo.dtype)
     y_smallo = jsp.linalg.solve(T_smallo_reg, dv, assume_a="pos")
-    updates_smallo = recover_updates_smallo(o, p, y_smallo, phys_dim, params_per_site)
+    updates_smallo = recover_updates_smallo(o, p, y_smallo, phys_dim, pps)
 
     # Compare y vectors
     y_diff = jnp.linalg.norm(y_full - y_smallo)
@@ -665,7 +660,9 @@ def minsr_smallo_peps_demo(
 
     # Build small-o for ordering comparison
     logger.info("\n--- Comparing summation orderings ---")
-    o, p = build_dense_jac(model, samples, full_gradient=False)
+    samples_flat = flatten_samples(samples)
+    amps, grads, p = _value_and_grad_batch(model, samples_flat, full_gradient=False)
+    o = grads / amps[:, None]
     logger.info("  o shape: %s, p shape: %s", o.shape, p.shape)
 
     # Build OOdag with different orderings
@@ -676,19 +673,11 @@ def minsr_smallo_peps_demo(
     time_phys = time.perf_counter() - t0
     logger.info("  Physical ordering time: %.3fs", time_phys)
 
-    # Compute params_per_site for site ordering
-    params_per_site = []
-    for r in range(length):
-        for c in range(length):
-            up = 1 if r == 0 else bond_dim
-            down = 1 if r == length - 1 else bond_dim
-            left = 1 if c == 0 else bond_dim
-            right = 1 if c == length - 1 else bond_dim
-            params_per_site.append(up * down * left * right)
+    pps = params_per_site(model)
 
     logger.info("Building OOdag with site ordering...")
     t0 = time.perf_counter()
-    OOdag_site = build_OOdag_site_ordering(o, p, n_sites, params_per_site, phys_dim=2)
+    OOdag_site = build_OOdag_site_ordering(o, p, n_sites, pps, phys_dim=2)
     jax.block_until_ready(OOdag_site)
     time_site = time.perf_counter() - t0
     logger.info("  Site ordering time: %.3fs", time_site)
@@ -709,7 +698,7 @@ def minsr_smallo_peps_demo(
     logger.info("Solving minSR with site ordering...")
     updates_site, metrics_site = solve_minsr_smallo(
         o, p, dv, 2, diag_shift, ordering="site",
-        n_sites=n_sites, params_per_site=params_per_site
+        n_sites=n_sites, params_per_site=pps
     )
     logger.info("  Residual norm: %.6e", metrics_site["residual_norm"])
 

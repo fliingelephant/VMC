@@ -20,22 +20,19 @@ from VMC import config  # noqa: F401 - JAX config must be imported first
 import functools
 import logging
 import time
-from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
 import jax.scipy as jsp
+import netket as nk
 from flax import nnx
 
 from VMC.core import _value_and_grad_batch
 from VMC.models.mps import SimpleMPS
 from VMC.models.peps import SimplePEPS, ZipUp
-from VMC.samplers.sequential import sequential_sample
+from VMC.samplers.sequential import sequential_sample_with_gradients
 from VMC.utils.smallo import params_per_site
-from VMC.utils.vmc_utils import flatten_samples
-
-if TYPE_CHECKING:
-    pass
+from VMC.utils.vmc_utils import flatten_samples, get_apply_fun
 
 logger = logging.getLogger(__name__)
 VERIFY_TAG = "[verify]"
@@ -149,22 +146,84 @@ def build_OOdag_site_ordering(
 
 
 @jax.jit
-def build_minsr_matrix(OOdag: jax.Array) -> jax.Array:
-    """Compute centered minSR matrix from OO†.
+def build_minsr_matrix(OOdag: jax.Array, q: jax.Array) -> jax.Array:
+    """Compute the reduced minSR matrix with explicit Q projection.
 
-    The minSR matrix T requires centering:
-        T_ss' = OO† - <O>O† - O<O>† + <O><O>†
-
-    From Wu 2025 supplementary Listing 2.
+    With Q spanning the subspace orthogonal to the null vector, the reduced
+    system is:
+        T = Q† OO† Q = (Q† O)(Q† O)†
 
     Args:
         OOdag: (n_samples, n_samples) raw OO† Gram matrix.
+        q: (n_samples, n_samples - 1) basis for the null-free subspace.
 
     Returns:
-        T: (n_samples, n_samples) centered minSR matrix.
+        T: (n_samples - 1, n_samples - 1) projected minSR matrix.
     """
-    OOavg_c = jnp.mean(OOdag, axis=1)
-    return OOdag - OOavg_c.conj() - OOavg_c[:, None] + jnp.mean(OOavg_c)
+    return q.conj().T @ OOdag @ q
+
+
+def _nullspace_basis(
+    n_samples: int,
+    dtype: jnp.dtype,
+) -> jax.Array:
+    """Build an orthonormal basis for the subspace orthogonal to the all-ones vector."""
+    ones = jnp.ones((n_samples, 1), dtype=dtype)
+    q_full, _ = jnp.linalg.qr(ones, mode="complete")
+    return q_full[:, 1:]
+
+
+@functools.partial(jax.jit, static_argnames=("phys_dim", "params_per_site"))
+def _apply_O_to_updates(
+    o: jax.Array,
+    p: jax.Array,
+    updates: jax.Array,
+    phys_dim: int,
+    params_per_site: tuple[int, ...] | None = None,
+) -> jax.Array:
+    """Apply the full O matrix (implicit via small-o) to a full update vector."""
+    n_samples = o.shape[0]
+    o_updates = jnp.zeros((n_samples,), dtype=o.dtype)
+
+    if params_per_site is None:
+        for k in range(phys_dim):
+            updates_k = updates[k::phys_dim]
+            mask = (p == k).astype(o.dtype)
+            o_updates = o_updates + jnp.sum(o * mask * updates_k[None, :], axis=1)
+        return o_updates
+
+    n_sites = len(params_per_site)
+    offset_reduced = 0
+    offset_full = 0
+    for site in range(n_sites):
+        pps = params_per_site[site]
+        o_site = o[:, offset_reduced:offset_reduced + pps]
+        p_site = p[:, offset_reduced:offset_reduced + pps]
+
+        for k in range(phys_dim):
+            updates_k = updates[offset_full + k * pps: offset_full + (k + 1) * pps]
+            mask = (p_site == k).astype(o.dtype)
+            o_updates = o_updates + jnp.sum(
+                o_site * mask * updates_k[None, :], axis=1
+            )
+
+        offset_reduced += pps
+        offset_full += phys_dim * pps
+
+    return o_updates
+
+
+def apply_O_to_updates(
+    o: jax.Array,
+    p: jax.Array,
+    updates: jax.Array,
+    phys_dim: int,
+    params_per_site: list[int] | tuple[int, ...] | None = None,
+) -> jax.Array:
+    """Wrapper ensuring params_per_site is static for JIT compilation."""
+    if params_per_site is not None and not isinstance(params_per_site, tuple):
+        params_per_site = tuple(params_per_site)
+    return _apply_O_to_updates(o, p, updates, phys_dim, params_per_site)
 
 
 @functools.partial(jax.jit, static_argnames=("phys_dim", "params_per_site"))
@@ -177,13 +236,13 @@ def _recover_updates_smallo(
 ) -> jax.Array:
     """Recover parameter updates in FULL parameter space from minSR solution using small-o.
 
-    Computes updates = O_centered† @ y by looping over physical indices.
-    Returns updates in the full parameter space (with physical index dimension).
+    Computes updates = O† @ y with y projected to the null-free subspace,
+    returning updates in the full parameter space (with physical index dimension).
 
     Args:
         o: (n_samples, n_params_reduced) UNCENTERED small-o Jacobian.
         p: (n_samples, n_params_reduced) int8 physical index tensor.
-        y: (n_samples,) solution from minSR linear system.
+        y: (n_samples,) solution from minSR linear system (already projected).
         phys_dim: Physical dimension.
         params_per_site: Params per physical slice for each site.
             Required for proper layout mapping. If None, assumes uniform.
@@ -192,9 +251,7 @@ def _recover_updates_smallo(
         updates: (n_params_full,) parameter updates in full space.
                  Layout: for each site, phys_dim consecutive blocks of params_per_phys.
     """
-    n_samples = o.shape[0]
     n_params_reduced = o.shape[1]
-    y_sum = jnp.sum(y)
 
     # If params_per_site not provided, assume uniform (won't work for open BC)
     if params_per_site is None:
@@ -203,8 +260,7 @@ def _recover_updates_smallo(
         for k in range(phys_dim):
             mask = (p == k).astype(o.dtype)
             o_k = o * mask
-            o_k_mean = jnp.sum(o_k, axis=0) / n_samples
-            updates_k = o_k.conj().T @ y - o_k_mean.conj() * y_sum
+            updates_k = o_k.conj().T @ y
             updates = updates.at[k::phys_dim].set(updates_k)
         return updates
 
@@ -226,10 +282,9 @@ def _recover_updates_smallo(
             # Mask for samples using physical index k at this site
             mask = (p_site == k).astype(o.dtype)
             o_k = o_site * mask
-            o_k_mean = jnp.sum(o_k, axis=0) / n_samples
 
-            # Centered contribution for physical index k at this site
-            updates_k = o_k.conj().T @ y - o_k_mean.conj() * y_sum
+            # Contribution for physical index k at this site
+            updates_k = o_k.conj().T @ y
 
             # Place in full updates: site block starts at offset_full,
             # physical index k block starts at offset_full + k * pps
@@ -269,9 +324,9 @@ def solve_minsr_smallo(
 
     Steps:
         1. Build OOdag via specified ordering
-        2. Center to get minSR matrix T
-        3. Solve (T + diag_shift*I) @ y = dv
-        4. Recover updates = O† @ y via small-o
+        2. Project to get minSR matrix T using Q† O
+        3. Solve (T + diag_shift*I) @ y = Q† dv
+        4. Recover updates = O† Q y via small-o
 
     Args:
         o: (n_samples, n_params_reduced) uncentered small-o Jacobian.
@@ -281,10 +336,10 @@ def solve_minsr_smallo(
         diag_shift: Regularization parameter.
         ordering: "physical" or "site" summation ordering.
         n_sites: Required if ordering="site".
-        params_per_site: Required if ordering="site".
+        params_per_site: Required for full-parameter updates and site ordering.
 
     Returns:
-        updates: (n_params_reduced,) parameter updates.
+        updates: (n_params_full,) parameter updates in full space.
         metrics: Dict with diagnostic information.
     """
     # Build OOdag
@@ -297,22 +352,33 @@ def solve_minsr_smallo(
     else:
         raise ValueError(f"Unknown ordering: {ordering}")
 
-    # Center to get minSR matrix
-    T = build_minsr_matrix(OOdag)
+    # Project to get minSR matrix
+    n_samples = o.shape[0]
+    q = _nullspace_basis(n_samples, OOdag.dtype)
+    T = build_minsr_matrix(OOdag, q)
 
     # Regularize and solve
-    n_samples = o.shape[0]
-    T_reg = T + diag_shift * jnp.eye(n_samples, dtype=T.dtype)
-    y = jsp.linalg.solve(T_reg, dv, assume_a="pos")
+    dv_red = q.conj().T @ dv
+    T_reg = T + diag_shift * jnp.eye(T.shape[0], dtype=T.dtype)
+    y_red = jsp.linalg.solve(T_reg, dv_red, assume_a="pos")
+    y = q @ y_red
 
     # Recover updates
-    updates = recover_updates_smallo(o, p, y, phys_dim)
+    updates = recover_updates_smallo(o, p, y, phys_dim, params_per_site)
 
-    # Compute metrics
-    residual = T @ y - dv
+    # Compute SR-form residuals using the projected force E = O† Q Q† dv.
+    dv_proj = q @ dv_red
+    E_param = recover_updates_smallo(o, p, dv_proj, phys_dim, params_per_site)
+    o_updates = apply_O_to_updates(o, p, updates, phys_dim, params_per_site)
+    oo_updates = recover_updates_smallo(o, p, o_updates, phys_dim, params_per_site)
+    residual = oo_updates - E_param
+    residual_reg = residual + diag_shift * updates
+    E_norm_sq = jnp.vdot(E_param, E_param).real
+    residual_norm = jnp.vdot(residual, residual).real / E_norm_sq
+    residual_reg_norm = jnp.vdot(residual_reg, residual_reg).real / E_norm_sq
     metrics = {
-        "residual_norm": float(jnp.linalg.norm(residual)),
-        "dv_norm": float(jnp.linalg.norm(dv)),
+        "residual_sr": float(residual_norm),
+        "residual_sr_reg": float(residual_reg_norm),
         "ordering": ordering,
     }
 
@@ -328,43 +394,62 @@ def verify_smallo_correctness_mps(
     model: SimpleMPS,
     samples: jax.Array,
     diag_shift: float = 1e-8,
+    *,
+    o: jax.Array | None = None,
+    p: jax.Array | None = None,
 ) -> dict:
     """Verify small-o trick produces same results as full O matrix for MPS.
 
     The verification computes OOdag in two ways:
-    1. Full O: compute full Jacobian O (uncentered), then OOdag_full = O @ O†
+    1. Full O: construct full Jacobian O from small-o (uncentered), then OOdag_full = O @ O†
     2. Small-o: compute reduced Jacobian o (uncentered), then OOdag via phys_index loop
 
     Since O[s,α]=0 when α's physical index doesn't match s(x), both should be equal.
-    The centering is then done on the OOdag matrix via build_minsr_matrix.
+    The projection is then applied to OOdag via build_minsr_matrix.
 
     Args:
         model: SimpleMPS model.
         samples: Spin configurations (n_samples, n_sites) in {-1, +1}.
         diag_shift: Regularization parameter.
+        o: Optional precomputed small-o Jacobian (grads / amp).
+        p: Optional precomputed physical index tensor.
 
     Returns:
         Dict with comparison metrics.
     """
     n_samples = samples.shape[0]
-    n_sites = model.n_sites
-    bond_dim = model.bond_dim
     phys_dim = model.phys_dim
 
-    _log_verify("Building full Jacobian O (uncentered)...")
     samples_flat = flatten_samples(samples)
-    amps, grads, _ = _value_and_grad_batch(model, samples_flat, full_gradient=True)
-    O_raw = grads / amps[:, None]
-    _log_verify("  O_raw shape: %s", O_raw.shape)
 
     # Build small-o (also uncentered)
-    _log_verify("Building small-o Jacobian (uncentered)...")
-    amps, grads, p = _value_and_grad_batch(model, samples_flat, full_gradient=False)
-    o = grads / amps[:, None]
+    if o is None or p is None:
+        _log_verify("Building small-o Jacobian (uncentered)...")
+        amps, grads, p = _value_and_grad_batch(model, samples_flat, full_gradient=False)
+        o = grads / amps[:, None]
+    else:
+        _log_verify("Using precomputed small-o Jacobian.")
     _log_verify("  o shape: %s, p shape: %s", o.shape, p.shape)
 
+    _log_verify("Constructing full Jacobian O from small-o (uncentered)...")
+    pps = params_per_site(model)
+    blocks = []
+    offset_reduced = 0
+    for site_pps in pps:
+        o_site = o[:, offset_reduced:offset_reduced + site_pps]
+        p_site = p[:, offset_reduced:offset_reduced + site_pps]
+        one_hot = jax.nn.one_hot(p_site, phys_dim, dtype=o.dtype)
+        block = one_hot * o_site[:, :, None]
+        block = jnp.transpose(block, (0, 2, 1)).reshape(
+            n_samples, phys_dim * site_pps
+        )
+        blocks.append(block)
+        offset_reduced += site_pps
+    O_raw = jnp.concatenate(blocks, axis=1)
+    _log_verify("  O_raw shape: %s", O_raw.shape)
+
     # Compute OOdag_full directly from uncentered O
-    _log_verify("Computing OOdag from full O (uncentered)...")
+    _log_verify("Computing OOdag from constructed O (uncentered)...")
     OOdag_full = O_raw @ O_raw.conj().T
     _log_verify("  OOdag_full norm: %.6e", float(jnp.linalg.norm(OOdag_full)))
 
@@ -381,59 +466,119 @@ def verify_smallo_correctness_mps(
     _log_verify("  OOdag absolute diff: %.6e", float(OOdag_diff))
     _log_verify("  OOdag relative error: %.6e", OOdag_error)
 
-    # Compare minSR matrices (centered via build_minsr_matrix)
-    _log_verify("Comparing minSR matrices (centered)...")
-    T_full = build_minsr_matrix(OOdag_full)
-    T_smallo = build_minsr_matrix(OOdag_smallo)
+    # Compare minSR matrices (projected via build_minsr_matrix)
+    _log_verify("Comparing minSR matrices (projected)...")
+    q = _nullspace_basis(n_samples, OOdag_full.dtype)
+    T_full = build_minsr_matrix(OOdag_full, q)
+    T_smallo = build_minsr_matrix(OOdag_smallo, q)
     T_diff = jnp.linalg.norm(T_full - T_smallo)
     T_norm = jnp.linalg.norm(T_full)
     T_error = float(T_diff / (T_norm + 1e-30))
     _log_verify("  minSR matrix relative error: %.6e", T_error)
+
+    # Verify null vector projection: Q† @ ones should be ~0
+    _log_verify("Verifying null vector projection...")
+    ones = jnp.ones((n_samples,), dtype=q.dtype)
+    null_check = float(jnp.linalg.norm(q.conj().T @ ones))
+    _log_verify("  ||Q† @ ones|| (should be ~0): %.6e", null_check)
+
+    T_full_reg = T_full + diag_shift * jnp.eye(T_full.shape[0], dtype=T_full.dtype)
+    T_smallo_reg = T_smallo + diag_shift * jnp.eye(
+        T_smallo.shape[0], dtype=T_smallo.dtype
+    )
 
     # Compare solutions with a random dv
     _log_verify("Comparing minSR solutions...")
     key = jax.random.key(42)
     dv = jax.random.normal(key, (n_samples,), dtype=jnp.complex128)
     dv = dv / jnp.sqrt(n_samples)
+    dv_red = q.conj().T @ dv
+    dv_proj = q @ dv_red
 
-    pps = params_per_site(model)
-
-    # Full solve: use centered T
-    T_full_reg = T_full + diag_shift * jnp.eye(n_samples, dtype=T_full.dtype)
-    y_full = jsp.linalg.solve(T_full_reg, dv, assume_a="pos")
-    # For update recovery with full O, we need centered O
-    O_centered = O_raw - jnp.mean(O_raw, axis=0, keepdims=True)
-    updates_full = O_centered.conj().T @ y_full
+    # Full solve: use projected T
+    y_full_red = jsp.linalg.solve(T_full_reg, dv_red, assume_a="pos")
+    y_full = q @ y_full_red
+    updates_full = O_raw.conj().T @ y_full
 
     # Small-o: solve and recover updates in full space
-    T_smallo_reg = T_smallo + diag_shift * jnp.eye(n_samples, dtype=T_smallo.dtype)
-    y_smallo = jsp.linalg.solve(T_smallo_reg, dv, assume_a="pos")
+    y_smallo_red = jsp.linalg.solve(T_smallo_reg, dv_red, assume_a="pos")
+    y_smallo = q @ y_smallo_red
     updates_smallo = recover_updates_smallo(o, p, y_smallo, phys_dim, pps)
 
-    # Compare y vectors (should match since T matrices match)
-    y_diff = jnp.linalg.norm(y_full - y_smallo)
-    y_norm = jnp.linalg.norm(y_full)
-    y_error = float(y_diff / (y_norm + 1e-30))
-    _log_verify("  y vector relative error: %.6e", y_error)
+    # SR-form residual using the projected force E = O† Q Q† dv
+    E_param = O_raw.conj().T @ dv_proj
+    o_updates = O_raw @ updates_smallo
+    oo_updates = O_raw.conj().T @ o_updates
+    residual = oo_updates - E_param
+    residual_reg = residual + diag_shift * updates_smallo
+    E_norm_sq = jnp.vdot(E_param, E_param).real
+    residual_norm = jnp.vdot(residual, residual).real / E_norm_sq
+    residual_reg_norm = jnp.vdot(residual_reg, residual_reg).real / E_norm_sq
+    _log_verify("  SR residual ||O†O u - E||^2/||E||^2: %.6e", residual_norm)
+    _log_verify(
+        "  SR residual ||(O†O+λI) u - E||^2/||E||^2: %.6e", residual_reg_norm
+    )
 
-    # Compare updates directly in full space
-    updates_diff = jnp.linalg.norm(updates_full - updates_smallo)
-    updates_norm = jnp.linalg.norm(updates_full)
-    updates_error = float(updates_diff / (updates_norm + 1e-30))
+    # Compare updates
+    updates_error = float(jnp.linalg.norm(updates_full - updates_smallo) / (jnp.linalg.norm(updates_full) + 1e-30))
     _log_verify("  Updates relative error: %.6e", updates_error)
-    _log_verify("  Full updates norm: %.6e", float(jnp.linalg.norm(updates_full)))
-    _log_verify("  Small-o updates norm: %.6e", float(jnp.linalg.norm(updates_smallo)))
+
+    # Compare updates with realistic forces from local energies.
+    _log_verify("Comparing minSR solutions with local energies...")
+    graph = nk.graph.Chain(length=model.n_sites, pbc=False)
+    hi = nk.hilbert.Spin(s=1 / 2, N=model.n_sites)
+    hamiltonians = {
+        "Heisenberg": nk.operator.Heisenberg(hi, graph, dtype=jnp.complex128),
+        "TFIM": nk.operator.Ising(hi, graph, h=1.0, J=1.0, dtype=jnp.complex128),
+    }
+    sampler = nk.sampler.MetropolisLocal(hi, n_chains=1)
+    vstate = nk.vqs.MCState(
+        sampler,
+        model,
+        n_samples=n_samples,
+        n_discard_per_chain=0,
+    )
+    vstate._samples = samples.reshape(1, n_samples, model.n_sites)
+    apply_fun, params, model_state, kwargs = get_apply_fun(vstate)
+    flat = vstate._samples.reshape(-1, model.n_sites)
+    logpsi = jax.vmap(
+        lambda s: apply_fun({"params": params, **model_state}, s, **kwargs)
+    )(flat)
+    vstate._logpsi = logpsi.reshape(1, n_samples)
+
+    realistic_errors: dict[str, float] = {}
+    for name, hamiltonian in hamiltonians.items():
+        local_energies = vstate.local_estimators(hamiltonian).reshape(-1)
+        dv = (local_energies - jnp.mean(local_energies)) / jnp.sqrt(n_samples)
+        dv_red = q.conj().T @ dv
+        y_full_red = jsp.linalg.solve(T_full_reg, dv_red, assume_a="pos")
+        y_full = q @ y_full_red
+        updates_full = O_raw.conj().T @ y_full
+        y_smallo_red = jsp.linalg.solve(T_smallo_reg, dv_red, assume_a="pos")
+        y_smallo = q @ y_smallo_red
+        updates_smallo = recover_updates_smallo(o, p, y_smallo, phys_dim, pps)
+        err = float(
+            jnp.linalg.norm(updates_full - updates_smallo)
+            / (jnp.linalg.norm(updates_full) + 1e-30)
+        )
+        realistic_errors[name] = err
+        _log_verify("  %s updates relative error: %.6e", name, err)
 
     results = {
         "OOdag_error": OOdag_error,
         "T_error": T_error,
-        "y_error": y_error,
+        "null_check": null_check,
+        "residual_sr": float(residual_norm),
+        "residual_sr_reg": float(residual_reg_norm),
         "updates_error": updates_error,
+        "updates_error_heisenberg": realistic_errors.get("Heisenberg"),
+        "updates_error_tfim": realistic_errors.get("TFIM"),
         "memory_full": O_raw.nbytes,
         "memory_smallo": o.nbytes + p.nbytes,
         "memory_ratio": O_raw.nbytes / (o.nbytes + p.nbytes),
     }
-    _log_verify("  Memory ratio (full/small-o): %.2fx", results["memory_ratio"])
+    _log_verify("  Memory: full=%d bytes, small-o=%d bytes, ratio=%.2fx",
+                results["memory_full"], results["memory_smallo"], results["memory_ratio"])
 
     return results
 
@@ -444,7 +589,7 @@ def minsr_smallo_mps_demo(
     n_samples: int = 512,
     diag_shift: float = 1e-8,
     seed: int = 0,
-    use_sequential_sampling: bool = True,
+    progress_interval: int = 1000,
 ):
     """Demo comparing standard minSR vs small-o minSR for MPS.
 
@@ -454,34 +599,48 @@ def minsr_smallo_mps_demo(
         n_samples: Number of samples.
         diag_shift: Regularization parameter.
         seed: Random seed.
-        use_sequential_sampling: Use sequential sampling (reuses environments).
+        progress_interval: Progress logging interval for sampling.
     """
     logger.info("=" * 60)
     logger.info("MinSR Small-o Demo (MPS)")
     logger.info("=" * 60)
     logger.info("Parameters: length=%d, bond_dim=%d, n_samples=%d", length, bond_dim, n_samples)
 
-    # Create model
     model = SimpleMPS(rngs=nnx.Rngs(seed), n_sites=length, bond_dim=bond_dim)
-
-    # Generate samples
     key = jax.random.key(seed + 1)
-    if use_sequential_sampling:
-        logger.info("Using sequential sampling (environment reuse)...")
-        samples = sequential_sample(model, n_samples=n_samples, key=key)
-    else:
-        logger.info("Using random sampling...")
-        bits = jax.random.bernoulli(key, 0.5, shape=(n_samples, length))
-        samples = (2 * bits - 1).astype(jnp.int32)  # {-1, +1}
 
-    # Run verification
-    results = verify_smallo_correctness_mps(model, samples, diag_shift)
+    logger.info("Using sequential sampling with gradients (combined)...")
+    samples, o, p, _ = sequential_sample_with_gradients(
+        model,
+        n_samples=n_samples,
+        key=key,
+        progress_interval=progress_interval,
+        full_gradient=False,
+    )
+
+    # Run verification with pre-computed small-o
+    results = verify_smallo_correctness_mps(model, samples, diag_shift, o=o, p=p)
 
     logger.info("\n" + "=" * 60)
     logger.info("Results Summary")
     logger.info("=" * 60)
     logger.info("OOdag relative error: %.6e", results["OOdag_error"])
     logger.info("minSR matrix relative error: %.6e", results["T_error"])
+    logger.info("Null vector check: %.6e", results["null_check"])
+    logger.info("SR residual ||O†O u - E||^2/||E||^2: %.6e", results["residual_sr"])
+    logger.info(
+        "SR residual ||(O†O+λI) u - E||^2/||E||^2: %.6e",
+        results["residual_sr_reg"],
+    )
+    if results.get("updates_error_tfim") is not None:
+        logger.info(
+            "TFIM updates relative error: %.6e", results["updates_error_tfim"]
+        )
+    if results.get("updates_error_heisenberg") is not None:
+        logger.info(
+            "Heisenberg updates relative error: %.6e",
+            results["updates_error_heisenberg"],
+        )
     logger.info("Memory savings: %.2fx", results["memory_ratio"])
 
     return results
@@ -491,6 +650,9 @@ def verify_smallo_correctness_peps(
     model: SimplePEPS,
     samples: jax.Array,
     diag_shift: float = 1e-8,
+    *,
+    o: jax.Array | None = None,
+    p: jax.Array | None = None,
 ) -> dict:
     """Verify small-o trick produces same results as full O matrix for PEPS.
 
@@ -498,29 +660,45 @@ def verify_smallo_correctness_peps(
         model: SimplePEPS model.
         samples: Spin configurations (n_samples, n_sites) in {-1, +1}.
         diag_shift: Regularization parameter.
+        o: Optional precomputed small-o Jacobian (grads / amp).
+        p: Optional precomputed physical index tensor.
 
     Returns:
         Dict with comparison metrics.
     """
     n_samples = samples.shape[0]
-    shape = model.shape
-    bond_dim = model.bond_dim
     phys_dim = 2
 
-    _log_verify("Building full Jacobian O for PEPS (uncentered)...")
     samples_flat = flatten_samples(samples)
-    amps, grads, _ = _value_and_grad_batch(model, samples_flat, full_gradient=True)
-    O_raw = grads / amps[:, None]
-    _log_verify("  O_raw shape: %s", O_raw.shape)
 
     # Build small-o (also uncentered)
-    _log_verify("Building small-o Jacobian for PEPS (uncentered)...")
-    amps, grads, p = _value_and_grad_batch(model, samples_flat, full_gradient=False)
-    o = grads / amps[:, None]
+    if o is None or p is None:
+        _log_verify("Building small-o Jacobian for PEPS (uncentered)...")
+        amps, grads, p = _value_and_grad_batch(model, samples_flat, full_gradient=False)
+        o = grads / amps[:, None]
+    else:
+        _log_verify("Using precomputed small-o Jacobian.")
     _log_verify("  o shape: %s, p shape: %s", o.shape, p.shape)
 
+    _log_verify("Constructing full Jacobian O from small-o (uncentered)...")
+    pps = params_per_site(model)
+    blocks = []
+    offset_reduced = 0
+    for site_pps in pps:
+        o_site = o[:, offset_reduced:offset_reduced + site_pps]
+        p_site = p[:, offset_reduced:offset_reduced + site_pps]
+        one_hot = jax.nn.one_hot(p_site, phys_dim, dtype=o.dtype)
+        block = one_hot * o_site[:, :, None]
+        block = jnp.transpose(block, (0, 2, 1)).reshape(
+            n_samples, phys_dim * site_pps
+        )
+        blocks.append(block)
+        offset_reduced += site_pps
+    O_raw = jnp.concatenate(blocks, axis=1)
+    _log_verify("  O_raw shape: %s", O_raw.shape)
+
     # Compute OOdag_full directly from uncentered O
-    _log_verify("Computing OOdag from full O (uncentered)...")
+    _log_verify("Computing OOdag from constructed O (uncentered)...")
     OOdag_full = O_raw @ O_raw.conj().T
     _log_verify("  OOdag_full norm: %.6e", float(jnp.linalg.norm(OOdag_full)))
 
@@ -537,58 +715,120 @@ def verify_smallo_correctness_peps(
     _log_verify("  OOdag absolute diff: %.6e", float(OOdag_diff))
     _log_verify("  OOdag relative error: %.6e", OOdag_error)
 
-    # Compare minSR matrices (centered via build_minsr_matrix)
-    _log_verify("Comparing minSR matrices (centered)...")
-    T_full = build_minsr_matrix(OOdag_full)
-    T_smallo = build_minsr_matrix(OOdag_smallo)
+    # Compare minSR matrices (projected via build_minsr_matrix)
+    _log_verify("Comparing minSR matrices (projected)...")
+    q = _nullspace_basis(n_samples, OOdag_full.dtype)
+    T_full = build_minsr_matrix(OOdag_full, q)
+    T_smallo = build_minsr_matrix(OOdag_smallo, q)
     T_diff = jnp.linalg.norm(T_full - T_smallo)
     T_norm = jnp.linalg.norm(T_full)
     T_error = float(T_diff / (T_norm + 1e-30))
     _log_verify("  minSR matrix relative error: %.6e", T_error)
+
+    # Verify null vector projection: Q† @ ones should be ~0
+    _log_verify("Verifying null vector projection...")
+    ones = jnp.ones((n_samples,), dtype=q.dtype)
+    null_check = float(jnp.linalg.norm(q.conj().T @ ones))
+    _log_verify("  ||Q† @ ones|| (should be ~0): %.6e", null_check)
+
+    T_full_reg = T_full + diag_shift * jnp.eye(T_full.shape[0], dtype=T_full.dtype)
+    T_smallo_reg = T_smallo + diag_shift * jnp.eye(
+        T_smallo.shape[0], dtype=T_smallo.dtype
+    )
 
     # Compare solutions with a random dv
     _log_verify("Comparing minSR solutions...")
     key = jax.random.key(42)
     dv = jax.random.normal(key, (n_samples,), dtype=jnp.complex128)
     dv = dv / jnp.sqrt(n_samples)
-
-    pps = params_per_site(model)
+    dv_red = q.conj().T @ dv
+    dv_proj = q @ dv_red
 
     # Full solve
-    T_full_reg = T_full + diag_shift * jnp.eye(n_samples, dtype=T_full.dtype)
-    y_full = jsp.linalg.solve(T_full_reg, dv, assume_a="pos")
-    O_centered = O_raw - jnp.mean(O_raw, axis=0, keepdims=True)
-    updates_full = O_centered.conj().T @ y_full
+    y_full_red = jsp.linalg.solve(T_full_reg, dv_red, assume_a="pos")
+    y_full = q @ y_full_red
+    updates_full = O_raw.conj().T @ y_full
 
     # Small-o: solve and recover updates in full space
-    T_smallo_reg = T_smallo + diag_shift * jnp.eye(n_samples, dtype=T_smallo.dtype)
-    y_smallo = jsp.linalg.solve(T_smallo_reg, dv, assume_a="pos")
+    y_smallo_red = jsp.linalg.solve(T_smallo_reg, dv_red, assume_a="pos")
+    y_smallo = q @ y_smallo_red
     updates_smallo = recover_updates_smallo(o, p, y_smallo, phys_dim, pps)
 
-    # Compare y vectors
-    y_diff = jnp.linalg.norm(y_full - y_smallo)
-    y_norm = jnp.linalg.norm(y_full)
-    y_error = float(y_diff / (y_norm + 1e-30))
-    _log_verify("  y vector relative error: %.6e", y_error)
+    # SR-form residual using the projected force E = O† Q Q† dv
+    E_param = O_raw.conj().T @ dv_proj
+    o_updates = O_raw @ updates_smallo
+    oo_updates = O_raw.conj().T @ o_updates
+    residual = oo_updates - E_param
+    residual_reg = residual + diag_shift * updates_smallo
+    E_norm_sq = jnp.vdot(E_param, E_param).real
+    residual_norm = jnp.vdot(residual, residual).real / E_norm_sq
+    residual_reg_norm = jnp.vdot(residual_reg, residual_reg).real / E_norm_sq
+    _log_verify("  SR residual ||O†O u - E||^2/||E||^2: %.6e", residual_norm)
+    _log_verify(
+        "  SR residual ||(O†O+λI) u - E||^2/||E||^2: %.6e", residual_reg_norm
+    )
 
-    # Compare updates directly in full space
-    updates_diff = jnp.linalg.norm(updates_full - updates_smallo)
-    updates_norm = jnp.linalg.norm(updates_full)
-    updates_error = float(updates_diff / (updates_norm + 1e-30))
+    # Compare updates
+    updates_error = float(jnp.linalg.norm(updates_full - updates_smallo) / (jnp.linalg.norm(updates_full) + 1e-30))
     _log_verify("  Updates relative error: %.6e", updates_error)
-    _log_verify("  Full updates norm: %.6e", float(jnp.linalg.norm(updates_full)))
-    _log_verify("  Small-o updates norm: %.6e", float(jnp.linalg.norm(updates_smallo)))
+
+    # Compare updates with realistic forces from local energies.
+    _log_verify("Comparing minSR solutions with local energies...")
+    n_rows, n_cols = model.shape
+    graph = nk.graph.Square(length=n_rows, pbc=False)
+    hi = nk.hilbert.Spin(s=1 / 2, N=n_rows * n_cols)
+    hamiltonians = {
+        "Heisenberg": nk.operator.Heisenberg(hi, graph, dtype=jnp.complex128),
+        "TFIM": nk.operator.Ising(hi, graph, h=1.0, J=1.0, dtype=jnp.complex128),
+    }
+    sampler = nk.sampler.MetropolisLocal(hi, n_chains=1)
+    vstate = nk.vqs.MCState(
+        sampler,
+        model,
+        n_samples=n_samples,
+        n_discard_per_chain=0,
+    )
+    vstate._samples = samples.reshape(1, n_samples, n_rows * n_cols)
+    apply_fun, params, model_state, kwargs = get_apply_fun(vstate)
+    flat = vstate._samples.reshape(-1, n_rows * n_cols)
+    logpsi = jax.vmap(
+        lambda s: apply_fun({"params": params, **model_state}, s, **kwargs)
+    )(flat)
+    vstate._logpsi = logpsi.reshape(1, n_samples)
+
+    realistic_errors: dict[str, float] = {}
+    for name, hamiltonian in hamiltonians.items():
+        local_energies = vstate.local_estimators(hamiltonian).reshape(-1)
+        dv = (local_energies - jnp.mean(local_energies)) / jnp.sqrt(n_samples)
+        dv_red = q.conj().T @ dv
+        y_full_red = jsp.linalg.solve(T_full_reg, dv_red, assume_a="pos")
+        y_full = q @ y_full_red
+        updates_full = O_raw.conj().T @ y_full
+        y_smallo_red = jsp.linalg.solve(T_smallo_reg, dv_red, assume_a="pos")
+        y_smallo = q @ y_smallo_red
+        updates_smallo = recover_updates_smallo(o, p, y_smallo, phys_dim, pps)
+        err = float(
+            jnp.linalg.norm(updates_full - updates_smallo)
+            / (jnp.linalg.norm(updates_full) + 1e-30)
+        )
+        realistic_errors[name] = err
+        _log_verify("  %s updates relative error: %.6e", name, err)
 
     results = {
         "OOdag_error": OOdag_error,
         "T_error": T_error,
-        "y_error": y_error,
+        "null_check": null_check,
+        "residual_sr": float(residual_norm),
+        "residual_sr_reg": float(residual_reg_norm),
         "updates_error": updates_error,
+        "updates_error_heisenberg": realistic_errors.get("Heisenberg"),
+        "updates_error_tfim": realistic_errors.get("TFIM"),
         "memory_full": O_raw.nbytes,
         "memory_smallo": o.nbytes + p.nbytes,
         "memory_ratio": O_raw.nbytes / (o.nbytes + p.nbytes),
     }
-    _log_verify("  Memory ratio (full/small-o): %.2fx", results["memory_ratio"])
+    _log_verify("  Memory: full=%d bytes, small-o=%d bytes, ratio=%.2fx",
+                results["memory_full"], results["memory_smallo"], results["memory_ratio"])
 
     return results
 
@@ -600,7 +840,6 @@ def minsr_smallo_peps_demo(
     diag_shift: float = 1e-8,
     truncate_bond_dimension: int = 4,
     seed: int = 0,
-    use_sequential_sampling: bool = True,
     n_sweeps: int = 1,
     progress_interval: int = 1000,
 ):
@@ -613,8 +852,6 @@ def minsr_smallo_peps_demo(
         diag_shift: Regularization parameter.
         truncate_bond_dimension: Truncation dimension for ZipUp (D^2=4 default).
         seed: Random seed.
-        use_sequential_sampling: Use sequential Metropolis-Hastings sampling
-            (reuses environments).
         n_sweeps: Number of sequential MH sweeps per sample.
         progress_interval: Progress logging interval for sequential sampling.
     """
@@ -626,7 +863,6 @@ def minsr_smallo_peps_demo(
         length, bond_dim, truncate_bond_dimension, n_samples
     )
 
-    # Create model with ZipUp strategy
     model = SimplePEPS(
         rngs=nnx.Rngs(seed),
         shape=(length, length),
@@ -634,36 +870,27 @@ def minsr_smallo_peps_demo(
         contraction_strategy=ZipUp(truncate_bond_dimension),
     )
 
-    # Generate samples
     key = jax.random.key(seed + 1)
     n_sites = length * length
-    if use_sequential_sampling:
-        logger.info(
-            "Using sequential Metropolis-Hastings sampling (environment reuse, %d sweeps)...",
-            n_sweeps,
-        )
-        samples = sequential_sample(
-            model,
-            n_samples=n_samples,
-            key=key,
-            n_sweeps=n_sweeps,
-            progress_interval=progress_interval,
-        )
-    else:
-        logger.info("Using random sampling...")
-        bits = jax.random.bernoulli(key, 0.5, shape=(n_samples, n_sites))
-        samples = (2 * bits - 1).astype(jnp.int32)  # {-1, +1}
+
+    logger.info(
+        "Using sequential sampling with gradients (combined, %d sweeps)...",
+        n_sweeps,
+    )
+    samples, o, p, _ = sequential_sample_with_gradients(
+        model,
+        n_samples=n_samples,
+        key=key,
+        n_sweeps=n_sweeps,
+        progress_interval=progress_interval,
+        full_gradient=False,
+    )
+
+    logger.info("  o shape: %s, p shape: %s", o.shape, p.shape)
 
     # Run verification against full O matrix
     logger.info("\n--- Verification against full O matrix ---")
-    verify_results = verify_smallo_correctness_peps(model, samples, diag_shift)
-
-    # Build small-o for ordering comparison
-    logger.info("\n--- Comparing summation orderings ---")
-    samples_flat = flatten_samples(samples)
-    amps, grads, p = _value_and_grad_batch(model, samples_flat, full_gradient=False)
-    o = grads / amps[:, None]
-    logger.info("  o shape: %s, p shape: %s", o.shape, p.shape)
+    verify_results = verify_smallo_correctness_peps(model, samples, diag_shift, o=o, p=p)
 
     # Build OOdag with different orderings
     logger.info("Building OOdag with physical ordering...")
@@ -692,15 +919,23 @@ def minsr_smallo_peps_demo(
     dv = dv / jnp.sqrt(n_samples)
 
     logger.info("Solving minSR with physical ordering...")
-    updates_phys, metrics_phys = solve_minsr_smallo(o, p, dv, 2, diag_shift, ordering="physical")
-    logger.info("  Residual norm: %.6e", metrics_phys["residual_norm"])
+    updates_phys, metrics_phys = solve_minsr_smallo(
+        o, p, dv, 2, diag_shift, ordering="physical", params_per_site=pps
+    )
+    logger.info(
+        "  SR residual ||(O†O+λI) u - E||^2/||E||^2: %.6e",
+        metrics_phys["residual_sr_reg"],
+    )
 
     logger.info("Solving minSR with site ordering...")
     updates_site, metrics_site = solve_minsr_smallo(
         o, p, dv, 2, diag_shift, ordering="site",
         n_sites=n_sites, params_per_site=pps
     )
-    logger.info("  Residual norm: %.6e", metrics_site["residual_norm"])
+    logger.info(
+        "  SR residual ||(O†O+λI) u - E||^2/||E||^2: %.6e",
+        metrics_site["residual_sr_reg"],
+    )
 
     # Compare updates
     updates_diff = jnp.linalg.norm(updates_phys - updates_site) / jnp.linalg.norm(updates_phys)
@@ -709,12 +944,15 @@ def minsr_smallo_peps_demo(
     results = {
         "OOdag_error": verify_results["OOdag_error"],
         "T_error": verify_results["T_error"],
-        "y_error": verify_results["y_error"],
+        "residual_sr": verify_results["residual_sr"],
+        "residual_sr_reg": verify_results["residual_sr_reg"],
         "updates_error": verify_results["updates_error"],
+        "updates_error_heisenberg": verify_results.get("updates_error_heisenberg"),
+        "updates_error_tfim": verify_results.get("updates_error_tfim"),
         "ordering_diff": float(ordering_diff),
         "updates_ordering_diff": float(updates_diff),
-        "residual_phys": metrics_phys["residual_norm"],
-        "residual_site": metrics_site["residual_norm"],
+        "residual_phys": metrics_phys["residual_sr_reg"],
+        "residual_site": metrics_site["residual_sr_reg"],
         "ordering_time_phys": time_phys,
         "ordering_time_site": time_site,
         "memory_full": verify_results["memory_full"],
@@ -727,9 +965,21 @@ def minsr_smallo_peps_demo(
     logger.info("=" * 60)
     logger.info("OOdag relative error: %.6e", results["OOdag_error"])
     logger.info("minSR matrix relative error: %.6e", results["T_error"])
-    logger.info("y vector relative error: %.6e", results["y_error"])
+    logger.info("SR residual ||O†O u - E||^2/||E||^2: %.6e", results["residual_sr"])
+    logger.info(
+        "SR residual ||(O†O+λI) u - E||^2/||E||^2: %.6e",
+        results["residual_sr_reg"],
+    )
+    if results.get("updates_error_tfim") is not None:
+        logger.info(
+            "TFIM updates relative error: %.6e", results["updates_error_tfim"]
+        )
+    if results.get("updates_error_heisenberg") is not None:
+        logger.info(
+            "Heisenberg updates relative error: %.6e",
+            results["updates_error_heisenberg"],
+        )
     logger.info("Updates relative error: %.6e", results["updates_error"])
-    logger.info("Physical vs Site ordering difference: %.6e", results["ordering_diff"])
     logger.info("Memory savings: %.2fx", results["memory_ratio"])
 
     return results
@@ -743,13 +993,13 @@ def main():
     logger.info("MinSR Small-o Trick Demonstration")
     logger.info("=" * 70)
 
-    # MPS demo
+    # MPS demo with much larger parameters for better verification
     logger.info("\n### MPS Demo ###\n")
-    minsr_smallo_mps_demo(length=8, bond_dim=2, n_samples=256)
+    minsr_smallo_mps_demo(length=32, bond_dim=6, n_samples=2048)
 
-    # PEPS demo
+    # PEPS demo with much larger parameters (truncate_bond_dimension = bond_dim^2)
     logger.info("\n### PEPS Demo ###\n")
-    minsr_smallo_peps_demo(length=3, bond_dim=2, n_samples=64, truncate_bond_dimension=4)
+    minsr_smallo_peps_demo(length=5, bond_dim=4, n_samples=512, truncate_bond_dimension=16)
 
 
 if __name__ == "__main__":

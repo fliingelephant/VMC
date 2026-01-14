@@ -58,7 +58,7 @@ def _maybe_log_progress(
     if current % interval != 0 and current != total:
         return
     if logger.isEnabledFor(logging.INFO):
-        logger.info("Sequential PEPS sampling: %d/%d samples", current, total)
+        logger.info("Sequential sampling: %d/%d samples", current, total)
 
 
 def _pad_mps_tensors(
@@ -289,9 +289,13 @@ def sequential_sample_with_gradients(
     key: jax.Array,
     n_sweeps: int = 1,
     burn_in: int = 0,
+    progress_interval: int | None = None,
     full_gradient: bool = False,
 ) -> tuple[jax.Array, jax.Array, jax.Array | None, jax.Array]:
-    """Sequential sampling for MPS with per-sample gradient recording."""
+    """Sequential sampling for MPS with per-sample gradient recording.
+
+    Logs progress every ``progress_interval`` samples when provided.
+    """
     num_samples, num_sweeps, num_burn_in = _validate_sampling_params(
         n_samples, n_sweeps, burn_in
     )
@@ -329,7 +333,7 @@ def sequential_sample_with_gradients(
     samples = []
     grads = []
     p_rows = []
-    for _ in range(num_samples):
+    for idx in range(num_samples):
         indices, key = run_sweeps(indices, key, num_sweeps)
         sample = (2 * indices - 1).astype(jnp.int32)
         samples.append(sample)
@@ -339,6 +343,8 @@ def sequential_sample_with_gradients(
         grads.append(grad_row / amp)
         if not full_gradient:
             p_rows.append(p_row)
+        if progress_interval is not None and progress_interval > 0:
+            _maybe_log_progress(idx + 1, num_samples, progress_interval)
 
     samples = jnp.stack(samples, axis=0)
     grads = jnp.stack(grads, axis=0)

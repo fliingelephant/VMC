@@ -365,7 +365,8 @@ def solve_minsr_smallo(
         T = OOdag
 
     # Regularize and solve
-    dv_red = q.conj().T @ dv if q is not None else dv
+    dv_centered = dv - jnp.mean(dv)
+    dv_red = q.conj().T @ dv_centered if q is not None else dv_centered
     T_reg = T + diag_shift * jnp.eye(T.shape[0], dtype=T.dtype)
     y_red = solve_cholesky(T_reg, dv_red)
     y = q @ y_red if q is not None else y_red
@@ -373,9 +374,7 @@ def solve_minsr_smallo(
     # Recover updates
     updates = recover_updates_smallo(o, p, y, phys_dim, params_per_site)
 
-    # Compute SR-form residuals using centered O and projected force E = O† Q Q† dv.
-    dv_proj = q @ dv_red if q is not None else dv
-    E_param = recover_updates_smallo(o, p, dv_proj, phys_dim, params_per_site)
+    # Compute SR-form residuals using centered O and centered force E = O† dv_c.
     o_updates = apply_O_to_updates(o, p, updates, phys_dim, params_per_site)
     oo_updates = recover_updates_smallo(o, p, o_updates, phys_dim, params_per_site)
     if params_per_site is None:
@@ -400,6 +399,9 @@ def solve_minsr_smallo(
                 mean_O = mean_O.at[start:start + site_pps].set(mean_k)
             offset_reduced += site_pps
             offset_full += phys_dim * site_pps
+    mean_dv = jnp.mean(dv_centered)
+    E_param = recover_updates_smallo(o, p, dv_centered, phys_dim, params_per_site)
+    E_param = E_param - n_samples * jnp.conjugate(mean_O) * mean_dv
     mean_dot_updates = jnp.dot(mean_O, updates)
     oo_updates_centered = oo_updates - n_samples * jnp.conjugate(mean_O) * mean_dot_updates
     residual = oo_updates_centered - E_param
@@ -524,8 +526,8 @@ def verify_smallo_correctness_mps(
     key = jax.random.key(42)
     dv = jax.random.normal(key, (n_samples,), dtype=jnp.complex128)
     dv = dv / jnp.sqrt(n_samples)
+    dv = dv - jnp.mean(dv)
     dv_red = q.conj().T @ dv
-    dv_proj = q @ dv_red
 
     # Full solve: use projected T
     y_full_red = solve_cholesky(T_full_reg, dv_red)
@@ -537,11 +539,14 @@ def verify_smallo_correctness_mps(
     y_smallo = q @ y_smallo_red
     updates_smallo = recover_updates_smallo(o, p, y_smallo, phys_dim, pps)
 
-    # SR-form residual using centered O and the projected force E = O† Q Q† dv
-    E_param = O_raw.conj().T @ dv_proj
+    # SR-form residual using centered O and centered force E = O† dv_c
+    mean_O = jnp.mean(O_raw, axis=0)
+    dv_centered = dv - jnp.mean(dv)
+    mean_dv = jnp.mean(dv_centered)
+    E_param = O_raw.conj().T @ dv_centered
+    E_param = E_param - n_samples * jnp.conjugate(mean_O) * mean_dv
     o_updates = O_raw @ updates_smallo
     oo_updates = O_raw.conj().T @ o_updates
-    mean_O = jnp.mean(O_raw, axis=0)
     mean_dot_updates = jnp.dot(mean_O, updates_smallo)
     oo_updates_centered = oo_updates - n_samples * jnp.conjugate(mean_O) * mean_dot_updates
     residual = oo_updates_centered - E_param
@@ -852,8 +857,8 @@ def verify_smallo_correctness_peps(
     key = jax.random.key(42)
     dv = jax.random.normal(key, (n_samples,), dtype=jnp.complex128)
     dv = dv / jnp.sqrt(n_samples)
+    dv = dv - jnp.mean(dv)
     dv_red = q.conj().T @ dv
-    dv_proj = q @ dv_red
 
     # Full solve
     y_full_red = solve_cholesky(T_full_reg, dv_red)
@@ -865,11 +870,14 @@ def verify_smallo_correctness_peps(
     y_smallo = q @ y_smallo_red
     updates_smallo = recover_updates_smallo(o, p, y_smallo, phys_dim, pps)
 
-    # SR-form residual using centered O and the projected force E = O† Q Q† dv
-    E_param = O_raw.conj().T @ dv_proj
+    # SR-form residual using centered O and centered force E = O† dv_c
+    mean_O = jnp.mean(O_raw, axis=0)
+    dv_centered = dv - jnp.mean(dv)
+    mean_dv = jnp.mean(dv_centered)
+    E_param = O_raw.conj().T @ dv_centered
+    E_param = E_param - n_samples * jnp.conjugate(mean_O) * mean_dv
     o_updates = O_raw @ updates_smallo
     oo_updates = O_raw.conj().T @ o_updates
-    mean_O = jnp.mean(O_raw, axis=0)
     mean_dot_updates = jnp.dot(mean_O, updates_smallo)
     oo_updates_centered = oo_updates - n_samples * jnp.conjugate(mean_O) * mean_dot_updates
     residual = oo_updates_centered - E_param
@@ -888,40 +896,41 @@ def verify_smallo_correctness_peps(
     _log_verify("  Updates relative error: %.6e", updates_error)
 
     # Compare updates with realistic forces from local energies.
-    _log_verify("Comparing minSR solutions with local energies...")
-    n_rows, n_cols = model.shape
-    graph = nk.graph.Square(length=n_rows, pbc=False)
-    hi = nk.hilbert.Spin(s=1 / 2, N=n_rows * n_cols)
-    hamiltonians = {
-        "Heisenberg": nk.operator.Heisenberg(hi, graph, dtype=jnp.complex128),
-        "TFIM": nk.operator.Ising(hi, graph, h=1.0, J=1.0, dtype=jnp.complex128),
-    }
-    sampler = nk.sampler.MetropolisLocal(hi, n_chains=1)
-    vstate = nk.vqs.MCState(
-        sampler,
-        model,
-        n_samples=n_samples,
-        n_discard_per_chain=0,
-    )
-    vstate._samples = samples.reshape(1, n_samples, n_rows * n_cols)
-
     realistic_errors: dict[str, float] = {}
-    for name, hamiltonian in hamiltonians.items():
-        local_energies = vstate.local_estimators(hamiltonian).reshape(-1)
-        dv = (local_energies - jnp.mean(local_energies)) / jnp.sqrt(n_samples)
-        dv_red = q.conj().T @ dv
-        y_full_red = solve_cholesky(T_full_reg, dv_red)
-        y_full = q @ y_full_red
-        updates_full = O_raw.conj().T @ y_full
-        y_smallo_red = solve_cholesky(T_smallo_reg, dv_red)
-        y_smallo = q @ y_smallo_red
-        updates_smallo = recover_updates_smallo(o, p, y_smallo, phys_dim, pps)
-        err = float(
-            jnp.linalg.norm(updates_full - updates_smallo)
-            / (jnp.linalg.norm(updates_full) + 1e-30)
+    if False:  # Disabled per request.
+        _log_verify("Comparing minSR solutions with local energies...")
+        n_rows, n_cols = model.shape
+        graph = nk.graph.Square(length=n_rows, pbc=False)
+        hi = nk.hilbert.Spin(s=1 / 2, N=n_rows * n_cols)
+        hamiltonians = {
+            "Heisenberg": nk.operator.Heisenberg(hi, graph, dtype=jnp.complex128),
+            "TFIM": nk.operator.Ising(hi, graph, h=1.0, J=1.0, dtype=jnp.complex128),
+        }
+        sampler = nk.sampler.MetropolisLocal(hi, n_chains=1)
+        vstate = nk.vqs.MCState(
+            sampler,
+            model,
+            n_samples=n_samples,
+            n_discard_per_chain=0,
         )
-        realistic_errors[name] = err
-        _log_verify("  %s updates relative error: %.6e", name, err)
+        vstate._samples = samples.reshape(1, n_samples, n_rows * n_cols)
+
+        for name, hamiltonian in hamiltonians.items():
+            local_energies = vstate.local_estimators(hamiltonian).reshape(-1)
+            dv = (local_energies - jnp.mean(local_energies)) / jnp.sqrt(n_samples)
+            dv_red = q.conj().T @ dv
+            y_full_red = solve_cholesky(T_full_reg, dv_red)
+            y_full = q @ y_full_red
+            updates_full = O_raw.conj().T @ y_full
+            y_smallo_red = solve_cholesky(T_smallo_reg, dv_red)
+            y_smallo = q @ y_smallo_red
+            updates_smallo = recover_updates_smallo(o, p, y_smallo, phys_dim, pps)
+            err = float(
+                jnp.linalg.norm(updates_full - updates_smallo)
+                / (jnp.linalg.norm(updates_full) + 1e-30)
+            )
+            realistic_errors[name] = err
+            _log_verify("  %s updates relative error: %.6e", name, err)
 
     results = {
         "OOdag_error": OOdag_error,

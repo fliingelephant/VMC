@@ -10,10 +10,10 @@ import jax
 import jax.numpy as jnp
 from plum import dispatch
 
-from VMC.models.mps import SimpleMPS
+from VMC.models.mps import MPS
 from VMC.models.peps import (
     ContractionStrategy,
-    SimplePEPS,
+    PEPS,
     _apply_mpo_from_below,
     _build_row_mpo_static,
     _compute_single_gradient,
@@ -137,7 +137,7 @@ def _sequential_mps_sweep(
 
 @dispatch
 def sequential_sample(
-    model: SimpleMPS,
+    model: MPS,
     *,
     n_samples: int,
     key: jax.Array,
@@ -202,7 +202,7 @@ def sequential_sample(
 
 @dispatch
 def sequential_sample(
-    model: SimplePEPS,
+    model: PEPS,
     *,
     n_samples: int,
     key: jax.Array,
@@ -283,7 +283,7 @@ def sequential_sample(
 
 @dispatch
 def sequential_sample_with_gradients(
-    model: SimpleMPS,
+    model: MPS,
     *,
     n_samples: int,
     key: jax.Array,
@@ -356,7 +356,7 @@ def sequential_sample_with_gradients(
 
 @dispatch
 def sequential_sample_with_gradients(
-    model: SimplePEPS,
+    model: PEPS,
     *,
     n_samples: int,
     key: jax.Array,

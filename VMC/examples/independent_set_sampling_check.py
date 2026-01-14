@@ -11,8 +11,8 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from VMC.models.mps import SimpleMPS
-from VMC.models.peps import SimplePEPS, ZipUp
+from VMC.models.mps import MPS
+from VMC.models.peps import PEPS, ZipUp
 from VMC.utils import (
     DiscardBlockedSampler,
     IndependentSetSampler,
@@ -717,7 +717,7 @@ def main() -> None:
             key_full, key_compare = jax.random.split(jax.random.key(seed + 100), 2)
             key_full, key_energy = jax.random.split(key_full, 2)
             key_hilbert = jax.random.key(seed + 50)
-            mps_full = SimpleMPS(
+            mps_full = MPS(
                 rngs=nnx.Rngs(seed),
                 n_sites=n_sites_full,
                 bond_dim=MPS_BOND_DIM,
@@ -769,7 +769,7 @@ def main() -> None:
                 key=key_energy,
                 n_sweeps=n_sweeps_full,
             )
-            mps_fullsum = SimpleMPS(
+            mps_fullsum = MPS(
                 rngs=nnx.Rngs(seed),
                 n_sites=n_sites_fullsum,
                 bond_dim=MPS_BOND_DIM,
@@ -796,7 +796,7 @@ def main() -> None:
 
             compare_keys = jax.random.split(key_compare, len(compare_configs))
             for cfg, cfg_key in zip(compare_configs, compare_keys):
-                mps_compare = SimpleMPS(
+                mps_compare = MPS(
                     rngs=nnx.Rngs(seed),
                     n_sites=cfg["n_sites"],
                     bond_dim=MPS_BOND_DIM,
@@ -826,7 +826,7 @@ def main() -> None:
             key_full, key_compare = jax.random.split(jax.random.key(seed + 200), 2)
             key_full, key_energy = jax.random.split(key_full, 2)
             key_hilbert = jax.random.key(seed + 150)
-            peps_full = SimplePEPS(
+            peps_full = PEPS(
                 rngs=nnx.Rngs(seed),
                 shape=shape_full,
                 bond_dim=PEPS_BOND_DIM,
@@ -874,7 +874,7 @@ def main() -> None:
                 key=key_energy,
                 n_sweeps=n_sweeps_full_peps,
             )
-            peps_fullsum = SimplePEPS(
+            peps_fullsum = PEPS(
                 rngs=nnx.Rngs(seed),
                 shape=shape_fullsum,
                 bond_dim=PEPS_BOND_DIM,
@@ -904,7 +904,7 @@ def main() -> None:
 
             compare_keys = jax.random.split(key_compare, len(compare_configs))
             for cfg, cfg_key in zip(compare_configs, compare_keys):
-                peps_compare = SimplePEPS(
+                peps_compare = PEPS(
                     rngs=nnx.Rngs(seed),
                     shape=cfg["shape"],
                     bond_dim=PEPS_BOND_DIM,

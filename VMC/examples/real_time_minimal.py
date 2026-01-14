@@ -14,8 +14,8 @@ from netket.operator import AbstractOperator
 from flax import nnx
 
 from VMC.drivers.custom_driver import CustomTDVP_SR, RealTime
-from VMC.models.mps import SimpleMPS
-from VMC.models.peps import SimplePEPS
+from VMC.models.mps import MPS
+from VMC.models.peps import PEPS
 from VMC.preconditioners import SRPreconditioner
 from VMC.samplers.sequential import sequential_sample
 from VMC.examples.real_time import build_heisenberg_square
@@ -301,7 +301,7 @@ def minimal_real_time_mcmc_demo(
     """Minimal real-time TDVP loop with a built-in MCMC sampler."""
     hi, H, _ = build_heisenberg_square(length, pbc=False)
     sampler = nk.sampler.MetropolisLocal(hi, n_chains=n_chains)
-    model = SimpleMPS(
+    model = MPS(
         rngs=nnx.Rngs(seed),
         n_sites=hi.size,
         bond_dim=bond_dim,
@@ -384,7 +384,7 @@ def minimal_real_time_random_flip_demo(
     """Minimal real-time TDVP loop with random-flip Metropolis sampling."""
     hi, H, _ = build_heisenberg_square(length, pbc=False)
     sampler = nk.sampler.MetropolisLocal(hi, n_chains=1)
-    model = SimpleMPS(
+    model = MPS(
         rngs=nnx.Rngs(seed),
         n_sites=hi.size,
         bond_dim=bond_dim,
@@ -495,7 +495,7 @@ def minimal_real_time_sequential_demo(
     """Minimal real-time TDVP loop with sequential Metropolis sampling."""
     hi, H, _ = build_heisenberg_square(length, pbc=False)
     sampler = nk.sampler.MetropolisLocal(hi, n_chains=1)
-    model = SimpleMPS(
+    model = MPS(
         rngs=nnx.Rngs(seed),
         n_sites=hi.size,
         bond_dim=bond_dim,
@@ -593,7 +593,7 @@ def minimal_real_time_peps_random_flip_demo(
     """Minimal real-time TDVP loop for PEPS with random-flip Metropolis sampling."""
     hi, H, _ = build_heisenberg_square(length, pbc=False)
     sampler = nk.sampler.MetropolisLocal(hi, n_chains=1)
-    model = SimplePEPS(
+    model = PEPS(
         rngs=nnx.Rngs(seed),
         shape=(length, length),
         bond_dim=bond_dim,
@@ -704,7 +704,7 @@ def minimal_real_time_peps_sequential_demo(
     """Minimal real-time TDVP loop for PEPS with sequential Metropolis sampling."""
     hi, H, _ = build_heisenberg_square(length, pbc=False)
     sampler = nk.sampler.MetropolisLocal(hi, n_chains=1)
-    model = SimplePEPS(
+    model = PEPS(
         rngs=nnx.Rngs(seed),
         shape=(length, length),
         bond_dim=bond_dim,

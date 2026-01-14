@@ -10,8 +10,8 @@ import jax.numpy as jnp
 from flax import nnx
 
 from VMC.core import _value_and_grad_batch
-from VMC.models.mps import SimpleMPS
-from VMC.models.peps import SimplePEPS, ZipUp
+from VMC.models.mps import MPS
+from VMC.models.peps import PEPS, ZipUp
 from VMC.qgt import QGT, Jacobian, SlicedJacobian, PhysicalOrdering, SiteOrdering
 from VMC.samplers.sequential import sequential_sample
 from VMC.utils.smallo import params_per_site
@@ -31,7 +31,7 @@ def minsr_demo_mps(
     logger.info("MinSR Demo (MPS): length=%d, bond_dim=%d, n_samples=%d",
                 length, bond_dim, n_samples)
 
-    model = SimpleMPS(rngs=nnx.Rngs(seed), n_sites=length, bond_dim=bond_dim)
+    model = MPS(rngs=nnx.Rngs(seed), n_sites=length, bond_dim=bond_dim)
     key = jax.random.key(seed)
     samples = sequential_sample(model, n_samples=n_samples, key=key)
 
@@ -59,7 +59,7 @@ def minsr_demo_peps(
     logger.info("MinSR Demo (PEPS): %dx%d, bond_dim=%d, n_samples=%d",
                 length, length, bond_dim, n_samples)
 
-    model = SimplePEPS(
+    model = PEPS(
         rngs=nnx.Rngs(seed),
         shape=(length, length),
         bond_dim=bond_dim,

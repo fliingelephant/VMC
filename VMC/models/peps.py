@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from jax.typing import DTypeLike
 
 __all__ = [
-    "SimplePEPS",
+    "PEPS",
     # Contraction strategies (ABC pattern)
     "ContractionStrategy",
     "NoTruncation",
@@ -503,7 +503,7 @@ def make_peps_amplitude(
     @jax.custom_vjp
     def amplitude_fn(tensors: Any, sample: jax.Array) -> jax.Array:
         """Compute PEPS amplitude with custom VJP."""
-        return SimplePEPS._single_amplitude(tensors, sample, shape, strategy)
+        return PEPS._single_amplitude(tensors, sample, shape, strategy)
 
     def amplitude_fwd(tensors: Any, sample: jax.Array) -> tuple[jax.Array, tuple]:
         """Forward pass returning residuals."""
@@ -542,7 +542,7 @@ def make_peps_amplitude(
     return amplitude_fn
 
 
-class SimplePEPS(nnx.Module):
+class PEPS(nnx.Module):
     """Open-boundary PEPS on a rectangular grid contracted with a boundary MPS.
 
     Each site tensor has shape (phys_dim, up, down, left, right) with boundary
@@ -680,9 +680,9 @@ class SimplePEPS(nnx.Module):
             for _ in range(shape[1])
         )
         for row in range(shape[0]):
-            mpo = SimplePEPS._build_row_mpo(tensors, spins[row], row, shape[1])
+            mpo = PEPS._build_row_mpo(tensors, spins[row], row, shape[1])
             boundary = strategy.apply(boundary, mpo)
-        return SimplePEPS._contract_bottom(boundary)
+        return PEPS._contract_bottom(boundary)
 
     @nnx.jit
     def __call__(self, x: jax.Array) -> jax.Array:

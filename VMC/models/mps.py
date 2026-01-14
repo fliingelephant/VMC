@@ -18,10 +18,10 @@ from VMC.utils.utils import spin_to_occupancy
 if TYPE_CHECKING:
     from jax.typing import DTypeLike
 
-__all__ = ["SimpleMPS"]
+__all__ = ["MPS"]
 
 
-class SimpleMPS(nnx.Module):
+class MPS(nnx.Module):
     """Lightweight open-boundary MPS producing log-psi values.
 
     tensors: list of site tensors with shape (phys_dim, D_left, D_right).

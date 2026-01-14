@@ -5,8 +5,8 @@ from VMC import config  # noqa: F401 - JAX config must be imported first
 
 from plum import dispatch
 
-from VMC.models.mps import SimpleMPS
-from VMC.models.peps import SimplePEPS
+from VMC.models.mps import MPS
+from VMC.models.peps import PEPS
 
 __all__ = [
     "params_per_site",
@@ -14,7 +14,7 @@ __all__ = [
 
 
 @dispatch
-def params_per_site(model: SimpleMPS) -> list[int]:
+def params_per_site(model: MPS) -> list[int]:
     """Compute number of parameters per physical slice for each MPS site."""
     n_sites = model.n_sites
     bond_dim = model.bond_dim
@@ -27,7 +27,7 @@ def params_per_site(model: SimpleMPS) -> list[int]:
 
 
 @dispatch
-def params_per_site(model: SimplePEPS) -> list[int]:
+def params_per_site(model: PEPS) -> list[int]:
     """Compute number of parameters per physical slice for each PEPS site."""
     n_rows, n_cols = model.shape
     bond_dim = model.bond_dim

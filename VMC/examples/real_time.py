@@ -22,8 +22,8 @@ from VMC.drivers.custom_driver import (
     PropagationType,
     RealTime,
 )
-from VMC.models.mps import SimpleMPS
-from VMC.models.peps import SimplePEPS
+from VMC.models.mps import MPS
+from VMC.models.peps import PEPS
 from VMC.preconditioners import solve_cholesky
 from VMC.utils.vmc_utils import get_apply_fun
 from VMC.utils.utils import occupancy_to_spin
@@ -96,7 +96,7 @@ def random_bitstring(key, n_sites: int):
     return spins
 
 
-def reset_product_state_mps(model: SimpleMPS, spins: jnp.ndarray):
+def reset_product_state_mps(model: MPS, spins: jnp.ndarray):
     eps = 1e-3
     for site, t in enumerate(model.tensors):
         phys_idx = 1 if spins[site] == 1 else 0
@@ -105,7 +105,7 @@ def reset_product_state_mps(model: SimpleMPS, spins: jnp.ndarray):
         t.value = arr
 
 
-def reset_product_state_peps(model: SimplePEPS, spins: jnp.ndarray):
+def reset_product_state_peps(model: PEPS, spins: jnp.ndarray):
     new_rows = []
     idx = 0
     for row in model.tensors:
@@ -317,9 +317,9 @@ def run_case(
     """
     if spins is None:
         spins = random_bitstring(jax.random.key(0), hi.size)
-    if isinstance(model, SimpleMPS):
+    if isinstance(model, MPS):
         reset_product_state_mps(model, spins)
-    elif isinstance(model, SimplePEPS):
+    elif isinstance(model, PEPS):
         reset_product_state_peps(model, spins)
     """
     dt = T / n_steps
@@ -446,7 +446,7 @@ def main():
     spins = random_bitstring(jax.random.key(0), hi.size)
 
     # 1. MPS real-time RK4 with custom TDVP (SR, no NTK)
-    mps_model_custom = SimpleMPS(rngs=nnx.Rngs(0), n_sites=n_sites, bond_dim=mps_bond)
+    mps_model_custom = MPS(rngs=nnx.Rngs(0), n_sites=n_sites, bond_dim=mps_bond)
     _, psi_mps_custom, basis = run_case(
         "Real-time MPS (RK4, custom TDVP SR)",
         mps_model_custom,
@@ -465,7 +465,7 @@ def main():
     )
 
     # 2. MPS real-time RK4 with NetKet TDVP (standard SR)
-    mps_model_netket = SimpleMPS(rngs=nnx.Rngs(1), n_sites=n_sites, bond_dim=mps_bond)
+    mps_model_netket = MPS(rngs=nnx.Rngs(1), n_sites=n_sites, bond_dim=mps_bond)
     _, psi_mps_netket, _ = run_case(
         "Real-time MPS (RK4, NetKet TDVP SR)",
         mps_model_netket,
@@ -484,7 +484,7 @@ def main():
     )
 
     # 3. MPS real-time RK4 with NetKet TDVP (FullSumState)
-    mps_model_fullsum = SimpleMPS(rngs=nnx.Rngs(2), n_sites=n_sites, bond_dim=mps_bond)
+    mps_model_fullsum = MPS(rngs=nnx.Rngs(2), n_sites=n_sites, bond_dim=mps_bond)
     run_case(
         "Real-time MPS (RK4, NetKet TDVP FullSum)",
         mps_model_fullsum,

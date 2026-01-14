@@ -9,8 +9,8 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from VMC.models.mps import SimpleMPS
-from VMC.models.peps import SimplePEPS, ZipUp
+from VMC.models.mps import MPS
+from VMC.models.peps import PEPS, ZipUp
 from VMC.core import _value_and_grad_batch
 from VMC.qgt import QGT, Jacobian, SlicedJacobian, PhysicalOrdering, SiteOrdering
 from VMC.utils.smallo import params_per_site
@@ -22,7 +22,7 @@ class QGTTest(unittest.TestCase):
 
     def test_full_vs_sliced_sample_space(self):
         """Full and sliced Jacobian should produce same OO†."""
-        model = SimpleMPS(rngs=nnx.Rngs(0), n_sites=4, bond_dim=2)
+        model = MPS(rngs=nnx.Rngs(0), n_sites=4, bond_dim=2)
         samples = sequential_sample(model, n_samples=32, key=jax.random.key(0))
         samples_flat = flatten_samples(samples)
 
@@ -37,7 +37,7 @@ class QGTTest(unittest.TestCase):
 
     def test_full_vs_sliced_physical_space(self):
         """Full and sliced Jacobian should produce same O†O via to_dense()."""
-        model = SimpleMPS(rngs=nnx.Rngs(0), n_sites=4, bond_dim=2)
+        model = MPS(rngs=nnx.Rngs(0), n_sites=4, bond_dim=2)
         samples = sequential_sample(model, n_samples=32, key=jax.random.key(0))
         samples_flat = flatten_samples(samples)
 
@@ -52,7 +52,7 @@ class QGTTest(unittest.TestCase):
 
     def test_ordering_equivalence(self):
         """PhysicalOrdering and SiteOrdering should produce same QGT."""
-        model = SimpleMPS(rngs=nnx.Rngs(0), n_sites=4, bond_dim=2)
+        model = MPS(rngs=nnx.Rngs(0), n_sites=4, bond_dim=2)
         samples = sequential_sample(model, n_samples=32, key=jax.random.key(0))
         samples_flat = flatten_samples(samples)
 
@@ -68,7 +68,7 @@ class QGTTest(unittest.TestCase):
 
     def test_solve_residual_mps(self):
         """Solve residual should be small for MPS in physical space."""
-        model = SimpleMPS(rngs=nnx.Rngs(0), n_sites=8, bond_dim=4)
+        model = MPS(rngs=nnx.Rngs(0), n_sites=8, bond_dim=4)
         samples = sequential_sample(model, n_samples=256, key=jax.random.key(0))
         samples_flat = flatten_samples(samples)
         diag_shift = 1e-8
@@ -89,7 +89,7 @@ class QGTTest(unittest.TestCase):
     def test_solve_residual_peps(self):
         """Solve residual should be small for PEPS with SiteOrdering."""
         phys_dim = 2  # Standard spin-1/2
-        model = SimplePEPS(
+        model = PEPS(
             rngs=nnx.Rngs(0), shape=(3, 3), bond_dim=2,
             contraction_strategy=ZipUp(4),
         )
@@ -112,7 +112,7 @@ class QGTTest(unittest.TestCase):
 
     def test_solve_shape(self):
         """Solve should return correct shape."""
-        model = SimpleMPS(rngs=nnx.Rngs(0), n_sites=4, bond_dim=2)
+        model = MPS(rngs=nnx.Rngs(0), n_sites=4, bond_dim=2)
         samples = sequential_sample(model, n_samples=32, key=jax.random.key(0))
         jac = SlicedJacobian.from_samples(model, samples)
         qgt = QGT(jac, space="sample")
@@ -125,7 +125,7 @@ class QGTTest(unittest.TestCase):
 
     def test_sample_space_solve_residual(self):
         """Sample space solve residual after recovery O†y should be small."""
-        model = SimpleMPS(rngs=nnx.Rngs(0), n_sites=8, bond_dim=4)
+        model = MPS(rngs=nnx.Rngs(0), n_sites=8, bond_dim=4)
         samples = sequential_sample(model, n_samples=256, key=jax.random.key(0))
         samples_flat = flatten_samples(samples)
         diag_shift = 1e-4
@@ -150,7 +150,7 @@ class QGTTest(unittest.TestCase):
 
     def test_weight_null_projection(self):
         """Solution y should be orthogonal to all-ones after null projection."""
-        model = SimpleMPS(rngs=nnx.Rngs(0), n_sites=4, bond_dim=2)
+        model = MPS(rngs=nnx.Rngs(0), n_sites=4, bond_dim=2)
         samples = sequential_sample(model, n_samples=32, key=jax.random.key(0))
         samples_flat = flatten_samples(samples)
         diag_shift = 1e-4
@@ -172,7 +172,7 @@ class QGTTest(unittest.TestCase):
     def test_peps_sample_space(self):
         """PEPS sample space QGT and solve."""
         phys_dim = 2  # Standard spin-1/2
-        model = SimplePEPS(
+        model = PEPS(
             rngs=nnx.Rngs(0), shape=(3, 3), bond_dim=2,
             contraction_strategy=ZipUp(4),
         )

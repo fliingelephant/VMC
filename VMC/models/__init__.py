@@ -1,12 +1,12 @@
 """Tensor network models used in VMC workflows."""
 from __future__ import annotations
 
-from VMC.models.mps import SimpleMPS
+from VMC.models.mps import MPS
 from VMC.models.peps import (
     ContractionStrategy,
     DensityMatrix,
     NoTruncation,
-    SimplePEPS,
+    PEPS,
     ZipUp,
     make_peps_amplitude,
 )
@@ -14,9 +14,9 @@ from VMC.models.peps import (
 __all__ = [
     "ContractionStrategy",
     "DensityMatrix",
+    "MPS",
     "NoTruncation",
-    "SimpleMPS",
-    "SimplePEPS",
+    "PEPS",
     "ZipUp",
     "make_peps_amplitude",
 ]

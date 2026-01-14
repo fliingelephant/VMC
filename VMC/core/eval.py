@@ -10,9 +10,9 @@ import jax
 import jax.numpy as jnp
 from plum import dispatch
 
-from VMC.models.mps import SimpleMPS
+from VMC.models.mps import MPS
 from VMC.models.peps import (
-    SimplePEPS,
+    PEPS,
     _compute_all_gradients,
     _forward_with_cache,
     make_peps_amplitude,
@@ -31,7 +31,7 @@ __all__ = [
 
 @dispatch
 def _value(
-    model: SimpleMPS,
+    model: MPS,
     sample: jax.Array,
 ) -> jax.Array:
     """Compute amplitude for a single MPS sample."""
@@ -39,13 +39,13 @@ def _value(
     if sample.ndim != 1:
         raise ValueError("sample must be a 1D spin configuration.")
     tensors = [jnp.asarray(t) for t in model.tensors]
-    amps = SimpleMPS._batch_amplitudes(tensors, sample[None, :])
+    amps = MPS._batch_amplitudes(tensors, sample[None, :])
     return amps[0]
 
 
 @dispatch
 def _value(
-    model: SimplePEPS,
+    model: PEPS,
     sample: jax.Array,
 ) -> jax.Array:
     """Compute amplitude for a single PEPS sample."""
@@ -53,11 +53,11 @@ def _value(
     if sample.ndim != 1:
         raise ValueError("sample must be a 1D spin configuration.")
     tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
-    return SimplePEPS._single_amplitude(tensors, sample, model.shape, model.strategy)
+    return PEPS._single_amplitude(tensors, sample, model.shape, model.strategy)
 
 
 def _grad(
-    model: SimpleMPS | SimplePEPS,
+    model: MPS | PEPS,
     sample: jax.Array,
     *,
     full_gradient: bool = False,
@@ -71,7 +71,7 @@ def _grad(
 
 @dispatch
 def _value_and_grad(
-    model: SimpleMPS,
+    model: MPS,
     sample: jax.Array,
     *,
     full_gradient: bool = False,
@@ -140,7 +140,7 @@ def _value_and_grad(
 
 @dispatch
 def _value_and_grad(
-    model: SimplePEPS,
+    model: PEPS,
     sample: jax.Array,
     *,
     full_gradient: bool = False,
@@ -204,7 +204,7 @@ def _value_and_grad(
 
 
 def _value_batch(
-    model: SimpleMPS | SimplePEPS,
+    model: MPS | PEPS,
     samples: jax.Array,
 ) -> jax.Array:
     """Compute amplitudes for a batch of samples."""
@@ -212,7 +212,7 @@ def _value_batch(
 
 
 def _grad_batch(
-    model: SimpleMPS | SimplePEPS,
+    model: MPS | PEPS,
     samples: jax.Array,
     *,
     full_gradient: bool = False,
@@ -222,7 +222,7 @@ def _grad_batch(
 
 
 def _value_and_grad_batch(
-    model: SimpleMPS | SimplePEPS,
+    model: MPS | PEPS,
     samples: jax.Array,
     *,
     full_gradient: bool = False,

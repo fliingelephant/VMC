@@ -30,9 +30,10 @@ from flax import nnx
 from VMC.core import _value_and_grad_batch
 from VMC.models.mps import SimpleMPS
 from VMC.models.peps import SimplePEPS, ZipUp
+from VMC.preconditioners import solve_cholesky
 from VMC.samplers.sequential import sequential_sample_with_gradients
 from VMC.utils.smallo import params_per_site
-from VMC.utils.vmc_utils import flatten_samples, get_apply_fun
+from VMC.utils.vmc_utils import flatten_samples
 
 logger = logging.getLogger(__name__)
 VERIFY_TAG = "[verify]"
@@ -319,14 +320,15 @@ def solve_minsr_smallo(
     ordering: str = "physical",
     n_sites: int | None = None,
     params_per_site: list[int] | tuple[int, ...] | None = None,
+    project_null: bool = True,
 ) -> tuple[jax.Array, dict]:
     """Solve minSR using small-o trick.
 
     Steps:
         1. Build OOdag via specified ordering
-        2. Project to get minSR matrix T using Q† O
-        3. Solve (T + diag_shift*I) @ y = Q† dv
-        4. Recover updates = O† Q y via small-o
+        2. (Optional) Project to get minSR matrix T using Q† O
+        3. Solve (T + diag_shift*I) @ y = (Q† dv) with Cholesky
+        4. Recover updates = O† y via small-o
 
     Args:
         o: (n_samples, n_params_reduced) uncentered small-o Jacobian.
@@ -337,6 +339,7 @@ def solve_minsr_smallo(
         ordering: "physical" or "site" summation ordering.
         n_sites: Required if ordering="site".
         params_per_site: Required for full-parameter updates and site ordering.
+        project_null: Whether to project out the all-ones null vector.
 
     Returns:
         updates: (n_params_full,) parameter updates in full space.
@@ -354,24 +357,52 @@ def solve_minsr_smallo(
 
     # Project to get minSR matrix
     n_samples = o.shape[0]
-    q = _nullspace_basis(n_samples, OOdag.dtype)
-    T = build_minsr_matrix(OOdag, q)
+    if project_null:
+        q = _nullspace_basis(n_samples, OOdag.dtype)
+        T = build_minsr_matrix(OOdag, q)
+    else:
+        q = None
+        T = OOdag
 
     # Regularize and solve
-    dv_red = q.conj().T @ dv
+    dv_red = q.conj().T @ dv if q is not None else dv
     T_reg = T + diag_shift * jnp.eye(T.shape[0], dtype=T.dtype)
-    y_red = jsp.linalg.solve(T_reg, dv_red, assume_a="pos")
-    y = q @ y_red
+    y_red = solve_cholesky(T_reg, dv_red)
+    y = q @ y_red if q is not None else y_red
 
     # Recover updates
     updates = recover_updates_smallo(o, p, y, phys_dim, params_per_site)
 
-    # Compute SR-form residuals using the projected force E = O† Q Q† dv.
-    dv_proj = q @ dv_red
+    # Compute SR-form residuals using centered O and projected force E = O† Q Q† dv.
+    dv_proj = q @ dv_red if q is not None else dv
     E_param = recover_updates_smallo(o, p, dv_proj, phys_dim, params_per_site)
     o_updates = apply_O_to_updates(o, p, updates, phys_dim, params_per_site)
     oo_updates = recover_updates_smallo(o, p, o_updates, phys_dim, params_per_site)
-    residual = oo_updates - E_param
+    if params_per_site is None:
+        n_params_full = o.shape[1] * phys_dim
+        mean_O = jnp.zeros((n_params_full,), dtype=o.dtype)
+        for k in range(phys_dim):
+            mask = (p == k).astype(o.dtype)
+            mean_k = jnp.sum(o * mask, axis=0) / n_samples
+            mean_O = mean_O.at[k::phys_dim].set(mean_k)
+    else:
+        n_params_full = sum(phys_dim * pps for pps in params_per_site)
+        mean_O = jnp.zeros((n_params_full,), dtype=o.dtype)
+        offset_reduced = 0
+        offset_full = 0
+        for site_pps in params_per_site:
+            o_site = o[:, offset_reduced:offset_reduced + site_pps]
+            p_site = p[:, offset_reduced:offset_reduced + site_pps]
+            for k in range(phys_dim):
+                mask = (p_site == k).astype(o.dtype)
+                mean_k = jnp.sum(o_site * mask, axis=0) / n_samples
+                start = offset_full + k * site_pps
+                mean_O = mean_O.at[start:start + site_pps].set(mean_k)
+            offset_reduced += site_pps
+            offset_full += phys_dim * site_pps
+    mean_dot_updates = jnp.dot(mean_O, updates)
+    oo_updates_centered = oo_updates - n_samples * jnp.conjugate(mean_O) * mean_dot_updates
+    residual = oo_updates_centered - E_param
     residual_reg = residual + diag_shift * updates
     E_norm_sq = jnp.vdot(E_param, E_param).real
     residual_norm = jnp.vdot(residual, residual).real / E_norm_sq
@@ -380,6 +411,7 @@ def solve_minsr_smallo(
         "residual_sr": float(residual_norm),
         "residual_sr_reg": float(residual_reg_norm),
         "ordering": ordering,
+        "project_null": project_null,
     }
 
     return updates, metrics
@@ -496,27 +528,31 @@ def verify_smallo_correctness_mps(
     dv_proj = q @ dv_red
 
     # Full solve: use projected T
-    y_full_red = jsp.linalg.solve(T_full_reg, dv_red, assume_a="pos")
+    y_full_red = solve_cholesky(T_full_reg, dv_red)
     y_full = q @ y_full_red
     updates_full = O_raw.conj().T @ y_full
 
     # Small-o: solve and recover updates in full space
-    y_smallo_red = jsp.linalg.solve(T_smallo_reg, dv_red, assume_a="pos")
+    y_smallo_red = solve_cholesky(T_smallo_reg, dv_red)
     y_smallo = q @ y_smallo_red
     updates_smallo = recover_updates_smallo(o, p, y_smallo, phys_dim, pps)
 
-    # SR-form residual using the projected force E = O† Q Q† dv
+    # SR-form residual using centered O and the projected force E = O† Q Q† dv
     E_param = O_raw.conj().T @ dv_proj
     o_updates = O_raw @ updates_smallo
     oo_updates = O_raw.conj().T @ o_updates
-    residual = oo_updates - E_param
+    mean_O = jnp.mean(O_raw, axis=0)
+    mean_dot_updates = jnp.dot(mean_O, updates_smallo)
+    oo_updates_centered = oo_updates - n_samples * jnp.conjugate(mean_O) * mean_dot_updates
+    residual = oo_updates_centered - E_param
     residual_reg = residual + diag_shift * updates_smallo
     E_norm_sq = jnp.vdot(E_param, E_param).real
     residual_norm = jnp.vdot(residual, residual).real / E_norm_sq
     residual_reg_norm = jnp.vdot(residual_reg, residual_reg).real / E_norm_sq
-    _log_verify("  SR residual ||O†O u - E||^2/||E||^2: %.6e", residual_norm)
+    _log_verify("  SR residual (centered O) ||O†O u - E||^2/||E||^2: %.6e", residual_norm)
     _log_verify(
-        "  SR residual ||(O†O+λI) u - E||^2/||E||^2: %.6e", residual_reg_norm
+        "  SR residual (centered O) ||(O†O+λI) u - E||^2/||E||^2: %.6e",
+        residual_reg_norm,
     )
 
     # Compare updates
@@ -539,22 +575,16 @@ def verify_smallo_correctness_mps(
         n_discard_per_chain=0,
     )
     vstate._samples = samples.reshape(1, n_samples, model.n_sites)
-    apply_fun, params, model_state, kwargs = get_apply_fun(vstate)
-    flat = vstate._samples.reshape(-1, model.n_sites)
-    logpsi = jax.vmap(
-        lambda s: apply_fun({"params": params, **model_state}, s, **kwargs)
-    )(flat)
-    vstate._logpsi = logpsi.reshape(1, n_samples)
 
     realistic_errors: dict[str, float] = {}
     for name, hamiltonian in hamiltonians.items():
         local_energies = vstate.local_estimators(hamiltonian).reshape(-1)
         dv = (local_energies - jnp.mean(local_energies)) / jnp.sqrt(n_samples)
         dv_red = q.conj().T @ dv
-        y_full_red = jsp.linalg.solve(T_full_reg, dv_red, assume_a="pos")
+        y_full_red = solve_cholesky(T_full_reg, dv_red)
         y_full = q @ y_full_red
         updates_full = O_raw.conj().T @ y_full
-        y_smallo_red = jsp.linalg.solve(T_smallo_reg, dv_red, assume_a="pos")
+        y_smallo_red = solve_cholesky(T_smallo_reg, dv_red)
         y_smallo = q @ y_smallo_red
         updates_smallo = recover_updates_smallo(o, p, y_smallo, phys_dim, pps)
         err = float(
@@ -619,7 +649,63 @@ def minsr_smallo_mps_demo(
     )
 
     # Run verification with pre-computed small-o
-    results = verify_smallo_correctness_mps(model, samples, diag_shift, o=o, p=p)
+    diag_shift_projected = 1e-8
+    results = verify_smallo_correctness_mps(
+        model, samples, diag_shift_projected, o=o, p=p
+    )
+
+    # Compare projected vs unprojected minSR residuals (same dv).
+    key2 = jax.random.key(seed + 2)
+    dv = jax.random.normal(key2, (n_samples,), dtype=jnp.complex128)
+    dv = dv / jnp.sqrt(n_samples)
+    pps = params_per_site(model)
+    _, metrics_proj = solve_minsr_smallo(
+        o,
+        p,
+        dv,
+        model.phys_dim,
+        diag_shift_projected,
+        ordering="physical",
+        params_per_site=pps,
+        project_null=True,
+    )
+    diag_shift_unproj = 1e-2
+    _, metrics_unproj = solve_minsr_smallo(
+        o,
+        p,
+        dv,
+        model.phys_dim,
+        diag_shift_unproj,
+        ordering="physical",
+        params_per_site=pps,
+        project_null=False,
+    )
+    results["residual_sr_projected"] = metrics_proj["residual_sr"]
+    results["residual_sr_reg_projected"] = metrics_proj["residual_sr_reg"]
+    results["residual_sr_unprojected"] = metrics_unproj["residual_sr"]
+    results["residual_sr_reg_unprojected"] = metrics_unproj["residual_sr_reg"]
+
+    logger.info("Building OOdag with physical ordering...")
+    t0 = time.perf_counter()
+    OOdag_phys = build_OOdag_phys_ordering(o, p, model.phys_dim)
+    jax.block_until_ready(OOdag_phys)
+    time_phys = time.perf_counter() - t0
+    logger.info("  Physical ordering time: %.3fs", time_phys)
+
+    logger.info("Building OOdag with site ordering...")
+    t0 = time.perf_counter()
+    OOdag_site = build_OOdag_site_ordering(
+        o, p, model.n_sites, pps, model.phys_dim
+    )
+    jax.block_until_ready(OOdag_site)
+    time_site = time.perf_counter() - t0
+    logger.info("  Site ordering time: %.3fs", time_site)
+
+    ordering_diff = jnp.linalg.norm(OOdag_phys - OOdag_site) / jnp.linalg.norm(OOdag_phys)
+    logger.info("  Ordering difference (should be ~0): %.6e", float(ordering_diff))
+    results["ordering_time_phys"] = time_phys
+    results["ordering_time_site"] = time_site
+    results["ordering_diff"] = float(ordering_diff)
 
     logger.info("\n" + "=" * 60)
     logger.info("Results Summary")
@@ -627,11 +713,36 @@ def minsr_smallo_mps_demo(
     logger.info("OOdag relative error: %.6e", results["OOdag_error"])
     logger.info("minSR matrix relative error: %.6e", results["T_error"])
     logger.info("Null vector check: %.6e", results["null_check"])
-    logger.info("SR residual ||O†O u - E||^2/||E||^2: %.6e", results["residual_sr"])
     logger.info(
-        "SR residual ||(O†O+λI) u - E||^2/||E||^2: %.6e",
+        "SR residual (centered O) ||O†O u - E||^2/||E||^2: %.6e",
+        results["residual_sr"],
+    )
+    logger.info(
+        "SR residual (centered O) ||(O†O+λI) u - E||^2/||E||^2: %.6e",
         results["residual_sr_reg"],
     )
+    logger.info("OOdag build time (physical): %.3fs", results["ordering_time_phys"])
+    logger.info("OOdag build time (site): %.3fs", results["ordering_time_site"])
+    logger.info("Ordering difference (should be ~0): %.6e", results["ordering_diff"])
+    logger.info(
+        "Projected residual ||O†O u - E||^2/||E||^2: %.6e",
+        results["residual_sr_projected"],
+    )
+    logger.info(
+        "Projected residual ||(O†O+λI) u - E||^2/||E||^2: %.6e",
+        results["residual_sr_reg_projected"],
+    )
+    logger.info(
+        "Unprojected residual ||O†O u - E||^2/||E||^2: %.6e",
+        results["residual_sr_unprojected"],
+    )
+    logger.info(
+        "Unprojected residual ||(O†O+λI) u - E||^2/||E||^2: %.6e",
+        results["residual_sr_reg_unprojected"],
+    )
+    logger.info("OOdag build time (physical): %.3fs", results["ordering_time_phys"])
+    logger.info("OOdag build time (site): %.3fs", results["ordering_time_site"])
+    logger.info("Ordering difference (should be ~0): %.6e", results["ordering_diff"])
     if results.get("updates_error_tfim") is not None:
         logger.info(
             "TFIM updates relative error: %.6e", results["updates_error_tfim"]
@@ -745,27 +856,31 @@ def verify_smallo_correctness_peps(
     dv_proj = q @ dv_red
 
     # Full solve
-    y_full_red = jsp.linalg.solve(T_full_reg, dv_red, assume_a="pos")
+    y_full_red = solve_cholesky(T_full_reg, dv_red)
     y_full = q @ y_full_red
     updates_full = O_raw.conj().T @ y_full
 
     # Small-o: solve and recover updates in full space
-    y_smallo_red = jsp.linalg.solve(T_smallo_reg, dv_red, assume_a="pos")
+    y_smallo_red = solve_cholesky(T_smallo_reg, dv_red)
     y_smallo = q @ y_smallo_red
     updates_smallo = recover_updates_smallo(o, p, y_smallo, phys_dim, pps)
 
-    # SR-form residual using the projected force E = O† Q Q† dv
+    # SR-form residual using centered O and the projected force E = O† Q Q† dv
     E_param = O_raw.conj().T @ dv_proj
     o_updates = O_raw @ updates_smallo
     oo_updates = O_raw.conj().T @ o_updates
-    residual = oo_updates - E_param
+    mean_O = jnp.mean(O_raw, axis=0)
+    mean_dot_updates = jnp.dot(mean_O, updates_smallo)
+    oo_updates_centered = oo_updates - n_samples * jnp.conjugate(mean_O) * mean_dot_updates
+    residual = oo_updates_centered - E_param
     residual_reg = residual + diag_shift * updates_smallo
     E_norm_sq = jnp.vdot(E_param, E_param).real
     residual_norm = jnp.vdot(residual, residual).real / E_norm_sq
     residual_reg_norm = jnp.vdot(residual_reg, residual_reg).real / E_norm_sq
-    _log_verify("  SR residual ||O†O u - E||^2/||E||^2: %.6e", residual_norm)
+    _log_verify("  SR residual (centered O) ||O†O u - E||^2/||E||^2: %.6e", residual_norm)
     _log_verify(
-        "  SR residual ||(O†O+λI) u - E||^2/||E||^2: %.6e", residual_reg_norm
+        "  SR residual (centered O) ||(O†O+λI) u - E||^2/||E||^2: %.6e",
+        residual_reg_norm,
     )
 
     # Compare updates
@@ -789,22 +904,16 @@ def verify_smallo_correctness_peps(
         n_discard_per_chain=0,
     )
     vstate._samples = samples.reshape(1, n_samples, n_rows * n_cols)
-    apply_fun, params, model_state, kwargs = get_apply_fun(vstate)
-    flat = vstate._samples.reshape(-1, n_rows * n_cols)
-    logpsi = jax.vmap(
-        lambda s: apply_fun({"params": params, **model_state}, s, **kwargs)
-    )(flat)
-    vstate._logpsi = logpsi.reshape(1, n_samples)
 
     realistic_errors: dict[str, float] = {}
     for name, hamiltonian in hamiltonians.items():
         local_energies = vstate.local_estimators(hamiltonian).reshape(-1)
         dv = (local_energies - jnp.mean(local_energies)) / jnp.sqrt(n_samples)
         dv_red = q.conj().T @ dv
-        y_full_red = jsp.linalg.solve(T_full_reg, dv_red, assume_a="pos")
+        y_full_red = solve_cholesky(T_full_reg, dv_red)
         y_full = q @ y_full_red
         updates_full = O_raw.conj().T @ y_full
-        y_smallo_red = jsp.linalg.solve(T_smallo_reg, dv_red, assume_a="pos")
+        y_smallo_red = solve_cholesky(T_smallo_reg, dv_red)
         y_smallo = q @ y_smallo_red
         updates_smallo = recover_updates_smallo(o, p, y_smallo, phys_dim, pps)
         err = float(
@@ -890,7 +999,10 @@ def minsr_smallo_peps_demo(
 
     # Run verification against full O matrix
     logger.info("\n--- Verification against full O matrix ---")
-    verify_results = verify_smallo_correctness_peps(model, samples, diag_shift, o=o, p=p)
+    diag_shift_projected = 1e-8
+    verify_results = verify_smallo_correctness_peps(
+        model, samples, diag_shift_projected, o=o, p=p
+    )
 
     # Build OOdag with different orderings
     logger.info("Building OOdag with physical ordering...")
@@ -920,20 +1032,41 @@ def minsr_smallo_peps_demo(
 
     logger.info("Solving minSR with physical ordering...")
     updates_phys, metrics_phys = solve_minsr_smallo(
-        o, p, dv, 2, diag_shift, ordering="physical", params_per_site=pps
+        o, p, dv, 2, diag_shift_projected, ordering="physical", params_per_site=pps
     )
     logger.info(
-        "  SR residual ||(O†O+λI) u - E||^2/||E||^2: %.6e",
+        "  SR residual (centered O) ||(O†O+λI) u - E||^2/||E||^2: %.6e",
         metrics_phys["residual_sr_reg"],
+    )
+    diag_shift_unproj = 1e-2
+    _, metrics_phys_unproj = solve_minsr_smallo(
+        o,
+        p,
+        dv,
+        2,
+        diag_shift_unproj,
+        ordering="physical",
+        params_per_site=pps,
+        project_null=False,
+    )
+    logger.info(
+        "  Unprojected residual (centered O) ||(O†O+λI) u - E||^2/||E||^2: %.6e",
+        metrics_phys_unproj["residual_sr_reg"],
     )
 
     logger.info("Solving minSR with site ordering...")
     updates_site, metrics_site = solve_minsr_smallo(
-        o, p, dv, 2, diag_shift, ordering="site",
-        n_sites=n_sites, params_per_site=pps
+        o,
+        p,
+        dv,
+        2,
+        diag_shift_projected,
+        ordering="site",
+        n_sites=n_sites,
+        params_per_site=pps,
     )
     logger.info(
-        "  SR residual ||(O†O+λI) u - E||^2/||E||^2: %.6e",
+        "  SR residual (centered O) ||(O†O+λI) u - E||^2/||E||^2: %.6e",
         metrics_site["residual_sr_reg"],
     )
 
@@ -953,6 +1086,7 @@ def minsr_smallo_peps_demo(
         "updates_ordering_diff": float(updates_diff),
         "residual_phys": metrics_phys["residual_sr_reg"],
         "residual_site": metrics_site["residual_sr_reg"],
+        "residual_phys_unprojected": metrics_phys_unproj["residual_sr_reg"],
         "ordering_time_phys": time_phys,
         "ordering_time_site": time_site,
         "memory_full": verify_results["memory_full"],
@@ -965,10 +1099,21 @@ def minsr_smallo_peps_demo(
     logger.info("=" * 60)
     logger.info("OOdag relative error: %.6e", results["OOdag_error"])
     logger.info("minSR matrix relative error: %.6e", results["T_error"])
-    logger.info("SR residual ||O†O u - E||^2/||E||^2: %.6e", results["residual_sr"])
     logger.info(
-        "SR residual ||(O†O+λI) u - E||^2/||E||^2: %.6e",
+        "SR residual (centered O) ||O†O u - E||^2/||E||^2: %.6e",
+        results["residual_sr"],
+    )
+    logger.info(
+        "SR residual (centered O) ||(O†O+λI) u - E||^2/||E||^2: %.6e",
         results["residual_sr_reg"],
+    )
+    logger.info(
+        "Projected residual ||(O†O+λI) u - E||^2/||E||^2: %.6e",
+        results["residual_phys"],
+    )
+    logger.info(
+        "Unprojected residual ||(O†O+λI) u - E||^2/||E||^2: %.6e",
+        results["residual_phys_unprojected"],
     )
     if results.get("updates_error_tfim") is not None:
         logger.info(
@@ -995,7 +1140,7 @@ def main():
 
     # MPS demo with much larger parameters for better verification
     logger.info("\n### MPS Demo ###\n")
-    minsr_smallo_mps_demo(length=32, bond_dim=6, n_samples=2048)
+    minsr_smallo_mps_demo(length=32, bond_dim=12, n_samples=2048)
 
     # PEPS demo with much larger parameters (truncate_bond_dimension = bond_dim^2)
     logger.info("\n### PEPS Demo ###\n")

@@ -17,7 +17,6 @@ from VMC.utils import (
     DiscardBlockedSampler,
     IndependentSetSampler,
     all_config_batches,
-    batched_eval,
     build_neighbor_arrays,
     config_codes,
     enumerate_all_configs,
@@ -26,6 +25,8 @@ from VMC.utils import (
     independent_set_violations,
     occupancy_to_spin,
 )
+from VMC.core.eval import _value
+from VMC.utils.vmc_utils import batched_eval
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,9 @@ SWEEP_FACTOR_PEPS_COMPARE = 40
 TFIM_COUPLING = 1.0
 TFIM_FIELD = 0.5
 
+RUN_MPS = False
+RUN_PEPS = True
+
 
 def get_mh_metrics() -> list[dict[str, float | int | str]]:
     """Return collected MH statistical metrics."""
@@ -60,61 +64,6 @@ def get_mh_metrics() -> list[dict[str, float | int | str]]:
 def reset_mh_metrics() -> None:
     """Clear collected MH statistical metrics."""
     METRICS.clear()
-
-
-def build_log_prob_fn(model) -> callable:
-    """Build a JAX-friendly log |psi|^2 function from a model."""
-    if isinstance(model, SimpleMPS):
-        tensors = [jnp.asarray(t) for t in model.tensors]
-
-        def log_prob_fn(occupancies: jax.Array) -> jax.Array:
-            spins = occupancy_to_spin(occupancies)
-            amps = SimpleMPS._batch_amplitudes(tensors, spins)
-            return 2.0 * jnp.real(jnp.log(amps))
-
-        return log_prob_fn
-    if isinstance(model, SimplePEPS):
-        tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
-        shape = model.shape
-        strategy = model.strategy
-
-        def log_prob_fn(occupancies: jax.Array) -> jax.Array:
-            spins = occupancy_to_spin(occupancies)
-            amps = jax.vmap(
-                lambda s: SimplePEPS._single_amplitude(tensors, s, shape, strategy)
-            )(spins)
-            return 2.0 * jnp.real(jnp.log(amps))
-
-        return log_prob_fn
-    raise TypeError(f"Unsupported model type: {type(model)}")
-
-
-def build_log_amp_fn(model) -> callable:
-    """Build a JAX-friendly log amplitude function from a model.
-
-    The returned function expects batched spin configurations.
-    """
-    if isinstance(model, SimpleMPS):
-        tensors = [jnp.asarray(t) for t in model.tensors]
-
-        def log_amp_fn(spins: jax.Array) -> jax.Array:
-            amps = SimpleMPS._batch_amplitudes(tensors, spins)
-            return jnp.log(amps)
-
-        return log_amp_fn
-    if isinstance(model, SimplePEPS):
-        tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
-        shape = model.shape
-        strategy = model.strategy
-
-        def log_amp_fn(spins: jax.Array) -> jax.Array:
-            amps = jax.vmap(
-                lambda s: SimplePEPS._single_amplitude(tensors, s, shape, strategy)
-            )(spins)
-            return jnp.log(amps)
-
-        return log_amp_fn
-    raise TypeError(f"Unsupported model type: {type(model)}")
 
 
 def weighted_mean(log_prob: jax.Array, values: jax.Array) -> jax.Array:
@@ -133,12 +82,16 @@ def sample_mean_and_error(values: jax.Array) -> tuple[jax.Array, jax.Array]:
 
 
 def heisenberg_local_energy(
-    log_amp_fn,
+    model,
     spins: jax.Array,
     edges: Sequence[tuple[int, int]],
 ) -> jax.Array:
     """Compute Heisenberg local energy for a batch of spin configurations."""
-    log_amp = batched_eval(log_amp_fn, spins, batch_size=BATCH_SIZE)
+    log_amp = batched_eval(
+        lambda batch: jnp.log(jax.vmap(lambda s: _value(model, s))(batch)),
+        spins,
+        batch_size=BATCH_SIZE,
+    )
     energy = jnp.zeros((spins.shape[0],), dtype=log_amp.dtype)
     edge_idx = jnp.asarray(edges, dtype=jnp.int32)
 
@@ -150,17 +103,20 @@ def heisenberg_local_energy(
         energy_acc = energy_acc + 0.25 * s_i * s_j
         flipped = spins.at[:, i].set(-s_i).at[:, j].set(-s_j)
         log_amp_flipped = batched_eval(
-            log_amp_fn, flipped, batch_size=BATCH_SIZE
+            lambda batch: jnp.log(jax.vmap(lambda s: _value(model, s))(batch)),
+            flipped,
+            batch_size=BATCH_SIZE,
         )
         ratio = jnp.exp(log_amp_flipped - log_amp)
         energy_acc = energy_acc + 0.5 * jnp.where(s_i != s_j, ratio, 0.0)
         return energy_acc, None
+
     energy, _ = jax.lax.scan(scan_fn, energy, edge_idx)
     return energy
 
 
 def tfim_local_energy(
-    log_amp_fn,
+    model,
     spins: jax.Array,
     edges: Sequence[tuple[int, int]],
     *,
@@ -168,9 +124,13 @@ def tfim_local_energy(
     field: float,
 ) -> jax.Array:
     """Compute transverse-field Ising local energy for a batch of spins."""
-    log_amp = batched_eval(log_amp_fn, spins, batch_size=BATCH_SIZE)
+    log_amp = batched_eval(
+        lambda batch: jnp.log(jax.vmap(lambda s: _value(model, s))(batch)),
+        spins,
+        batch_size=BATCH_SIZE,
+    )
     energy = jnp.zeros((spins.shape[0],), dtype=log_amp.dtype)
-    if len(edges) > 0:
+    if edges:
         edge_idx = jnp.asarray(edges, dtype=jnp.int32)
         s_i = spins[:, edge_idx[:, 0]]
         s_j = spins[:, edge_idx[:, 1]]
@@ -182,7 +142,9 @@ def tfim_local_energy(
         s_i = spins[:, site]
         flipped = spins.at[:, site].set(-s_i)
         log_amp_flipped = batched_eval(
-            log_amp_fn, flipped, batch_size=BATCH_SIZE
+            lambda batch: jnp.log(jax.vmap(lambda s: _value(model, s))(batch)),
+            flipped,
+            batch_size=BATCH_SIZE,
         )
         ratio = jnp.exp(log_amp_flipped - log_amp)
         energy_acc = energy_acc + 0.5 * field * ratio
@@ -215,16 +177,15 @@ def compare_full_hilbert_enumeration(
     total = 1 << num_sites
     blocked = total - int(codes_full.shape[0])
     if codes_full.shape != codes_dp.shape or not bool(jnp.all(codes_full == codes_dp)):
-        mismatch = int(
-            jnp.sum(codes_full[: codes_dp.shape[0]] != codes_dp)
-        )
+        mismatch = int(jnp.sum(codes_full[: codes_dp.shape[0]] != codes_dp))
         raise AssertionError(
             "Full Hilbert independent-set enumeration mismatch: "
             f"dp={int(codes_dp.shape[0])} full={int(codes_full.shape[0])} "
             f"blocked={blocked} mismatched_prefix={mismatch}"
         )
     logger.info(
-        "Full Hilbert enumeration matched independent sets: total=%d allowed=%d blocked=%d",
+        "Full Hilbert enumeration matched independent sets: total=%d allowed=%d "
+        "blocked=%d",
         total,
         int(codes_full.shape[0]),
         blocked,
@@ -232,7 +193,7 @@ def compare_full_hilbert_enumeration(
 
 
 def compare_full_hilbert_amplitudes(
-    log_prob_fn,
+    log_prob,
     all_configs: jax.Array,
     independent_samples: jax.Array,
     neighbors: jax.Array,
@@ -241,9 +202,7 @@ def compare_full_hilbert_amplitudes(
     label: str,
 ) -> None:
     """Compare log-probabilities for independent sets via full Hilbert scan."""
-    log_prob_all = batched_eval(
-        log_prob_fn, all_configs, batch_size=BATCH_SIZE
-    )
+    log_prob_all = batched_eval(log_prob, all_configs, batch_size=BATCH_SIZE)
     violations = independent_set_violations(all_configs, neighbors, mask)
     allowed_configs = all_configs[~violations]
     allowed_log_prob = log_prob_all[~violations]
@@ -254,7 +213,7 @@ def compare_full_hilbert_amplitudes(
     allowed_log_prob = allowed_log_prob[order_full]
 
     log_prob_ind = batched_eval(
-        log_prob_fn, independent_samples, batch_size=BATCH_SIZE
+        log_prob, independent_samples, batch_size=BATCH_SIZE
     )
     codes_ind = config_codes(independent_samples)
     order_ind = jnp.argsort(codes_ind)
@@ -280,13 +239,13 @@ def flippable_sites_for_config(
 
 
 def build_mh_transition_matrix(
-    log_prob_fn,
+    log_prob,
     allowed_configs: jax.Array,
     neighbors: jax.Array,
     mask: jax.Array,
 ) -> tuple[jax.Array, jax.Array]:
     """Construct the MH transition matrix on the allowed configuration space."""
-    log_prob = batched_eval(log_prob_fn, allowed_configs, batch_size=BATCH_SIZE)
+    log_prob = batched_eval(log_prob, allowed_configs, batch_size=BATCH_SIZE)
     log_prob = jnp.real(log_prob)
     log_prob = log_prob - jax.scipy.special.logsumexp(log_prob)
     target_prob = jnp.exp(log_prob)
@@ -309,7 +268,9 @@ def build_mh_transition_matrix(
         row_sum = 0.0
         n_flip = flippable_counts[idx]
         if n_flip <= 0:
-            raise AssertionError("No flippable moves available for a valid configuration.")
+            raise AssertionError(
+                "No flippable moves available for a valid configuration."
+            )
         code = codes_list[idx]
         for site in flippable_sites[idx]:
             next_code = code ^ (1 << site)
@@ -326,7 +287,7 @@ def build_mh_transition_matrix(
 
 
 def compare_mh_stationary_distribution(
-    log_prob_fn,
+    log_prob,
     allowed_configs: jax.Array,
     neighbors: jax.Array,
     mask: jax.Array,
@@ -336,7 +297,7 @@ def compare_mh_stationary_distribution(
 ) -> None:
     """Verify MH stationary distribution matches the full-sum target."""
     transition, target_prob = build_mh_transition_matrix(
-        log_prob_fn, allowed_configs, neighbors, mask
+        log_prob, allowed_configs, neighbors, mask
     )
     stationary = target_prob @ transition
     max_diff = float(jnp.max(jnp.abs(stationary - target_prob)))
@@ -347,8 +308,45 @@ def compare_mh_stationary_distribution(
         )
 
 
+def sample_with_progress(
+    sampler,
+    log_prob,
+    *,
+    key: jax.Array,
+    n_samples: int,
+    n_sweeps: int,
+    label: str,
+    log_interval: int,
+) -> tuple[jax.Array, jax.Array]:
+    """Sample in batches with progress logging."""
+    import time
+
+    all_samples = []
+    n_batches = (n_samples + log_interval - 1) // log_interval
+    keys = jax.random.split(key, n_batches)
+    start_time = time.time()
+    acceptance = jnp.asarray(0.0)
+
+    for i, batch_key in enumerate(keys):
+        batch_size = min(log_interval, n_samples - i * log_interval)
+        if batch_size <= 0:
+            break
+        batch_samples, _, _, acceptance = sampler.sample(
+            log_prob, n_samples=batch_size, n_sweeps=n_sweeps, key=batch_key
+        )
+        all_samples.append(batch_samples)
+        elapsed = time.time() - start_time
+        completed = min((i + 1) * log_interval, n_samples)
+        logger.info(
+            "%s: %d/%d samples (%.1fs elapsed, acceptance=%.3f)",
+            label, completed, n_samples, elapsed, float(acceptance),
+        )
+
+    return jnp.concatenate(all_samples, axis=0), acceptance
+
+
 def compare_mh_statistical_distribution(
-    log_prob_fn,
+    log_prob,
     allowed_configs: jax.Array,
     neighbors: jax.Array,
     mask: jax.Array,
@@ -360,43 +358,24 @@ def compare_mh_statistical_distribution(
     label: str,
     alpha: float = 1e-3,
     log_interval: int = 1000,
-) -> None:
+) -> dict[str, float | int | str]:
     """Compare empirical MH samples to the exact target distribution."""
-    import time
-
     from scipy import stats as scipy_stats
 
-    log_prob = batched_eval(log_prob_fn, allowed_configs, batch_size=BATCH_SIZE)
-    log_prob = jnp.real(log_prob)
-    log_prob = log_prob - jax.scipy.special.logsumexp(log_prob)
-    target_prob = jnp.exp(log_prob)
+    log_prob_vals = batched_eval(log_prob, allowed_configs, batch_size=BATCH_SIZE)
+    log_prob_vals = jnp.real(log_prob_vals)
+    log_prob_vals = log_prob_vals - jax.scipy.special.logsumexp(log_prob_vals)
+    target_prob = jnp.exp(log_prob_vals)
 
-    # Sample in batches with progress logging
-    all_samples = []
-    n_batches = (n_samples + log_interval - 1) // log_interval
-    keys = jax.random.split(key, n_batches)
-    start_time = time.time()
-
-    for i, batch_key in enumerate(keys):
-        batch_size = min(log_interval, n_samples - i * log_interval)
-        if batch_size <= 0:
-            break
-        batch_samples, _, _, acceptance = sampler.sample(
-            log_prob_fn, n_samples=batch_size, n_sweeps=n_sweeps, key=batch_key
-        )
-        all_samples.append(batch_samples)
-        elapsed = time.time() - start_time
-        completed = min((i + 1) * log_interval, n_samples)
-        logger.info(
-            "%s sampling: %d/%d samples (%.1fs elapsed, acceptance=%.3f)",
-            label,
-            completed,
-            n_samples,
-            elapsed,
-            float(acceptance),
-        )
-
-    samples = jnp.concatenate(all_samples, axis=0)
+    samples, _ = sample_with_progress(
+        sampler,
+        log_prob,
+        key=key,
+        n_samples=n_samples,
+        n_sweeps=n_sweeps,
+        label=f"{label} MH",
+        log_interval=log_interval,
+    )
     verify_no_violations(samples, neighbors, mask, f"{label} MH samples")
 
     allowed_codes = config_codes(allowed_configs)
@@ -425,11 +404,7 @@ def compare_mh_statistical_distribution(
     min_expected = float(jnp.min(expected))
     logger.info(
         "%s MH chi2=%.3f df=%d p=%.3e min_expected=%.2f",
-        label,
-        chi2,
-        df,
-        p_value,
-        min_expected,
+        label, chi2, df, p_value, min_expected,
     )
     metric = {
         "label": label,
@@ -450,39 +425,31 @@ def compare_mh_statistical_distribution(
 
 def weighted_stats(log_prob: jax.Array, samples: jax.Array) -> dict[str, jax.Array]:
     """Compute weighted density statistics from log-probabilities."""
-    n_sites = samples.shape[1]
     occupancies = samples.astype(jnp.float64)
-    occ_sum = jnp.sum(occupancies, axis=1)
-    density = occ_sum / float(n_sites)
+    density = jnp.mean(occupancies, axis=1)
     log_norm = jax.scipy.special.logsumexp(log_prob)
     weights = jnp.exp(log_prob - log_norm)
     mean_density = jnp.sum(weights * density)
     mean_density_sq = jnp.sum(weights * density * density)
-    mean_site_occ = jnp.sum(weights[:, None] * occupancies, axis=0)
     return {
         "mean_density": mean_density,
         "mean_density_sq": mean_density_sq,
-        "mean_site_occ": mean_site_occ,
     }
 
 
 def sample_stats(samples: jax.Array) -> dict[str, jax.Array]:
     """Compute sample mean statistics and naive standard errors."""
-    n_sites = samples.shape[1]
     occupancies = samples.astype(jnp.float64)
-    occ_sum = jnp.sum(occupancies, axis=1)
-    density = occ_sum / float(n_sites)
+    density = jnp.mean(occupancies, axis=1)
     mean_density = jnp.mean(density)
     mean_density_sq = jnp.mean(density * density)
     err_density = jnp.std(density, ddof=1) / math.sqrt(samples.shape[0])
     err_density_sq = jnp.std(density * density, ddof=1) / math.sqrt(samples.shape[0])
-    mean_site_occ = jnp.mean(occupancies, axis=0)
     return {
         "mean_density": mean_density,
         "mean_density_sq": mean_density_sq,
         "err_density": err_density,
         "err_density_sq": err_density_sq,
-        "mean_site_occ": mean_site_occ,
     }
 
 
@@ -509,7 +476,7 @@ def verify_no_violations(
 def run_fullsum_check(
     *,
     model_name: str,
-    log_prob_fn,
+    log_prob,
     sampler: IndependentSetSampler,
     full_samples: jax.Array,
     neighbors: jax.Array,
@@ -518,16 +485,11 @@ def run_fullsum_check(
     key: jax.Array,
     n_sweeps: int,
 ) -> None:
-    log_prob_full = batched_eval(
-        log_prob_fn, full_samples, batch_size=BATCH_SIZE
-    )
+    log_prob_full = batched_eval(log_prob, full_samples, batch_size=BATCH_SIZE)
     exact = weighted_stats(log_prob_full, full_samples)
 
     samples, _, _, acceptance = sampler.sample(
-        log_prob_fn,
-        n_samples=N_SAMPLES,
-        n_sweeps=n_sweeps,
-        key=key,
+        log_prob, n_samples=N_SAMPLES, n_sweeps=n_sweeps, key=key
     )
     verify_no_violations(samples, neighbors, mask, f"{model_name} seed={seed} fullsum")
     stats = sample_stats(samples)
@@ -557,8 +519,8 @@ def run_fullsum_check(
 def run_energy_check(
     *,
     model_name: str,
-    log_prob_fn,
-    log_amp_fn,
+    model,
+    log_prob,
     sampler: IndependentSetSampler,
     full_samples: jax.Array,
     edges: Sequence[tuple[int, int]],
@@ -568,35 +530,24 @@ def run_energy_check(
     key: jax.Array,
     n_sweeps: int,
 ) -> None:
-    log_prob_full = batched_eval(
-        log_prob_fn, full_samples, batch_size=BATCH_SIZE
-    )
+    log_prob_full = batched_eval(log_prob, full_samples, batch_size=BATCH_SIZE)
     full_spins = occupancy_to_spin(full_samples)
-    local_energy_full = heisenberg_local_energy(log_amp_fn, full_spins, edges)
+    local_energy_full = heisenberg_local_energy(model, full_spins, edges)
     exact_energy = weighted_mean(log_prob_full, local_energy_full)
     local_energy_full_tfim = tfim_local_energy(
-        log_amp_fn,
-        full_spins,
-        edges,
-        coupling=TFIM_COUPLING,
-        field=TFIM_FIELD,
+        model, full_spins, edges, coupling=TFIM_COUPLING, field=TFIM_FIELD
     )
     exact_energy_tfim = weighted_mean(log_prob_full, local_energy_full_tfim)
 
     samples, _, _, acceptance = sampler.sample(
-        log_prob_fn,
-        n_samples=N_SAMPLES,
-        n_sweeps=n_sweeps,
-        key=key,
+        log_prob, n_samples=N_SAMPLES, n_sweeps=n_sweeps, key=key
     )
     verify_no_violations(samples, neighbors, mask, f"{model_name} seed={seed} energy")
     sample_spins = occupancy_to_spin(samples)
-    local_energy_samples = heisenberg_local_energy(
-        log_amp_fn, sample_spins, edges
-    )
+    local_energy_samples = heisenberg_local_energy(model, sample_spins, edges)
     mean_energy, err_energy = sample_mean_and_error(local_energy_samples)
     local_energy_samples_tfim = tfim_local_energy(
-        log_amp_fn,
+        model,
         sample_spins,
         edges,
         coupling=TFIM_COUPLING,
@@ -641,7 +592,7 @@ def run_energy_check(
 def run_sampler_comparison(
     *,
     model_name: str,
-    log_prob_fn,
+    log_prob,
     sampler_a: IndependentSetSampler,
     sampler_b: DiscardBlockedSampler,
     neighbors: jax.Array,
@@ -651,70 +602,29 @@ def run_sampler_comparison(
     n_sweeps: int,
     log_interval: int = 1000,
 ) -> None:
-    import time
-
     key_a, key_b = jax.random.split(key, 2)
 
-    # Sample from sampler_a with progress logging
-    all_samples_a = []
-    n_batches = (N_SAMPLES + log_interval - 1) // log_interval
-    keys_a = jax.random.split(key_a, n_batches)
-    start_time = time.time()
-
-    for i, batch_key in enumerate(keys_a):
-        batch_size = min(log_interval, N_SAMPLES - i * log_interval)
-        if batch_size <= 0:
-            break
-        batch_samples, _, _, acceptance_a = sampler_a.sample(
-            log_prob_fn, n_samples=batch_size, n_sweeps=n_sweeps, key=batch_key
-        )
-        all_samples_a.append(batch_samples)
-        elapsed = time.time() - start_time
-        completed = min((i + 1) * log_interval, N_SAMPLES)
-        logger.info(
-            "%s seed=%d sampler_a: %d/%d samples (%.1fs elapsed, acceptance=%.3f)",
-            model_name,
-            seed,
-            completed,
-            N_SAMPLES,
-            elapsed,
-            float(acceptance_a),
-        )
-
-    samples_a = jnp.concatenate(all_samples_a, axis=0)
-
-    # Sample from sampler_b with progress logging
-    all_samples_b = []
-    keys_b = jax.random.split(key_b, n_batches)
-    start_time = time.time()
-
-    for i, batch_key in enumerate(keys_b):
-        batch_size = min(log_interval, N_SAMPLES - i * log_interval)
-        if batch_size <= 0:
-            break
-        batch_samples, _, _, acceptance_b = sampler_b.sample(
-            log_prob_fn, n_samples=batch_size, n_sweeps=n_sweeps, key=batch_key
-        )
-        all_samples_b.append(batch_samples)
-        elapsed = time.time() - start_time
-        completed = min((i + 1) * log_interval, N_SAMPLES)
-        logger.info(
-            "%s seed=%d sampler_b: %d/%d samples (%.1fs elapsed, acceptance=%.3f)",
-            model_name,
-            seed,
-            completed,
-            N_SAMPLES,
-            elapsed,
-            float(acceptance_b),
-        )
-
-    samples_b = jnp.concatenate(all_samples_b, axis=0)
-    verify_no_violations(
-        samples_a, neighbors, mask, f"{model_name} seed={seed} sampler_a"
+    samples_a, acceptance_a = sample_with_progress(
+        sampler_a,
+        log_prob,
+        key=key_a,
+        n_samples=N_SAMPLES,
+        n_sweeps=n_sweeps,
+        label=f"{model_name} seed={seed} sampler_a",
+        log_interval=log_interval,
     )
-    verify_no_violations(
-        samples_b, neighbors, mask, f"{model_name} seed={seed} sampler_b"
+    samples_b, acceptance_b = sample_with_progress(
+        sampler_b,
+        log_prob,
+        key=key_b,
+        n_samples=N_SAMPLES,
+        n_sweeps=n_sweeps,
+        label=f"{model_name} seed={seed} sampler_b",
+        log_interval=log_interval,
     )
+
+    verify_no_violations(samples_a, neighbors, mask, f"{model_name} seed={seed} a")
+    verify_no_violations(samples_b, neighbors, mask, f"{model_name} seed={seed} b")
     stats_a = sample_stats(samples_a)
     stats_b = sample_stats(samples_b)
     err_density = math.sqrt(
@@ -771,9 +681,7 @@ def main() -> None:
         shape_fullsum[0] * shape_fullsum[1], edges_fullsum
     )
 
-    sampler_full = IndependentSetSampler(
-        shape_full[0] * shape_full[1], edges_full
-    )
+    sampler_full = IndependentSetSampler(shape_full[0] * shape_full[1], edges_full)
     sampler_fullsum = IndependentSetSampler(
         shape_fullsum[0] * shape_fullsum[1], edges_fullsum
     )
@@ -804,192 +712,225 @@ def main() -> None:
 
     logger.info("Running independent-set sampler checks...")
 
-    """
-    for seed in SEEDS:
-        key_full, key_compare = jax.random.split(jax.random.key(seed + 100), 2)
-        key_full, key_energy = jax.random.split(key_full, 2)
-        key_hilbert = jax.random.key(seed + 50)
-        mps_full = SimpleMPS(
-            rngs=nnx.Rngs(seed),
-            n_sites=shape_full[0] * shape_full[1],
-            bond_dim=MPS_BOND_DIM,
-            dtype=DTYPE,
-        )
-        mps_full_log_prob = build_log_prob_fn(mps_full)
-        mps_full_log_amp = build_log_amp_fn(mps_full)
-        compare_full_hilbert_amplitudes(
-            mps_full_log_prob,
-            all_full_configs,
-            full_samples_full,
-            neighbors_full,
-            mask_full,
-            label=f"MPS {shape_full[0]}x{shape_full[1]} seed={seed}",
-        )
-        compare_mh_stationary_distribution(
-            mps_full_log_prob,
-            full_samples_full,
-            neighbors_full,
-            mask_full,
-            label=f"MPS {shape_full[0]}x{shape_full[1]} seed={seed}",
-        )
-        compare_mh_statistical_distribution(
-            mps_full_log_prob,
-            full_samples_full,
-            neighbors_full,
-            mask_full,
-            sampler=sampler_full,
-            key=key_hilbert,
-            n_samples=N_SAMPLES,
-            n_sweeps=n_sweeps_full,
-            label=f"MPS {shape_full[0]}x{shape_full[1]} seed={seed}",
-        )
-        run_energy_check(
-            model_name=f"MPS {shape_full[0]}x{shape_full[1]}",
-            log_prob_fn=mps_full_log_prob,
-            log_amp_fn=mps_full_log_amp,
-            sampler=sampler_full,
-            full_samples=full_samples_full,
-            edges=edges_full,
-            neighbors=neighbors_full,
-            mask=mask_full,
-            seed=seed,
-            key=key_energy,
-            n_sweeps=n_sweeps_full,
-        )
-        mps_fullsum = SimpleMPS(
-            rngs=nnx.Rngs(seed),
-            n_sites=shape_fullsum[0] * shape_fullsum[1],
-            bond_dim=MPS_BOND_DIM,
-            dtype=DTYPE,
-        )
-        mps_fullsum_log_prob = build_log_prob_fn(mps_fullsum)
-        run_fullsum_check(
-            model_name=f"MPS {shape_fullsum[0]}x{shape_fullsum[1]}",
-            log_prob_fn=mps_fullsum_log_prob,
-            sampler=sampler_fullsum,
-            full_samples=full_samples,
-            neighbors=neighbors_fullsum,
-            mask=mask_fullsum,
-            seed=seed,
-            key=key_full,
-            n_sweeps=n_sweeps_fullsum_mps,
-        )
-
-        compare_keys = jax.random.split(key_compare, len(compare_configs))
-        for cfg, cfg_key in zip(compare_configs, compare_keys):
-            mps_compare = SimpleMPS(
+    if RUN_MPS:
+        for seed in SEEDS:
+            key_full, key_compare = jax.random.split(jax.random.key(seed + 100), 2)
+            key_full, key_energy = jax.random.split(key_full, 2)
+            key_hilbert = jax.random.key(seed + 50)
+            mps_full = SimpleMPS(
                 rngs=nnx.Rngs(seed),
-                n_sites=cfg["n_sites"],
+                n_sites=n_sites_full,
                 bond_dim=MPS_BOND_DIM,
                 dtype=DTYPE,
             )
-            mps_compare_log_prob = build_log_prob_fn(mps_compare)
-            run_sampler_comparison(
-                model_name=f"MPS {cfg['label']}",
-                log_prob_fn=mps_compare_log_prob,
-                sampler_a=cfg["sampler"],
-                sampler_b=cfg["baseline"],
-                neighbors=cfg["neighbors"],
-                mask=cfg["mask"],
-                seed=seed,
-                key=cfg_key,
-                n_sweeps=SWEEP_FACTOR_MPS_COMPARE * cfg["n_sites"],
+            log_prob_full = lambda occ: 2.0 * jnp.real(
+                jnp.log(
+                    jax.vmap(lambda s: _value(mps_full, s))(
+                        occupancy_to_spin(occ)
+                    )
+                )
             )
-    """
-    
-    for seed in SEEDS:
-        key_full, key_compare = jax.random.split(jax.random.key(seed + 200), 2)
-        key_full, key_energy = jax.random.split(key_full, 2)
-        key_hilbert = jax.random.key(seed + 150)
-        peps_full = SimplePEPS(
-            rngs=nnx.Rngs(seed),
-            shape=shape_full,
-            bond_dim=PEPS_BOND_DIM,
-            contraction_strategy=ZipUp(
-                truncate_bond_dimension=PEPS_TRUNCATE_BOND_DIM
-            ),
-            dtype=DTYPE,
-        )
-        peps_full_log_prob = build_log_prob_fn(peps_full)
-        peps_full_log_amp = build_log_amp_fn(peps_full)
-        compare_full_hilbert_amplitudes(
-            peps_full_log_prob,
-            all_full_configs,
-            full_samples_full,
-            neighbors_full,
-            mask_full,
-            label=f"PEPS {shape_full[0]}x{shape_full[1]} seed={seed}",
-        )
-        compare_mh_statistical_distribution(
-            peps_full_log_prob,
-            full_samples_full,
-            neighbors_full,
-            mask_full,
-            sampler=sampler_full,
-            key=key_hilbert,
-            n_samples=N_SAMPLES,
-            n_sweeps=n_sweeps_full_peps,
-            label=f"PEPS {shape_full[0]}x{shape_full[1]} seed={seed}",
-        )
-        run_energy_check(
-            model_name=f"PEPS {shape_full[0]}x{shape_full[1]}",
-            log_prob_fn=peps_full_log_prob,
-            log_amp_fn=peps_full_log_amp,
-            sampler=sampler_full,
-            full_samples=full_samples_full,
-            edges=edges_full,
-            neighbors=neighbors_full,
-            mask=mask_full,
-            seed=seed,
-            key=key_energy,
-            n_sweeps=n_sweeps_full_peps,
-        )
-        peps_fullsum = SimplePEPS(
-            rngs=nnx.Rngs(seed),
-            shape=shape_fullsum,
-            bond_dim=PEPS_BOND_DIM,
-            contraction_strategy=ZipUp(
-                truncate_bond_dimension=PEPS_TRUNCATE_BOND_DIM
-            ),
-            dtype=DTYPE,
-        )
-        peps_fullsum_log_prob = build_log_prob_fn(peps_fullsum)
-        run_fullsum_check(
-            model_name=f"PEPS {shape_fullsum[0]}x{shape_fullsum[1]}",
-            log_prob_fn=peps_fullsum_log_prob,
-            sampler=sampler_fullsum,
-            full_samples=full_samples,
-            neighbors=neighbors_fullsum,
-            mask=mask_fullsum,
-            seed=seed,
-            key=key_full,
-            n_sweeps=n_sweeps_fullsum_peps,
-        )
-
-        compare_keys = jax.random.split(key_compare, len(compare_configs))
-        for cfg, cfg_key in zip(compare_configs, compare_keys):
-            peps_compare = SimplePEPS(
+            compare_full_hilbert_amplitudes(
+                log_prob_full,
+                all_full_configs,
+                full_samples_full,
+                neighbors_full,
+                mask_full,
+                label=f"MPS {shape_full[0]}x{shape_full[1]} seed={seed}",
+            )
+            compare_mh_stationary_distribution(
+                log_prob_full,
+                full_samples_full,
+                neighbors_full,
+                mask_full,
+                label=f"MPS {shape_full[0]}x{shape_full[1]} seed={seed}",
+            )
+            compare_mh_statistical_distribution(
+                log_prob_full,
+                full_samples_full,
+                neighbors_full,
+                mask_full,
+                sampler=sampler_full,
+                key=key_hilbert,
+                n_samples=N_SAMPLES,
+                n_sweeps=n_sweeps_full,
+                label=f"MPS {shape_full[0]}x{shape_full[1]} seed={seed}",
+            )
+            run_energy_check(
+                model_name=f"MPS {shape_full[0]}x{shape_full[1]}",
+                model=mps_full,
+                log_prob=log_prob_full,
+                sampler=sampler_full,
+                full_samples=full_samples_full,
+                edges=edges_full,
+                neighbors=neighbors_full,
+                mask=mask_full,
+                seed=seed,
+                key=key_energy,
+                n_sweeps=n_sweeps_full,
+            )
+            mps_fullsum = SimpleMPS(
                 rngs=nnx.Rngs(seed),
-                shape=cfg["shape"],
+                n_sites=n_sites_fullsum,
+                bond_dim=MPS_BOND_DIM,
+                dtype=DTYPE,
+            )
+            log_prob_fullsum = lambda occ: 2.0 * jnp.real(
+                jnp.log(
+                    jax.vmap(lambda s: _value(mps_fullsum, s))(
+                        occupancy_to_spin(occ)
+                    )
+                )
+            )
+            run_fullsum_check(
+                model_name=f"MPS {shape_fullsum[0]}x{shape_fullsum[1]}",
+                log_prob=log_prob_fullsum,
+                sampler=sampler_fullsum,
+                full_samples=full_samples,
+                neighbors=neighbors_fullsum,
+                mask=mask_fullsum,
+                seed=seed,
+                key=key_full,
+                n_sweeps=n_sweeps_fullsum_mps,
+            )
+
+            compare_keys = jax.random.split(key_compare, len(compare_configs))
+            for cfg, cfg_key in zip(compare_configs, compare_keys):
+                mps_compare = SimpleMPS(
+                    rngs=nnx.Rngs(seed),
+                    n_sites=cfg["n_sites"],
+                    bond_dim=MPS_BOND_DIM,
+                    dtype=DTYPE,
+                )
+                log_prob_compare = lambda occ: 2.0 * jnp.real(
+                    jnp.log(
+                        jax.vmap(lambda s: _value(mps_compare, s))(
+                            occupancy_to_spin(occ)
+                        )
+                    )
+                )
+                run_sampler_comparison(
+                    model_name=f"MPS {cfg['label']}",
+                    log_prob=log_prob_compare,
+                    sampler_a=cfg["sampler"],
+                    sampler_b=cfg["baseline"],
+                    neighbors=cfg["neighbors"],
+                    mask=cfg["mask"],
+                    seed=seed,
+                    key=cfg_key,
+                    n_sweeps=SWEEP_FACTOR_MPS_COMPARE * cfg["n_sites"],
+                )
+
+    if RUN_PEPS:
+        for seed in SEEDS:
+            key_full, key_compare = jax.random.split(jax.random.key(seed + 200), 2)
+            key_full, key_energy = jax.random.split(key_full, 2)
+            key_hilbert = jax.random.key(seed + 150)
+            peps_full = SimplePEPS(
+                rngs=nnx.Rngs(seed),
+                shape=shape_full,
                 bond_dim=PEPS_BOND_DIM,
                 contraction_strategy=ZipUp(
                     truncate_bond_dimension=PEPS_TRUNCATE_BOND_DIM
                 ),
                 dtype=DTYPE,
             )
-            peps_compare_log_prob = build_log_prob_fn(peps_compare)
-            run_sampler_comparison(
-                model_name=f"PEPS {cfg['label']}",
-                log_prob_fn=peps_compare_log_prob,
-                sampler_a=cfg["sampler"],
-                sampler_b=cfg["baseline"],
-                neighbors=cfg["neighbors"],
-                mask=cfg["mask"],
+            log_prob_full = lambda occ: 2.0 * jnp.real(
+                jnp.log(
+                    jax.vmap(lambda s: _value(peps_full, s))(
+                        occupancy_to_spin(occ)
+                    )
+                )
+            )
+            compare_full_hilbert_amplitudes(
+                log_prob_full,
+                all_full_configs,
+                full_samples_full,
+                neighbors_full,
+                mask_full,
+                label=f"PEPS {shape_full[0]}x{shape_full[1]} seed={seed}",
+            )
+            compare_mh_statistical_distribution(
+                log_prob_full,
+                full_samples_full,
+                neighbors_full,
+                mask_full,
+                sampler=sampler_full,
+                key=key_hilbert,
+                n_samples=N_SAMPLES,
+                n_sweeps=n_sweeps_full_peps,
+                label=f"PEPS {shape_full[0]}x{shape_full[1]} seed={seed}",
+            )
+            run_energy_check(
+                model_name=f"PEPS {shape_full[0]}x{shape_full[1]}",
+                model=peps_full,
+                log_prob=log_prob_full,
+                sampler=sampler_full,
+                full_samples=full_samples_full,
+                edges=edges_full,
+                neighbors=neighbors_full,
+                mask=mask_full,
                 seed=seed,
-                key=cfg_key,
-                n_sweeps=SWEEP_FACTOR_PEPS_COMPARE * cfg["n_sites"],
+                key=key_energy,
+                n_sweeps=n_sweeps_full_peps,
+            )
+            peps_fullsum = SimplePEPS(
+                rngs=nnx.Rngs(seed),
+                shape=shape_fullsum,
+                bond_dim=PEPS_BOND_DIM,
+                contraction_strategy=ZipUp(
+                    truncate_bond_dimension=PEPS_TRUNCATE_BOND_DIM
+                ),
+                dtype=DTYPE,
+            )
+            log_prob_fullsum = lambda occ: 2.0 * jnp.real(
+                jnp.log(
+                    jax.vmap(lambda s: _value(peps_fullsum, s))(
+                        occupancy_to_spin(occ)
+                    )
+                )
+            )
+            run_fullsum_check(
+                model_name=f"PEPS {shape_fullsum[0]}x{shape_fullsum[1]}",
+                log_prob=log_prob_fullsum,
+                sampler=sampler_fullsum,
+                full_samples=full_samples,
+                neighbors=neighbors_fullsum,
+                mask=mask_fullsum,
+                seed=seed,
+                key=key_full,
+                n_sweeps=n_sweeps_fullsum_peps,
             )
 
+            compare_keys = jax.random.split(key_compare, len(compare_configs))
+            for cfg, cfg_key in zip(compare_configs, compare_keys):
+                peps_compare = SimplePEPS(
+                    rngs=nnx.Rngs(seed),
+                    shape=cfg["shape"],
+                    bond_dim=PEPS_BOND_DIM,
+                    contraction_strategy=ZipUp(
+                        truncate_bond_dimension=PEPS_TRUNCATE_BOND_DIM
+                    ),
+                    dtype=DTYPE,
+                )
+                log_prob_compare = lambda occ: 2.0 * jnp.real(
+                    jnp.log(
+                        jax.vmap(lambda s: _value(peps_compare, s))(
+                            occupancy_to_spin(occ)
+                        )
+                    )
+                )
+                run_sampler_comparison(
+                    model_name=f"PEPS {cfg['label']}",
+                    log_prob=log_prob_compare,
+                    sampler_a=cfg["sampler"],
+                    sampler_b=cfg["baseline"],
+                    neighbors=cfg["neighbors"],
+                    mask=cfg["mask"],
+                    seed=seed,
+                    key=cfg_key,
+                    n_sweeps=SWEEP_FACTOR_PEPS_COMPARE * cfg["n_sites"],
+                )
 
 
 if __name__ == "__main__":

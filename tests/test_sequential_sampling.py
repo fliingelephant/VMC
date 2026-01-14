@@ -11,7 +11,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from VMC.samplers.sequential import peps_sequential_sample, sequential_sample_mps
+from VMC.samplers.sequential import sequential_sample
 from VMC.models.mps import SimpleMPS
 from VMC.models.peps import SimplePEPS
 
@@ -31,7 +31,7 @@ class SequentialSamplingTest(unittest.TestCase):
         n_sweeps = 2
         model = SimpleMPS(rngs=nnx.Rngs(0), n_sites=n_sites, bond_dim=2)
         key = jax.random.key(0)
-        samples = sequential_sample_mps(
+        samples = sequential_sample(
             model, n_samples=n_samples, n_sweeps=n_sweeps, key=key
         )
 
@@ -63,7 +63,7 @@ class SequentialSamplingTest(unittest.TestCase):
         n_sweeps = 2
         model = SimplePEPS(rngs=nnx.Rngs(1), shape=shape, bond_dim=2)
         key = jax.random.key(1)
-        samples, _ = peps_sequential_sample(
+        samples = sequential_sample(
             model, n_samples=n_samples, n_sweeps=n_sweeps, key=key
         )
 

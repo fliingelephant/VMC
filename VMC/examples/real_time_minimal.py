@@ -4,6 +4,7 @@ from VMC import config  # noqa: F401 - JAX config must be imported first
 
 import logging
 import time
+from typing import Any, Callable
 
 import jax
 import jax.numpy as jnp
@@ -191,12 +192,19 @@ def random_flip_sample(
     n_sweeps: int,
     key: jax.Array,
     init_samples: jax.Array | None = None,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    _value_and_grad: Callable[[jax.Array], tuple[jax.Array, Any]] | None = None,
+    return_gradients: bool = False,
+) -> (
+    tuple[jax.Array, jax.Array, jax.Array, jax.Array]
+    | tuple[jax.Array, jax.Array, Any, jax.Array, jax.Array]
+):
     """Sample using random single-spin flips with Metropolis acceptance."""
     if n_samples <= 0:
         raise ValueError("n_samples must be positive.")
     if n_sweeps <= 0:
         raise ValueError("n_sweeps must be positive.")
+    if return_gradients and _value_and_grad is None:
+        raise ValueError("return_gradients requires _value_and_grad.")
 
     apply_fun, params, model_state, kwargs = get_apply_fun(vstate)
     n_sites = int(vstate.hilbert.size)
@@ -217,29 +225,64 @@ def random_flip_sample(
                 f"init_samples must have shape {(n_samples, n_sites)}, got {samples.shape}"
             )
 
-    logpsi = logpsi_batch(samples)
+    if _value_and_grad is None:
+        logpsi = logpsi_batch(samples)
+        grads = None
+    else:
+        value, grads = _value_and_grad(samples)
+        logpsi = jnp.log(value)
+        grads = jax.tree_util.tree_map(lambda g: g / value, grads)
     batch_idx = jnp.arange(n_samples)
 
+    def _where_accept(
+        accept: jax.Array, proposed: jax.Array, current: jax.Array
+    ) -> jax.Array:
+        mask = accept.reshape((accept.shape[0],) + (1,) * (proposed.ndim - 1))
+        return jnp.where(mask, proposed, current)
+
     def sweep(carry, _):
-        samples, logpsi, key = carry
+        if return_gradients:
+            samples, logpsi, grads, key = carry
+        else:
+            samples, logpsi, key = carry
         key, key_site, key_u = jax.random.split(key, 3)
         flip_sites = jax.random.randint(key_site, (n_samples,), 0, n_sites)
         proposed = samples.at[batch_idx, flip_sites].set(
             -samples[batch_idx, flip_sites]
         )
-        logpsi_prop = logpsi_batch(proposed)
+        if _value_and_grad is None:
+            logpsi_prop = logpsi_batch(proposed)
+            grads_prop = None
+        else:
+            value_prop, grads_prop = _value_and_grad(proposed)
+            logpsi_prop = jnp.log(value_prop)
+            grads_prop = jax.tree_util.tree_map(lambda g: g / value_prop, grads_prop)
         log_ratio = 2.0 * jnp.real(logpsi_prop - logpsi)
         accept = jax.random.uniform(key_u, (n_samples,)) < jnp.exp(
             jnp.minimum(0.0, log_ratio)
         )
         samples = jnp.where(accept[:, None], proposed, samples)
         logpsi = jnp.where(accept, logpsi_prop, logpsi)
+        if return_gradients:
+            grads = jax.tree_util.tree_map(
+                lambda new, old: _where_accept(accept, new, old),
+                grads_prop,
+                grads,
+            )
+            return (samples, logpsi, grads, key), accept
         return (samples, logpsi, key), accept
 
-    (samples, logpsi, key), accepts = jax.lax.scan(
-        sweep, (samples, logpsi, key), None, length=int(n_sweeps)
-    )
+    if return_gradients:
+        (samples, logpsi, grads, key), accepts = jax.lax.scan(
+            sweep, (samples, logpsi, grads, key), None, length=int(n_sweeps)
+        )
+    else:
+        (samples, logpsi, key), accepts = jax.lax.scan(
+            sweep, (samples, logpsi, key), None, length=int(n_sweeps)
+        )
     acceptance = jnp.mean(accepts)
+    if return_gradients:
+        return samples, logpsi, grads, key, acceptance
     return samples, logpsi, key, acceptance
 
 

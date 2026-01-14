@@ -21,11 +21,7 @@ from VMC.models.peps import (
     _contract_left_partial,
     _contract_right_partial,
 )
-from VMC.utils.smallo import (
-    _small_o_row_mps_from_indices,
-    _small_o_row_peps_from_indices,
-)
-from VMC.utils.vmc_utils import _build_full_jac_mps, _build_full_jac_peps
+from VMC.core.eval import _value_and_grad
 
 __all__ = [
     "sequential_sample",
@@ -34,6 +30,21 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+
+def _validate_sampling_params(
+    n_samples: int,
+    n_sweeps: int,
+    burn_in: int,
+) -> tuple[int, int, int]:
+    """Validate and convert sampling parameters."""
+    if n_samples <= 0:
+        raise ValueError("n_samples must be positive.")
+    if n_sweeps <= 0:
+        raise ValueError("n_sweeps must be positive.")
+    if burn_in < 0:
+        raise ValueError("burn_in must be non-negative.")
+    return int(n_samples), int(n_sweeps), int(burn_in)
 
 
 def _maybe_log_progress(
@@ -135,15 +146,9 @@ def sequential_sample(
     return_key: bool = False,
 ) -> jax.Array | tuple[jax.Array, jax.Array]:
     """Sequential sampling for MPS using Metropolis sweeps."""
-    if n_samples <= 0:
-        raise ValueError("n_samples must be positive.")
-    if n_sweeps <= 0:
-        raise ValueError("n_sweeps must be positive.")
-    if burn_in < 0:
-        raise ValueError("burn_in must be non-negative.")
-    num_samples = int(n_samples)
-    num_sweeps = int(n_sweeps)
-    num_burn_in = int(burn_in)
+    num_samples, num_sweeps, num_burn_in = _validate_sampling_params(
+        n_samples, n_sweeps, burn_in
+    )
     tensors = [jnp.asarray(t) for t in model.tensors]
     n_sites = len(tensors)
     tensors_padded = _pad_mps_tensors(tensors, model.bond_dim)
@@ -207,16 +212,9 @@ def sequential_sample(
     return_key: bool = False,
 ) -> jax.Array | tuple[jax.Array, jax.Array]:
     """Sequential sampling for PEPS using Metropolis sweeps."""
-    if n_samples <= 0:
-        raise ValueError("n_samples must be positive.")
-    if n_sweeps <= 0:
-        raise ValueError("n_sweeps must be positive.")
-    if burn_in < 0:
-        raise ValueError("burn_in must be non-negative.")
-
-    num_samples = int(n_samples)
-    num_sweeps = int(n_sweeps)
-    num_burn_in = int(burn_in)
+    num_samples, num_sweeps, num_burn_in = _validate_sampling_params(
+        n_samples, n_sweeps, burn_in
+    )
     shape = model.shape
     n_sites = int(shape[0] * shape[1])
     tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
@@ -294,15 +292,9 @@ def sequential_sample_with_gradients(
     full_gradient: bool = False,
 ) -> tuple[jax.Array, jax.Array, jax.Array | None, jax.Array]:
     """Sequential sampling for MPS with per-sample gradient recording."""
-    if n_samples <= 0:
-        raise ValueError("n_samples must be positive.")
-    if n_sweeps <= 0:
-        raise ValueError("n_sweeps must be positive.")
-    if burn_in < 0:
-        raise ValueError("burn_in must be non-negative.")
-    num_samples = int(n_samples)
-    num_sweeps = int(n_sweeps)
-    num_burn_in = int(burn_in)
+    num_samples, num_sweeps, num_burn_in = _validate_sampling_params(
+        n_samples, n_sweeps, burn_in
+    )
     tensors = [jnp.asarray(t) for t in model.tensors]
     n_sites = len(tensors)
     tensors_padded = _pad_mps_tensors(tensors, model.bond_dim)
@@ -341,14 +333,11 @@ def sequential_sample_with_gradients(
         indices, key = run_sweeps(indices, key, num_sweeps)
         sample = (2 * indices - 1).astype(jnp.int32)
         samples.append(sample)
-        if full_gradient:
-            grad_row = _build_full_jac_mps(model, sample[None, :])[0]
-            grads.append(grad_row)
-        else:
-            o_row, p_row = _small_o_row_mps_from_indices(
-                tensors, indices, model.bond_dim, model.phys_dim
-            )
-            grads.append(o_row)
+        amp, grad_row, p_row = _value_and_grad(
+            model, sample, full_gradient=full_gradient
+        )
+        grads.append(grad_row / amp)
+        if not full_gradient:
             p_rows.append(p_row)
 
     samples = jnp.stack(samples, axis=0)
@@ -371,16 +360,9 @@ def sequential_sample_with_gradients(
     full_gradient: bool = False,
 ) -> tuple[jax.Array, jax.Array, jax.Array | None, jax.Array]:
     """Sequential sampling for PEPS with per-sample gradient recording."""
-    if n_samples <= 0:
-        raise ValueError("n_samples must be positive.")
-    if n_sweeps <= 0:
-        raise ValueError("n_sweeps must be positive.")
-    if burn_in < 0:
-        raise ValueError("burn_in must be non-negative.")
-
-    num_samples = int(n_samples)
-    num_sweeps = int(n_sweeps)
-    num_burn_in = int(burn_in)
+    num_samples, num_sweeps, num_burn_in = _validate_sampling_params(
+        n_samples, n_sweeps, burn_in
+    )
     shape = model.shape
     n_sites = int(shape[0] * shape[1])
     tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
@@ -421,14 +403,11 @@ def sequential_sample_with_gradients(
         spins, key = run_sweeps(spins, key, num_sweeps)
         sample = (2 * spins.reshape(n_sites) - 1).astype(jnp.int32)
         samples.append(sample)
-        if full_gradient:
-            grad_row = _build_full_jac_peps(model, sample[None, :])[0]
-            grads.append(grad_row)
-        else:
-            o_row, p_row = _small_o_row_peps_from_indices(
-                tensors, spins, shape, model.bond_dim, model.strategy
-            )
-            grads.append(o_row)
+        amp, grad_row, p_row = _value_and_grad(
+            model, sample, full_gradient=full_gradient
+        )
+        grads.append(grad_row / amp)
+        if not full_gradient:
             p_rows.append(p_row)
 
         if progress_interval is not None and progress_interval > 0:

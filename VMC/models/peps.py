@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING, Any
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from netket.utils import timing
 
 from VMC.utils.utils import spin_to_occupancy
 
@@ -23,7 +22,7 @@ if TYPE_CHECKING:
     from jax.typing import DTypeLike
 
 __all__ = [
-    "SimplePEPS",
+    "PEPS",
     # Contraction strategies (ABC pattern)
     "ContractionStrategy",
     "NoTruncation",
@@ -31,7 +30,6 @@ __all__ = [
     "DensityMatrix",
     # Amplitude functions
     "make_peps_amplitude",
-    "peps_amplitude",
 ]
 
 logger = logging.getLogger(__name__)
@@ -505,7 +503,7 @@ def make_peps_amplitude(
     @jax.custom_vjp
     def amplitude_fn(tensors: Any, sample: jax.Array) -> jax.Array:
         """Compute PEPS amplitude with custom VJP."""
-        return SimplePEPS._single_amplitude(tensors, sample, shape, strategy)
+        return PEPS._single_amplitude(tensors, sample, shape, strategy)
 
     def amplitude_fwd(tensors: Any, sample: jax.Array) -> tuple[jax.Array, tuple]:
         """Forward pass returning residuals."""
@@ -544,22 +542,7 @@ def make_peps_amplitude(
     return amplitude_fn
 
 
-def peps_amplitude(
-    tensors: Any,
-    sample: jax.Array,
-    shape: tuple[int, int],
-    strategy: ContractionStrategy,
-) -> jax.Array:
-    """Convenience wrapper around `make_peps_amplitude`.
-
-    For JAX transforms (`grad`, `jacrev`, `vmap`) prefer calling
-    `make_peps_amplitude(shape, strategy)` once and reusing it.
-    """
-    amp_fn = make_peps_amplitude(shape, strategy)
-    return amp_fn(tensors, sample)
-
-
-class SimplePEPS(nnx.Module):
+class PEPS(nnx.Module):
     """Open-boundary PEPS on a rectangular grid contracted with a boundary MPS.
 
     Each site tensor has shape (phys_dim, up, down, left, right) with boundary
@@ -697,9 +680,9 @@ class SimplePEPS(nnx.Module):
             for _ in range(shape[1])
         )
         for row in range(shape[0]):
-            mpo = SimplePEPS._build_row_mpo(tensors, spins[row], row, shape[1])
+            mpo = PEPS._build_row_mpo(tensors, spins[row], row, shape[1])
             boundary = strategy.apply(boundary, mpo)
-        return SimplePEPS._contract_bottom(boundary)
+        return PEPS._contract_bottom(boundary)
 
     @nnx.jit
     def __call__(self, x: jax.Array) -> jax.Array:
@@ -717,232 +700,3 @@ class SimplePEPS(nnx.Module):
             )
         )(x)
         return jnp.log(amps)
-
-
-
-def test_gradient_correctness():
-    """Test that custom VJP produces correct gradients."""
-    logger.info("\n%s", "=" * 60)
-    logger.info("Testing custom VJP gradient correctness")
-    logger.info("=" * 60)
-
-    # Small PEPS for testing
-    shape = (2, 2)
-    bond_dim = 2
-
-    rngs = nnx.Rngs(42)
-    model = SimplePEPS(rngs=rngs, shape=shape, bond_dim=bond_dim)
-    tensors = model.tensors
-
-    sample = jnp.array([1, -1, -1, 1], dtype=jnp.int32)
-
-    def tensors_to_flat(tensors):
-        leaves = []
-        for row in tensors:
-            for tensor in row:
-                leaves.append(jnp.asarray(tensor).ravel())
-        return jnp.concatenate(leaves)
-
-    def flat_to_tensors(flat, tensors_template):
-        result = []
-        offset = 0
-        for row in tensors_template:
-            row_result = []
-            for tensor in row:
-                t = jnp.asarray(tensor)
-                size = t.size
-                row_result.append(flat[offset : offset + size].reshape(t.shape))
-                offset += size
-            result.append(row_result)
-        return result
-
-    # Test 1: Compare custom VJP gradient with no-truncation autodiff
-    logger.info("\n1. Comparing custom VJP (no truncation) with autodiff...")
-
-    amp_fn = make_peps_amplitude(shape, NoTruncation())
-
-    def amplitude_custom_vjp(flat_params):
-        tensors_nested = flat_to_tensors(flat_params, tensors)
-        return amp_fn(tensors_nested, sample)
-
-    def amplitude_autodiff(flat_params):
-        tensors_nested = flat_to_tensors(flat_params, tensors)
-        return SimplePEPS._single_amplitude(
-            tensors_nested, sample, shape, NoTruncation()
-        )
-
-    flat_params = tensors_to_flat(tensors)
-
-    grad_custom = jax.grad(amplitude_custom_vjp, holomorphic=True)(flat_params)
-    grad_autodiff = jax.grad(amplitude_autodiff, holomorphic=True)(flat_params)
-
-    rel_error = jnp.linalg.norm(grad_custom - grad_autodiff) / (
-        jnp.linalg.norm(grad_autodiff) + 1e-10
-    )
-    logger.info("   Relative gradient error: %.6e", float(rel_error))
-
-    if rel_error < 1e-5:
-        logger.info("   PASS: Gradients match!")
-    else:
-        logger.warning("   FAIL: Gradients differ significantly!")
-
-    # Test 2: Test that the amplitude values match
-    logger.info("\n2. Comparing amplitude values...")
-    amp_custom = amplitude_custom_vjp(flat_params)
-    amp_autodiff = amplitude_autodiff(flat_params)
-    amp_error = jnp.abs(amp_custom - amp_autodiff)
-    logger.info("   Custom VJP amplitude: %s", amp_custom)
-    logger.info("   Autodiff amplitude:   %s", amp_autodiff)
-    logger.info("   Absolute error: %.6e", float(amp_error))
-
-    # Test 3: Test with zip-up truncation strategy
-    logger.info("\n3. Testing custom VJP with zip-up truncation...")
-    truncate_bond_dimension_test = 4
-    amp_fn_zipup = make_peps_amplitude(
-        shape, ZipUp(truncate_bond_dimension=truncate_bond_dimension_test)
-    )
-    grad_zipup = None
-
-    def amplitude_zipup_custom(flat_params):
-        tensors_nested = flat_to_tensors(flat_params, tensors)
-        return amp_fn_zipup(tensors_nested, sample)
-
-    try:
-        grad_zipup = jax.grad(amplitude_zipup_custom, holomorphic=True)(flat_params)
-        amp_zipup = amplitude_zipup_custom(flat_params)
-        logger.info("   Zip-up amplitude: %s", amp_zipup)
-        logger.info(
-            "   Zip-up gradient norm: %.6e", float(jnp.linalg.norm(grad_zipup))
-        )
-        logger.info("   PASS: Zip-up truncation works with custom VJP!")
-    except Exception as exc:
-        logger.warning("   FAIL: Zip-up error: %s", exc)
-
-    # Test 4: Test with density matrix truncation strategy
-    logger.info("\n4. Testing custom VJP with density matrix truncation...")
-    amp_fn_dm = make_peps_amplitude(
-        shape, DensityMatrix(truncate_bond_dimension=truncate_bond_dimension_test)
-    )
-    grad_dm = None
-
-    def amplitude_dm_custom(flat_params):
-        tensors_nested = flat_to_tensors(flat_params, tensors)
-        return amp_fn_dm(tensors_nested, sample)
-
-    try:
-        grad_dm = jax.grad(amplitude_dm_custom, holomorphic=True)(flat_params)
-        amp_dm = amplitude_dm_custom(flat_params)
-        logger.info("   Density matrix amplitude: %s", amp_dm)
-        logger.info(
-            "   Density matrix gradient norm: %.6e", float(jnp.linalg.norm(grad_dm))
-        )
-        logger.info("   PASS: Density matrix truncation works with custom VJP!")
-    except Exception as exc:
-        logger.warning("   FAIL: Density matrix error: %s", exc)
-
-    # Test 5: Compare truncation custom VJP gradients to exact no-truncation autodiff
-    logger.info(
-        "\n5. Comparing truncation gradients to no-truncation autodiff..."
-    )
-    for name, grad in (
-        ("ZipUp", grad_zipup),
-        ("DensityMatrix", grad_dm),
-    ):
-        if grad is None:
-            logger.warning("   %s: skipped (gradient not available)", name)
-            continue
-        trunc_rel_error = jnp.linalg.norm(grad - grad_autodiff) / (
-            jnp.linalg.norm(grad_autodiff) + 1e-10
-        )
-        logger.info(
-            "   %s vs no-truncation rel diff: %.6e",
-            name,
-            float(trunc_rel_error),
-        )
-
-    logger.info("\n%s", "=" * 60)
-    logger.info("Custom VJP tests complete")
-    logger.info("=" * 60)
-
-
-if __name__ == "__main__":
-    shape = (4, 4)
-    bond_dim = 8
-    truncate_bond_dimension = bond_dim * bond_dim
-
-    sample = jnp.array(
-        [1, -1, -1, -1, 1, 1, 1, -1, -1, 1, -1, 1, -1, 1, -1, 1], dtype=jnp.int32
-    )
-
-    rngs = nnx.Rngs(1)
-    model = SimplePEPS(rngs=rngs, shape=shape, bond_dim=bond_dim)
-    tensors = model.tensors
-
-    def timed(name, fn):
-        with timing.timed_scope(name=name, force=True) as t:
-            out = fn()
-            out = t.block_until_ready(out)
-        return out, t.total
-
-    amp_no_trunc, t_no = timed(
-        "no_trunc",
-        lambda: SimplePEPS._single_amplitude(
-            tensors, sample, shape, NoTruncation()
-        ),
-    )
-    amp_zip, t_zip = timed(
-        "zip_up",
-        lambda: SimplePEPS._single_amplitude(
-            tensors,
-            sample,
-            shape,
-            ZipUp(truncate_bond_dimension=truncate_bond_dimension),
-        ),
-    )
-    amp_dm, t_dm = timed(
-        "density_matrix",
-        lambda: SimplePEPS._single_amplitude(
-            tensors,
-            sample,
-            shape,
-            DensityMatrix(truncate_bond_dimension=truncate_bond_dimension),
-        ),
-    )
-
-    # Explicit apply-then-truncate path.
-    spins = spin_to_occupancy(sample).reshape(shape)
-    boundary = tuple(
-        jnp.ones((1, 1, 1), dtype=jnp.asarray(tensors[0][0]).dtype)
-        for _ in range(shape[1])
-    )
-
-    def apply_then_truncate():
-        boundary_local = boundary
-        for row in range(shape[0]):
-            mpo = SimplePEPS._build_row_mpo(tensors, spins[row], row, shape[1])
-            boundary_local = SimplePEPS._apply_mpo(boundary_local, mpo)
-            boundary_local = SimplePEPS._truncate_mps(
-                boundary_local, truncate_bond_dimension
-            )
-        return SimplePEPS._contract_bottom(boundary_local)
-
-    amp_apply_trunc, t_apply = timed("apply_truncate", apply_then_truncate)
-
-    def _fmt(z):
-        return f"{float(jnp.real(z)):+.6f}{float(jnp.imag(z)):+.6f}j"
-
-    logger.info(
-        "=== PEPS contraction consistency check (4x4, bond_dim=8, "
-        "truncate_bond_dimension=D^2) ==="
-    )
-    logger.info("sample spins: %s", sample)
-    logger.info("amp no trunc   : %s  (t=%.3es)", _fmt(amp_no_trunc), t_no)
-    logger.info("amp zip-up     : %s  (t=%.3es)", _fmt(amp_zip), t_zip)
-    logger.info("amp dens-mat   : %s  (t=%.3es)", _fmt(amp_dm), t_dm)
-    logger.info("amp apply+trunc: %s  (t=%.3es)", _fmt(amp_apply_trunc), t_apply)
-    logger.info("|zip - no|     : %.3e", float(jnp.abs(amp_zip - amp_no_trunc)))
-    logger.info("|dm  - no|     : %.3e", float(jnp.abs(amp_dm - amp_no_trunc)))
-    logger.info("|apply - no|   : %.3e", float(jnp.abs(amp_apply_trunc - amp_no_trunc)))
-
-    # Run gradient correctness tests
-    test_gradient_correctness()

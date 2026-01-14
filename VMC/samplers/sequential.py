@@ -4,14 +4,16 @@ from __future__ import annotations
 from VMC import config  # noqa: F401 - JAX config must be imported first
 
 import functools
+import logging
 
 import jax
 import jax.numpy as jnp
+from plum import dispatch
 
-from VMC.models.mps import SimpleMPS
+from VMC.models.mps import MPS
 from VMC.models.peps import (
     ContractionStrategy,
-    SimplePEPS,
+    PEPS,
     _apply_mpo_from_below,
     _build_row_mpo_static,
     _compute_single_gradient,
@@ -19,12 +21,44 @@ from VMC.models.peps import (
     _contract_left_partial,
     _contract_right_partial,
 )
+from VMC.core.eval import _value_and_grad
 
 __all__ = [
-    "peps_sequential_sample",
+    "sequential_sample",
+    "sequential_sample_with_gradients",
     "peps_sequential_sweep",
-    "sequential_sample_mps",
 ]
+
+logger = logging.getLogger(__name__)
+
+
+def _validate_sampling_params(
+    n_samples: int,
+    n_sweeps: int,
+    burn_in: int,
+) -> tuple[int, int, int]:
+    """Validate and convert sampling parameters."""
+    if n_samples <= 0:
+        raise ValueError("n_samples must be positive.")
+    if n_sweeps <= 0:
+        raise ValueError("n_sweeps must be positive.")
+    if burn_in < 0:
+        raise ValueError("burn_in must be non-negative.")
+    return int(n_samples), int(n_sweeps), int(burn_in)
+
+
+def _maybe_log_progress(
+    current: int,
+    total: int,
+    interval: int | None,
+) -> None:
+    """Log progress every interval samples when enabled."""
+    if interval is None or interval <= 0:
+        return
+    if current % interval != 0 and current != total:
+        return
+    if logger.isEnabledFor(logging.INFO):
+        logger.info("Sequential sampling: %d/%d samples", current, total)
 
 
 def _pad_mps_tensors(
@@ -101,24 +135,20 @@ def _sequential_mps_sweep(
     return indices, key
 
 
-def sequential_sample_mps(
-    model: SimpleMPS,
+@dispatch
+def sequential_sample(
+    model: MPS,
     *,
     n_samples: int,
     key: jax.Array,
     n_sweeps: int = 1,
     burn_in: int = 0,
-) -> jax.Array:
-    """Sample spins from an MPS with sequential Metropolis sweeps."""
-    if n_samples <= 0:
-        raise ValueError("n_samples must be positive.")
-    if n_sweeps <= 0:
-        raise ValueError("n_sweeps must be positive.")
-    if burn_in < 0:
-        raise ValueError("burn_in must be non-negative.")
-    num_samples = int(n_samples)
-    num_sweeps = int(n_sweeps)
-    num_burn_in = int(burn_in)
+    return_key: bool = False,
+) -> jax.Array | tuple[jax.Array, jax.Array]:
+    """Sequential sampling for MPS using Metropolis sweeps."""
+    num_samples, num_sweeps, num_burn_in = _validate_sampling_params(
+        n_samples, n_sweeps, burn_in
+    )
     tensors = [jnp.asarray(t) for t in model.tensors]
     n_sites = len(tensors)
     tensors_padded = _pad_mps_tensors(tensors, model.bond_dim)
@@ -164,7 +194,240 @@ def sequential_sample_mps(
     )
 
     spins_batch = 2 * spins_batch - 1
-    return spins_batch.astype(jnp.int32)
+    spins_batch = spins_batch.astype(jnp.int32)
+    if return_key:
+        return spins_batch, key
+    return spins_batch
+
+
+@dispatch
+def sequential_sample(
+    model: PEPS,
+    *,
+    n_samples: int,
+    key: jax.Array,
+    n_sweeps: int = 1,
+    burn_in: int = 0,
+    progress_interval: int | None = None,
+    return_key: bool = False,
+) -> jax.Array | tuple[jax.Array, jax.Array]:
+    """Sequential sampling for PEPS using Metropolis sweeps."""
+    num_samples, num_sweeps, num_burn_in = _validate_sampling_params(
+        n_samples, n_sweeps, burn_in
+    )
+    shape = model.shape
+    n_sites = int(shape[0] * shape[1])
+    tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
+
+    key, subkey = jax.random.split(key)
+    spins = jax.random.bernoulli(subkey, 0.5, shape=shape).astype(jnp.int32)
+
+    def sweep_step(carry, _):
+        spins, key = carry
+        spins, key = peps_sequential_sweep(
+            tensors,
+            spins,
+            shape,
+            model.strategy,
+            key,
+        )
+        return (spins, key), None
+
+    def run_sweeps(
+        spins: jax.Array,
+        key: jax.Array,
+        count: int,
+    ) -> tuple[jax.Array, jax.Array]:
+        (spins, key), _ = jax.lax.scan(
+            sweep_step,
+            (spins, key),
+            xs=None,
+            length=count,
+        )
+        return spins, key
+
+    spins, key = run_sweeps(spins, key, num_burn_in)
+
+    if progress_interval is None or progress_interval <= 0:
+        def sample_step(carry, _):
+            spins, key = carry
+            spins, key = run_sweeps(spins, key, num_sweeps)
+            return (spins, key), spins.reshape(n_sites)
+
+        (_, key), spins_batch = jax.lax.scan(
+            sample_step,
+            (spins, key),
+            xs=None,
+            length=num_samples,
+        )
+        samples = (2 * spins_batch - 1).astype(jnp.int32)
+        if return_key:
+            return samples, key
+        return samples
+
+    samples_list = []
+    for idx in range(num_samples):
+        spins, key = run_sweeps(spins, key, num_sweeps)
+        samples_list.append(spins.reshape(n_sites))
+        current = idx + 1
+        if current % progress_interval == 0 or current == num_samples:
+            jax.block_until_ready(spins)
+            _maybe_log_progress(current, num_samples, progress_interval)
+
+    samples = jnp.stack(samples_list, axis=0)
+    samples = (2 * samples - 1).astype(jnp.int32)
+    if return_key:
+        return samples, key
+    return samples
+
+
+@dispatch
+def sequential_sample_with_gradients(
+    model: MPS,
+    *,
+    n_samples: int,
+    key: jax.Array,
+    n_sweeps: int = 1,
+    burn_in: int = 0,
+    progress_interval: int | None = None,
+    full_gradient: bool = False,
+) -> tuple[jax.Array, jax.Array, jax.Array | None, jax.Array]:
+    """Sequential sampling for MPS with per-sample gradient recording.
+
+    Logs progress every ``progress_interval`` samples when provided.
+    """
+    num_samples, num_sweeps, num_burn_in = _validate_sampling_params(
+        n_samples, n_sweeps, burn_in
+    )
+    tensors = [jnp.asarray(t) for t in model.tensors]
+    n_sites = len(tensors)
+    tensors_padded = _pad_mps_tensors(tensors, model.bond_dim)
+
+    key, subkey = jax.random.split(key)
+    indices = jax.random.bernoulli(subkey, 0.5, shape=(n_sites,)).astype(jnp.int32)
+
+    def sweep_step(carry, _):
+        indices, key = carry
+        indices, key = _sequential_mps_sweep(
+            tensors_padded,
+            indices,
+            key=key,
+            n_sites=n_sites,
+        )
+        return (indices, key), None
+
+    def run_sweeps(
+        indices: jax.Array,
+        key: jax.Array,
+        count: int,
+    ) -> tuple[jax.Array, jax.Array]:
+        (indices, key), _ = jax.lax.scan(
+            sweep_step,
+            (indices, key),
+            xs=None,
+            length=count,
+        )
+        return indices, key
+
+    indices, key = run_sweeps(indices, key, num_burn_in)
+    samples = []
+    grads = []
+    p_rows = []
+    for idx in range(num_samples):
+        indices, key = run_sweeps(indices, key, num_sweeps)
+        sample = (2 * indices - 1).astype(jnp.int32)
+        samples.append(sample)
+        amp, grad_row, p_row = _value_and_grad(
+            model, sample, full_gradient=full_gradient
+        )
+        grads.append(grad_row / amp)
+        if not full_gradient:
+            p_rows.append(p_row)
+        if progress_interval is not None and progress_interval > 0:
+            _maybe_log_progress(idx + 1, num_samples, progress_interval)
+
+    samples = jnp.stack(samples, axis=0)
+    grads = jnp.stack(grads, axis=0)
+    if full_gradient:
+        return samples, grads, None, key
+    p = jnp.stack(p_rows, axis=0)
+    return samples, grads, p, key
+
+
+@dispatch
+def sequential_sample_with_gradients(
+    model: PEPS,
+    *,
+    n_samples: int,
+    key: jax.Array,
+    n_sweeps: int = 1,
+    burn_in: int = 0,
+    progress_interval: int | None = None,
+    full_gradient: bool = False,
+) -> tuple[jax.Array, jax.Array, jax.Array | None, jax.Array]:
+    """Sequential sampling for PEPS with per-sample gradient recording."""
+    num_samples, num_sweeps, num_burn_in = _validate_sampling_params(
+        n_samples, n_sweeps, burn_in
+    )
+    shape = model.shape
+    n_sites = int(shape[0] * shape[1])
+    tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
+
+    key, subkey = jax.random.split(key)
+    spins = jax.random.bernoulli(subkey, 0.5, shape=shape).astype(jnp.int32)
+
+    def sweep_step(carry, _):
+        spins, key = carry
+        spins, key = peps_sequential_sweep(
+            tensors,
+            spins,
+            shape,
+            model.strategy,
+            key,
+        )
+        return (spins, key), None
+
+    def run_sweeps(
+        spins: jax.Array,
+        key: jax.Array,
+        count: int,
+    ) -> tuple[jax.Array, jax.Array]:
+        (spins, key), _ = jax.lax.scan(
+            sweep_step,
+            (spins, key),
+            xs=None,
+            length=count,
+        )
+        return spins, key
+
+    spins, key = run_sweeps(spins, key, num_burn_in)
+
+    samples = []
+    grads = []
+    p_rows = []
+    for idx in range(num_samples):
+        spins, key = run_sweeps(spins, key, num_sweeps)
+        sample = (2 * spins.reshape(n_sites) - 1).astype(jnp.int32)
+        samples.append(sample)
+        amp, grad_row, p_row = _value_and_grad(
+            model, sample, full_gradient=full_gradient
+        )
+        grads.append(grad_row / amp)
+        if not full_gradient:
+            p_rows.append(p_row)
+
+        if progress_interval is not None and progress_interval > 0:
+            current = idx + 1
+            if current % progress_interval == 0 or current == num_samples:
+                jax.block_until_ready(spins)
+                _maybe_log_progress(current, num_samples, progress_interval)
+
+    samples = jnp.stack(samples, axis=0)
+    grads = jnp.stack(grads, axis=0)
+    if full_gradient:
+        return samples, grads, None, key
+    p = jnp.stack(p_rows, axis=0)
+    return samples, grads, p, key
 
 
 def _peps_boundary_mps(n_cols: int, dtype: jnp.dtype) -> tuple[jax.Array, ...]:
@@ -253,71 +516,3 @@ def peps_sequential_sweep(
         top_env = strategy.apply(top_env, mpo_row)
 
     return spins, key
-
-
-def peps_sequential_sample(
-    model: SimplePEPS,
-    *,
-    n_samples: int,
-    key: jax.Array,
-    n_sweeps: int = 1,
-    burn_in: int = 0,
-) -> tuple[jax.Array, jax.Array]:
-    """Generate samples using sequential Metropolis sweeps."""
-    if n_samples <= 0:
-        raise ValueError("n_samples must be positive.")
-    if n_sweeps <= 0:
-        raise ValueError("n_sweeps must be positive.")
-    if burn_in < 0:
-        raise ValueError("burn_in must be non-negative.")
-
-    num_samples = int(n_samples)
-    num_sweeps = int(n_sweeps)
-    num_burn_in = int(burn_in)
-    shape = model.shape
-    n_sites = int(shape[0] * shape[1])
-    tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
-
-    key, subkey = jax.random.split(key)
-    spins = jax.random.bernoulli(subkey, 0.5, shape=shape).astype(jnp.int32)
-
-    def sweep_step(carry, _):
-        spins, key = carry
-        spins, key = peps_sequential_sweep(
-            tensors,
-            spins,
-            shape,
-            model.strategy,
-            key,
-        )
-        return (spins, key), None
-
-    def run_sweeps(
-        spins: jax.Array,
-        key: jax.Array,
-        count: int,
-    ) -> tuple[jax.Array, jax.Array]:
-        (spins, key), _ = jax.lax.scan(
-            sweep_step,
-            (spins, key),
-            xs=None,
-            length=count,
-        )
-        return spins, key
-
-    spins, key = run_sweeps(spins, key, num_burn_in)
-
-    def sample_step(carry, _):
-        spins, key = carry
-        spins, key = run_sweeps(spins, key, num_sweeps)
-        return (spins, key), spins.reshape(n_sites)
-
-    (_, key), spins_batch = jax.lax.scan(
-        sample_step,
-        (spins, key),
-        xs=None,
-        length=num_samples,
-    )
-
-    spins_batch = 2 * spins_batch - 1
-    return spins_batch.astype(jnp.int32), key

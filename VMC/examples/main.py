@@ -10,12 +10,12 @@ from flax import nnx
 
 from VMC.drivers.custom_driver import CustomVMC, CustomVMC_SR
 from VMC.gauge import GaugeConfig
-from VMC.models.mps import SimpleMPS
+from VMC.models.mps import MPS
 from VMC.qgt.dense_qgt_operator import MinimalDenseSR
 
 __all__ = [
     "MinimalDenseSR",
-    "SimpleMPS",
+    "MPS",
     "build_heisenberg_square",
     "main",
 ]
@@ -69,7 +69,7 @@ def main():
 
     optimizer = nk.optimizer.Sgd(learning_rate=3e-2)
 
-    mps_gauge_removed = SimpleMPS(
+    mps_gauge_removed = MPS(
         rngs=nnx.Rngs(6), n_sites=n_sites, bond_dim=mps_bond
     )
     vstate = nk.vqs.MCState(
@@ -90,7 +90,7 @@ def main():
         ),
     )
 
-    mps_custom_driver_netket_qgt = SimpleMPS(
+    mps_custom_driver_netket_qgt = MPS(
         rngs=nnx.Rngs(6), n_sites=n_sites, bond_dim=mps_bond
     )
     vstate = nk.vqs.MCState(
@@ -113,7 +113,7 @@ def main():
         ),
     )
 
-    mps_custom_driver_custom_qgt = SimpleMPS(
+    mps_custom_driver_custom_qgt = MPS(
         rngs=nnx.Rngs(6), n_sites=n_sites, bond_dim=mps_bond
     )
     vstate = nk.vqs.MCState(
@@ -133,7 +133,7 @@ def main():
         ),
     )
 
-    mps_netket_custom = SimpleMPS(
+    mps_netket_custom = MPS(
         rngs=nnx.Rngs(6), n_sites=n_sites, bond_dim=mps_bond
     )
     vstate = nk.vqs.MCState(
@@ -148,7 +148,7 @@ def main():
         nk.driver.VMC(H, optimizer, variational_state=vstate, preconditioner=sr_custom),
     )
 
-    mps_netket_driver = SimpleMPS(
+    mps_netket_driver = MPS(
         rngs=nnx.Rngs(6), n_sites=n_sites, bond_dim=mps_bond
     )
     vstate = nk.vqs.MCState(

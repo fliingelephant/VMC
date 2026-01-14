@@ -201,19 +201,6 @@ def _prepare_samples(
     return samples
 
 
-def _evaluate_log_prob(
-    log_prob_fn: Callable[[jax.Array], jax.Array],
-    samples: jax.Array,
-) -> jax.Array:
-    """Evaluate log_prob_fn and validate the output shape."""
-    log_prob = jnp.real(jnp.asarray(log_prob_fn(samples), dtype=jnp.float64))
-    if log_prob.shape != (samples.shape[0],):
-        raise ValueError(
-            f"log_prob_fn must return shape ({samples.shape[0]},), got {log_prob.shape}."
-        )
-    return log_prob
-
-
 class IndependentSetSampler:
     """Standalone Metropolis-Hastings sampler for independent sets."""
 
@@ -268,7 +255,11 @@ class IndependentSetSampler:
         samples = _prepare_samples(
             init_samples, n_samples, self._num_sites, self._neighbors, self._mask
         )
-        log_prob = _evaluate_log_prob(log_prob_fn, samples)
+        log_prob = jnp.real(jnp.asarray(log_prob_fn(samples), dtype=jnp.float64))
+        if log_prob.shape != (samples.shape[0],):
+            raise ValueError(
+                f"log_prob must have shape ({samples.shape[0]},), got {log_prob.shape}."
+            )
 
         batch_idx = jnp.arange(n_samples)
 
@@ -291,6 +282,11 @@ class IndependentSetSampler:
             log_prob_prop = jnp.real(
                 jnp.asarray(log_prob_fn(proposed), dtype=jnp.float64)
             )
+            if log_prob_prop.shape != (batch_samples.shape[0],):
+                raise ValueError(
+                    "log_prob must have shape "
+                    f"({batch_samples.shape[0]},), got {log_prob_prop.shape}."
+                )
 
             flippable_prop = flippable_mask(proposed)
             n_flippable_prop = jnp.sum(flippable_prop, axis=-1).astype(jnp.float64)
@@ -338,7 +334,18 @@ class DiscardBlockedSampler:
         key: jax.Array,
         init_samples: jax.Array | None = None,
     ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
-        """Run Metropolis-Hastings sweeps with invalid moves rejected."""
+        """Run Metropolis-Hastings sweeps with invalid moves rejected.
+
+        Args:
+            log_prob_fn: Callable returning log-probabilities for a batch of samples.
+            n_samples: Number of parallel chains.
+            n_sweeps: Number of Metropolis sweeps to run.
+            key: JAX PRNG key.
+            init_samples: Optional initial samples with shape (n_samples, num_sites).
+
+        Returns:
+            Tuple of (samples, log_prob, key, acceptance).
+        """
         if n_samples <= 0:
             raise ValueError("n_samples must be positive.")
         if n_sweeps <= 0:
@@ -347,7 +354,11 @@ class DiscardBlockedSampler:
         samples = _prepare_samples(
             init_samples, n_samples, self._num_sites, self._neighbors, self._mask
         )
-        log_prob = _evaluate_log_prob(log_prob_fn, samples)
+        log_prob = jnp.real(jnp.asarray(log_prob_fn(samples), dtype=jnp.float64))
+        if log_prob.shape != (samples.shape[0],):
+            raise ValueError(
+                f"log_prob must have shape ({samples.shape[0]},), got {log_prob.shape}."
+            )
 
         batch_idx = jnp.arange(n_samples)
 
@@ -365,6 +376,11 @@ class DiscardBlockedSampler:
             log_prob_prop = jnp.real(
                 jnp.asarray(log_prob_fn(proposed), dtype=jnp.float64)
             )
+            if log_prob_prop.shape != (batch_samples.shape[0],):
+                raise ValueError(
+                    "log_prob must have shape "
+                    f"({batch_samples.shape[0]},), got {log_prob_prop.shape}."
+                )
 
             log_accept = jnp.where(
                 invalid, -jnp.inf, log_prob_prop - batch_log_prob

@@ -16,6 +16,9 @@ Use a **hybrid approach**: ABCs for type hierarchies + plum `@dispatch` for mult
 - **Prefer composition over inheritance.** Combine small strategy objects rather than deep class trees.
 - **No factory functions.** Use direct instantiation with explicit arguments.
 - **DRY (Don't Repeat Yourself).** Consolidate duplicated implementations into a single source of truth.
+- **Unified eval API (core).** `_value`, `_grad`, and `_value_and_grad` are the only evaluation entrypoints; every other evaluation is a variant of these (plum-dispatched for MPS/PEPS). Avoid manual-dispatch name variants, `log_*` helpers, or `*_fn` wrappers—inline `log`/ratio math and use `jax.vmap` for batching.
+- **Let it crash.** Avoid defensive parameter checks (e.g., `if _value_and_grad is None`); assume correct wiring and let errors surface.
+- **Sampling gradients.** When a sampler records gradients, compute value+Jacobian for each proposal together and keep gradients only for accepted proposals.
 
 ## JAX Patterns
 

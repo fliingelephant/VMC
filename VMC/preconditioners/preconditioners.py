@@ -74,7 +74,7 @@ def solve_svd(mat: jax.Array, rhs: jax.Array, *, rcond: float = 1e-12) -> jax.Ar
 @jax.jit
 def solve_cholesky(mat: jax.Array, rhs: jax.Array) -> jax.Array:
     """Solve positive-definite linear system using Cholesky decomposition."""
-    return jsp.linalg.solve(mat, rhs, assume_a="pos")
+    return jsp.linalg.cho_solve(jsp.linalg.cho_factor(mat), rhs)
 
 
 @dataclass(frozen=True)

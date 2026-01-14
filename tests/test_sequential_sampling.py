@@ -11,9 +11,9 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from VMC.samplers.sequential import peps_sequential_sample, sequential_sample_mps
-from VMC.models.mps import SimpleMPS
-from VMC.models.peps import SimplePEPS
+from VMC.samplers.sequential import sequential_sample
+from VMC.models.mps import MPS
+from VMC.models.peps import PEPS
 
 
 def _spins_to_index(spins: np.ndarray) -> int:
@@ -29,9 +29,9 @@ class SequentialSamplingTest(unittest.TestCase):
         n_sites = 4
         n_samples = 256
         n_sweeps = 2
-        model = SimpleMPS(rngs=nnx.Rngs(0), n_sites=n_sites, bond_dim=2)
+        model = MPS(rngs=nnx.Rngs(0), n_sites=n_sites, bond_dim=2)
         key = jax.random.key(0)
-        samples = sequential_sample_mps(
+        samples = sequential_sample(
             model, n_samples=n_samples, n_sweeps=n_sweeps, key=key
         )
 
@@ -61,9 +61,9 @@ class SequentialSamplingTest(unittest.TestCase):
         n_sites = shape[0] * shape[1]
         n_samples = 256
         n_sweeps = 2
-        model = SimplePEPS(rngs=nnx.Rngs(1), shape=shape, bond_dim=2)
+        model = PEPS(rngs=nnx.Rngs(1), shape=shape, bond_dim=2)
         key = jax.random.key(1)
-        samples, _ = peps_sequential_sample(
+        samples = sequential_sample(
             model, n_samples=n_samples, n_sweeps=n_sweeps, key=key
         )
 
@@ -81,7 +81,7 @@ class SequentialSamplingTest(unittest.TestCase):
         tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
         amps = []
         for sample in spins_basis:
-            amp = SimplePEPS._single_amplitude(
+            amp = PEPS._single_amplitude(
                 tensors,
                 jnp.asarray(sample),
                 shape,

@@ -18,8 +18,8 @@ import jax.numpy as jnp
 import jax.scipy as jsp
 from plum import dispatch
 
-from VMC.models.mps import SimpleMPS
-from VMC.models.peps import SimplePEPS
+from VMC.models.mps import MPS
+from VMC.models.peps import PEPS
 
 __all__ = [
     "GaugeConfig",
@@ -102,7 +102,7 @@ def _null_vectors_for_bond(
 @dispatch
 def compute_gauge_projection(
     cfg: GaugeConfig,
-    model: "SimpleMPS",
+    model: "MPS",
     params: dict,
     *,
     return_info: bool = False,
@@ -111,7 +111,7 @@ def compute_gauge_projection(
 
     Args:
         cfg: Gauge configuration.
-        model: The SimpleMPS model instance.
+        model: The MPS model instance.
         params: Parameter dict containing 'tensors'.
         return_info: If True, also return diagnostic info dict.
 
@@ -126,7 +126,7 @@ def compute_gauge_projection(
         tensor_list = list(tensors)
     else:
         raise TypeError(
-            "SimpleMPS tensors must be a dict, tuple, or list of site tensors."
+            "MPS tensors must be a dict, tuple, or list of site tensors."
         )
 
     n_sites = len(tensor_list)
@@ -194,7 +194,7 @@ def compute_gauge_projection(
 @dispatch
 def compute_gauge_projection(
     cfg: GaugeConfig,
-    model: "SimplePEPS",
+    model: "PEPS",
     params: dict,
     *,
     return_info: bool = False,

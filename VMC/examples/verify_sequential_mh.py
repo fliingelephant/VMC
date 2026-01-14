@@ -29,8 +29,8 @@ import numpy as np
 from flax import nnx
 
 from VMC.examples.real_time import build_heisenberg_square
-from VMC.models.mps import SimpleMPS
-from VMC.models.peps import ContractionStrategy, SimplePEPS, ZipUp
+from VMC.models.mps import MPS
+from VMC.models.peps import ContractionStrategy, PEPS, ZipUp
 from VMC.utils.vmc_utils import get_apply_fun
 
 logger = logging.getLogger(__name__)
@@ -123,7 +123,7 @@ def _sequential_mps_sweep_with_accept(
 # Sampling with Progress
 # ==============================================================================
 def _sequential_mps_with_progress(
-    model: SimpleMPS,
+    model: MPS,
     n_samples: int,
     n_sweeps: int,
     burn_in: int,
@@ -265,7 +265,7 @@ def _peps_sequential_sweep_with_accept(
 
 
 def _sequential_peps_with_progress(
-    model: SimplePEPS,
+    model: PEPS,
     n_samples: int,
     n_sweeps: int,
     burn_in: int,
@@ -413,7 +413,7 @@ def test_mps_fullsum(length: int) -> bool:
     hi, hamiltonian, _ = build_heisenberg_square(length, pbc=False)
     n_sites = int(hi.size)
 
-    model = SimpleMPS(
+    model = MPS(
         rngs=nnx.Rngs(SEED),
         n_sites=n_sites,
         bond_dim=BOND_DIM,
@@ -465,7 +465,7 @@ def test_peps_fullsum(length: int) -> bool:
     n_sites = int(hi.size)
     shape = (length, length)
 
-    model = SimplePEPS(
+    model = PEPS(
         rngs=nnx.Rngs(SEED),
         shape=shape,
         bond_dim=BOND_DIM,
@@ -517,7 +517,7 @@ def test_mps_netket(length: int) -> bool:
     hi, hamiltonian, _ = build_heisenberg_square(length, pbc=False)
     n_sites = int(hi.size)
 
-    model = SimpleMPS(
+    model = MPS(
         rngs=nnx.Rngs(SEED),
         n_sites=n_sites,
         bond_dim=BOND_DIM,
@@ -579,7 +579,7 @@ def test_peps_netket(length: int) -> bool:
     n_sites = int(hi.size)
     shape = (length, length)
 
-    model = SimplePEPS(
+    model = PEPS(
         rngs=nnx.Rngs(SEED),
         shape=shape,
         bond_dim=BOND_DIM,

@@ -16,19 +16,14 @@ from VMC.utils.utils import (
     occupancy_to_spin,
     spin_to_occupancy,
 )
-from VMC.utils.vmc_utils import (
-    batched_eval,
-    build_dense_jac,
-    build_dense_jac_from_state,
-    flatten_samples,
-    get_apply_fun,
-)
+
+# Note: vmc_utils imports are not included here to avoid circular imports.
+# Import directly from VMC.utils.vmc_utils when needed.
 
 __all__ = [
     "DiscardBlockedSampler",
     "IndependentSetSampler",
     "all_config_batches",
-    "batched_eval",
     "build_neighbor_arrays",
     "config_codes",
     "enumerate_all_configs",
@@ -37,8 +32,4 @@ __all__ = [
     "independent_set_violations",
     "occupancy_to_spin",
     "spin_to_occupancy",
-    "build_dense_jac",
-    "build_dense_jac_from_state",
-    "flatten_samples",
-    "get_apply_fun",
 ]

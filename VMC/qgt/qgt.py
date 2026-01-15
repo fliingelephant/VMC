@@ -9,7 +9,7 @@ from plum import dispatch
 from VMC import config  # noqa: F401
 from VMC.qgt.jacobian import Jacobian, SlicedJacobian, SiteOrdering
 
-__all__ = ["QGT", "ParameterSpace", "SampleSpace"]
+__all__ = ["QGT", "DiagonalQGT", "ParameterSpace", "SampleSpace"]
 
 
 @dataclass(frozen=True)
@@ -40,6 +40,73 @@ class QGT:
     def to_dense(self):
         """Build explicit S matrix."""
         return _to_dense(self.jac, self.space)
+
+
+@dataclass
+class DiagonalQGT:
+    """Block-diagonal approximation of the QGT in parameter space."""
+
+    jac: Jacobian | SlicedJacobian
+    space: ParameterSpace | SampleSpace = ParameterSpace()
+    params_per_site: tuple[int, ...] | None = None
+
+    def __matmul__(self, v):
+        if isinstance(self.space, SampleSpace):
+            raise NotImplementedError("DiagonalQGT only supports ParameterSpace")
+
+        if isinstance(self.jac, SlicedJacobian):
+            o, p, d = self.jac.o, self.jac.p, self.jac.phys_dim
+            if isinstance(self.jac.ordering, SiteOrdering):
+                pps = self.jac.ordering.params_per_site
+            else:
+                pps = self.params_per_site
+            result = jnp.zeros_like(v)
+            i, j = 0, 0
+            for n in pps:
+                for k in range(d):
+                    ok = jnp.where(p[:, i : i + n] == k, o[:, i : i + n], 0)
+                    result = result.at[j : j + n].add(ok.conj().T @ (ok @ v[j : j + n]))
+                    j += n
+                i += n
+            return result
+
+        result = jnp.zeros_like(v)
+        i = 0
+        for n in self.params_per_site:
+            o_site = self.jac.O[:, i : i + n]
+            result = result.at[i : i + n].set(o_site.conj().T @ (o_site @ v[i : i + n]))
+            i += n
+        return result
+
+    def to_dense(self):
+        if isinstance(self.space, SampleSpace):
+            raise NotImplementedError("DiagonalQGT only supports ParameterSpace")
+
+        if isinstance(self.jac, SlicedJacobian):
+            o, p, d = self.jac.o, self.jac.p, self.jac.phys_dim
+            if isinstance(self.jac.ordering, SiteOrdering):
+                pps = self.jac.ordering.params_per_site
+            else:
+                pps = self.params_per_site
+            m = sum(d * n for n in pps)
+            S = jnp.zeros((m, m), dtype=o.dtype)
+            i, j = 0, 0
+            for n in pps:
+                for k in range(d):
+                    ok = jnp.where(p[:, i : i + n] == k, o[:, i : i + n], 0)
+                    S = S.at[j : j + n, j : j + n].set(ok.conj().T @ ok)
+                    j += n
+                i += n
+            return S
+
+        m = self.jac.O.shape[1]
+        S = jnp.zeros((m, m), dtype=self.jac.O.dtype)
+        i = 0
+        for n in self.params_per_site:
+            o_site = self.jac.O[:, i : i + n]
+            S = S.at[i : i + n, i : i + n].set(o_site.conj().T @ o_site)
+            i += n
+        return S
 
 
 # --------------------------------------------------------------------------- #

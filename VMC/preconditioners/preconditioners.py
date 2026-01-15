@@ -13,7 +13,7 @@ import jax.scipy as jsp
 from netket.jax import tree_cast
 from plum import dispatch
 
-from VMC.qgt import QGT, Jacobian, ParameterSpace, SampleSpace
+from VMC.qgt import DiagonalQGT, QGT, Jacobian, ParameterSpace, SampleSpace
 from VMC.qgt.solvers import solve_cg, solve_cholesky, solve_svd
 from VMC.utils.vmc_utils import build_dense_jac, flatten_samples
 
@@ -29,6 +29,7 @@ __all__ = [
     "solve_svd",
     "DirectSolve",
     "QRSolve",
+    "DiagonalSolve",
     "SRPreconditioner",
 ]
 
@@ -48,6 +49,14 @@ class QRSolve:
 
     rcond: float | None = None
     min_norm: bool = True
+
+
+@dataclass(frozen=True)
+class DiagonalSolve:
+    """Block-diagonal solve strategy (ParameterSpace only)."""
+
+    solver: LinearSolver = solve_cholesky
+    params_per_site: tuple[int, ...] | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -152,6 +161,41 @@ def _solve_sr(
     raise NotImplementedError("QRSolve not supported for SampleSpace")
 
 
+@dispatch
+def _solve_sr(
+    strategy: DiagonalSolve,
+    space: ParameterSpace,
+    O: jax.Array,
+    dv: jax.Array,
+    diag_shift: float,
+) -> tuple[jax.Array, dict]:
+    qgt = DiagonalQGT(Jacobian(O), space=ParameterSpace(), params_per_site=strategy.params_per_site)
+    S = qgt.to_dense()
+    rhs = O.conj().T @ dv
+    mat = S + diag_shift * jnp.eye(S.shape[0], dtype=S.dtype)
+    x = jnp.zeros_like(rhs)
+    i = 0
+    for n in strategy.params_per_site:
+        block = mat[i : i + n, i : i + n]
+        x = x.at[i : i + n].set(strategy.solver(block, rhs[i : i + n]))
+        i += n
+    metrics = {
+        "residual_error": jnp.linalg.norm(S @ x - rhs) ** 2 / jnp.linalg.norm(rhs) ** 2,
+    }
+    return x, metrics
+
+
+@dispatch
+def _solve_sr(
+    strategy: DiagonalSolve,
+    space: SampleSpace,
+    O: jax.Array,
+    dv: jax.Array,
+    diag_shift: float,
+) -> tuple[jax.Array, dict]:
+    raise NotImplementedError("DiagonalSolve not supported for SampleSpace")
+
+
 # --------------------------------------------------------------------------- #
 # SRPreconditioner
 # --------------------------------------------------------------------------- #
@@ -163,7 +207,7 @@ class SRPreconditioner:
     def __init__(
         self,
         space: ParameterSpace | SampleSpace | None = None,
-        strategy: DirectSolve | QRSolve | None = None,
+        strategy: DirectSolve | QRSolve | DiagonalSolve | None = None,
         diag_shift: float = 1e-2,
         gauge_config: "GaugeConfig | None" = None,
     ):

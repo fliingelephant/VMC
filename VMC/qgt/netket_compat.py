@@ -26,11 +26,6 @@ class QGTOperator(LinearOperator):
     _qgt: QGT | None = nk.utils.struct.field(pytree_node=True, default=None)
     _params_structure: PyTree = nk.utils.struct.field(pytree_node=False, default=None)
 
-    @classmethod
-    def from_jacobian(cls, O: jax.Array, diag_shift: float = 0.0, params_structure=None):
-        qgt = QGT(Jacobian(O), space=ParameterSpace())
-        return cls(_qgt=qgt, diag_shift=diag_shift, _params_structure=params_structure)
-
     def __matmul__(self, v: PyTree) -> PyTree:
         flat, unravel = jax.flatten_util.ravel_pytree(v)
         return unravel(self._qgt @ flat + self.diag_shift * flat)
@@ -72,4 +67,9 @@ class DenseSR(AbstractLinearPreconditioner):
         params_struct = jax.tree_util.tree_map(
             lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype), params
         )
-        return QGTOperator.from_jacobian(O, self.diag_shift, params_struct)
+        qgt = QGT(Jacobian(O), space=ParameterSpace())
+        return QGTOperator(
+            _qgt=qgt,
+            diag_shift=self.diag_shift,
+            _params_structure=params_struct,
+        )

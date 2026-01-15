@@ -11,10 +11,10 @@ from flax import nnx
 from VMC.drivers.custom_driver import CustomVMC, CustomVMC_SR
 from VMC.gauge import GaugeConfig
 from VMC.models.mps import MPS
-from VMC.qgt.dense_qgt_operator import MinimalDenseSR
+from VMC.qgt import DenseSR
 
 __all__ = [
-    "MinimalDenseSR",
+    "DenseSR",
     "MPS",
     "build_heisenberg_square",
     "main",
@@ -122,7 +122,7 @@ def main():
         n_samples=n_samples,
         n_discard_per_chain=16,
     )
-    sr_custom_driver = MinimalDenseSR(diag_shift=1e-2)
+    sr_custom_driver = DenseSR(diag_shift=1e-2)
     run_case(
         "MPS + Custom VMC (custom QGT)",
         CustomVMC(
@@ -142,7 +142,7 @@ def main():
         n_samples=n_samples,
         n_discard_per_chain=16,
     )
-    sr_custom = MinimalDenseSR(diag_shift=1e-2)
+    sr_custom = DenseSR(diag_shift=1e-2)
     run_case(
         "MPS + NetKet VMC (custom dense SR)",
         nk.driver.VMC(H, optimizer, variational_state=vstate, preconditioner=sr_custom),

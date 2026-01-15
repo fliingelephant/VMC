@@ -1,16 +1,22 @@
-"""Quantum geometric tensor operators."""
+"""Quantum geometric tensor module."""
 from __future__ import annotations
 
-from VMC.qgt.dense_qgt_operator import DenseQGTOperator, MinimalDenseSR
 from VMC.qgt.jacobian import Jacobian, SlicedJacobian, PhysicalOrdering, SiteOrdering
-from VMC.qgt.qgt import QGT
+from VMC.qgt.qgt import QGT, ParameterSpace, SampleSpace
+from VMC.qgt.netket_compat import QGTOperator, DenseSR
+from VMC.qgt.solvers import solve_cg, solve_cholesky, solve_svd
 
 __all__ = [
-    "DenseQGTOperator",
-    "MinimalDenseSR",
     "Jacobian",
     "SlicedJacobian",
     "PhysicalOrdering",
     "SiteOrdering",
     "QGT",
+    "ParameterSpace",
+    "SampleSpace",
+    "QGTOperator",
+    "DenseSR",
+    "solve_cg",
+    "solve_cholesky",
+    "solve_svd",
 ]

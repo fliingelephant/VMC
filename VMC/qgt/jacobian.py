@@ -13,34 +13,32 @@ __all__ = ["PhysicalOrdering", "SiteOrdering", "Jacobian", "SlicedJacobian"]
 @dataclass(frozen=True)
 class PhysicalOrdering:
     """Loop over physical indices first."""
+
     pass
 
 
 @dataclass(frozen=True)
 class SiteOrdering:
     """Loop over sites first."""
+
     params_per_site: tuple[int, ...]
 
 
+@dataclass
 class Jacobian:
     """Full Jacobian O (n_samples, n_params)."""
-    def __init__(self, O: jax.Array):
-        self.O = O
+
+    O: jax.Array
 
 
+@dataclass
 class SlicedJacobian:
     """Reduced Jacobian using small-o trick."""
-    def __init__(
-        self,
-        o: jax.Array,
-        p: jax.Array,
-        phys_dim: int,
-        ordering: PhysicalOrdering | SiteOrdering = PhysicalOrdering(),
-    ):
-        self.o = o
-        self.p = p
-        self.phys_dim = phys_dim
-        self.ordering = ordering
+
+    o: jax.Array
+    p: jax.Array
+    phys_dim: int
+    ordering: PhysicalOrdering | SiteOrdering = PhysicalOrdering()
 
     @classmethod
     def from_samples(cls, model, samples: jax.Array, ordering=None):

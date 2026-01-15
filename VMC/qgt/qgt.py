@@ -60,7 +60,7 @@ class DiagonalQGT:
                 pps = self.jac.ordering.params_per_site
             else:
                 pps = self.params_per_site
-            result = jnp.zeros_like(v)
+            result = jnp.zeros_like(v, dtype=o.dtype)
             i, j = 0, 0
             for n in pps:
                 for k in range(d):
@@ -70,7 +70,7 @@ class DiagonalQGT:
                 i += n
             return result
 
-        result = jnp.zeros_like(v)
+        result = jnp.zeros_like(v, dtype=self.jac.O.dtype)
         i = 0
         for n in self.params_per_site:
             o_site = self.jac.O[:, i : i + n]
@@ -128,7 +128,7 @@ def _matvec(jac: Jacobian, space: SampleSpace, v):
 def _matvec(jac: SlicedJacobian, space: ParameterSpace, v):
     o, p, d = jac.o, jac.p, jac.phys_dim
     pps = jac.ordering.params_per_site if isinstance(jac.ordering, SiteOrdering) else (o.shape[1],)
-    result = jnp.zeros_like(v)
+    result = jnp.zeros_like(v, dtype=o.dtype)
     i, j = 0, 0
     for n in pps:
         for k in range(d):
@@ -143,7 +143,7 @@ def _matvec(jac: SlicedJacobian, space: ParameterSpace, v):
 def _matvec(jac: SlicedJacobian, space: SampleSpace, v):
     o, p, d = jac.o, jac.p, jac.phys_dim
     pps = jac.ordering.params_per_site if isinstance(jac.ordering, SiteOrdering) else (o.shape[1],)
-    result = jnp.zeros_like(v)
+    result = jnp.zeros_like(v, dtype=o.dtype)
     i = 0
     for n in pps:
         for k in range(d):

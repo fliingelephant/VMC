@@ -1,9 +1,7 @@
 """Custom variational drivers for VMC and TDVP.
 
-This module provides custom driver implementations that extend NetKet's
-variational drivers with support for custom preconditioners.
-
-Uses ABC pattern for Integrator and PropagationType (single dispatch on self).
+This module provides a single dynamics driver for real- and imaginary-time
+propagation with pluggable integrators and preconditioners.
 """
 from __future__ import annotations
 
@@ -16,44 +14,22 @@ from typing import TYPE_CHECKING, Any
 import jax
 import jax.numpy as jnp
 from netket import stats as nkstats
-from netket.driver.abstract_variational_driver import AbstractVariationalDriver
-from netket.jax import tree_cast
-from netket.operator import AbstractOperator
-from netket.optimizer import identity_preconditioner
-from netket.vqs import MCState
 from tqdm.auto import tqdm
 
-from VMC.gauge import GaugeConfig
-from VMC.preconditioners import (
-    DirectSolve,
-    LinearSolver,
-    MinSRFormulation,
-    QRSolve,
-    SRFormulation,
-    SRPreconditioner,
-    solve_cholesky,
-)
+from VMC.preconditioners import SRPreconditioner
+from VMC.utils.vmc_utils import local_estimate
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
 __all__ = [
-    # VMC Drivers
-    "CustomVMC",
-    "CustomVMC_SR",
-    "CustomVMC_QR",
-    # TDVP Driver
-    "CustomTDVP_SR",
-    # Integrator classes (ABC pattern)
+    "DynamicsDriver",
     "Integrator",
     "Euler",
     "RK4",
-    # Propagation type classes (ABC pattern)
-    "PropagationType",
-    "RealTime",
-    "ImaginaryTime",
-    # Re-exports
-    "GaugeConfig",
+    "TimeUnit",
+    "RealTimeUnit",
+    "ImaginaryTimeUnit",
     "SRPreconditioner",
 ]
 
@@ -69,15 +45,15 @@ class Integrator(abc.ABC):
     @abc.abstractmethod
     def step(
         self,
-        driver: "CustomTDVP_SR",
-        params: dict,
+        driver: "DynamicsDriver",
+        params: Any,
         t: float,
         dt: float,
-    ) -> dict:
+    ) -> Any:
         """Perform one integration step.
 
         Args:
-            driver: The TDVP driver instance.
+            driver: The dynamics driver instance.
             params: Current parameters.
             t: Current time.
             dt: Time step.
@@ -92,11 +68,11 @@ class Euler(Integrator):
 
     def step(
         self,
-        driver: "CustomTDVP_SR",
-        params: dict,
+        driver: "DynamicsDriver",
+        params: Any,
         t: float,
         dt: float,
-    ) -> dict:
+    ) -> Any:
         k1 = driver._time_derivative(params, t, stage=0)
         return driver._tree_add_scaled(params, k1, dt)
 
@@ -106,11 +82,11 @@ class RK4(Integrator):
 
     def step(
         self,
-        driver: "CustomTDVP_SR",
-        params: dict,
+        driver: "DynamicsDriver",
+        params: Any,
         t: float,
         dt: float,
-    ) -> dict:
+    ) -> Any:
         k1 = driver._time_derivative(params, t, stage=0)
         k2 = driver._time_derivative(
             driver._tree_add_scaled(params, k1, 0.5 * dt), t + 0.5 * dt, stage=1
@@ -125,10 +101,8 @@ class RK4(Integrator):
         return driver._tree_add_scaled(params, incr, dt)
 
 
-
-
-class PropagationType(abc.ABC):
-    """Abstract base class for propagation types (real/imaginary time)."""
+class TimeUnit(abc.ABC):
+    """Abstract base class for time units (real/imaginary)."""
 
     @property
     @abc.abstractmethod
@@ -137,10 +111,10 @@ class PropagationType(abc.ABC):
 
     @abc.abstractmethod
     def default_integrator(self) -> Integrator:
-        """Default integrator for this propagation type."""
+        """Default integrator for this time unit."""
 
 
-class RealTime(PropagationType):
+class RealTimeUnit(TimeUnit):
     """Real-time propagation: i d/dt |psi> = H |psi>."""
 
     @property
@@ -151,7 +125,7 @@ class RealTime(PropagationType):
         return RK4()
 
 
-class ImaginaryTime(PropagationType):
+class ImaginaryTimeUnit(TimeUnit):
     """Imaginary-time propagation: d/dt |psi> = -H |psi>."""
 
     @property
@@ -162,284 +136,97 @@ class ImaginaryTime(PropagationType):
         return Euler()
 
 
-
-
-class CustomVMC(AbstractVariationalDriver):
-    """Minimal VMC driver with customizable preconditioner.
-
-    This driver computes energy gradients and applies an optional
-    preconditioner (e.g., SR) before passing to the optimizer.
-
-    Attributes:
-        preconditioner: The gradient preconditioner to use.
-        diag_shift_error: Last computed diagonal shift error (from preconditioner).
-        residual_error: Last computed residual error (from preconditioner).
-        solve_time: Last solver wall time (from preconditioner).
-    """
+class DynamicsDriver:
+    """Unified dynamics driver for VMC and TDVP-style evolution."""
 
     def __init__(
         self,
-        hamiltonian: AbstractOperator,
-        optimizer: Any,
+        model,
+        operator,
         *,
-        variational_state: MCState,
-        preconditioner: Any = identity_preconditioner,
-    ):
-        """Initialize CustomVMC driver.
-
-        Args:
-            hamiltonian: The Hamiltonian operator.
-            optimizer: Optimizer (e.g., SGD, Adam).
-            variational_state: The variational Monte Carlo state.
-            preconditioner: Gradient preconditioner (default: identity).
-        """
-        super().__init__(variational_state, optimizer, minimized_quantity_name="Energy")
-
-        self._ham = (
-            hamiltonian.collect() if hasattr(hamiltonian, "collect") else hamiltonian
-        )
-        self.preconditioner = preconditioner or identity_preconditioner
-        self.diag_shift_error: float | None = None
-        self.residual_error: float | None = None
-        self.solve_time: float | None = None
-
-    def _sync_preconditioner_metrics(self) -> None:
-        """Copy metrics from preconditioner to driver for logging."""
-        for name in ("diag_shift_error", "residual_error", "solve_time"):
-            if hasattr(self.preconditioner, name):
-                setattr(self, name, getattr(self.preconditioner, name))
-
-    def _forward_and_backward(self) -> dict:
-        """Compute gradients and apply preconditioner.
-
-        Returns:
-            Parameter updates as a pytree.
-        """
-        self.state.reset()
-
-        if getattr(self.preconditioner, "uses_local_energies", False):
-            local_energies = self.state.local_estimators(self._ham)
-            self._loss_stats = nkstats.statistics(local_energies)
-            updates = self.preconditioner.apply(
-                self.state,
-                local_energies,
-                step=self.step_count,
-            )
-            self._sync_preconditioner_metrics()
-        else:
-            self._loss_stats, grad = self.state.expect_and_grad(self._ham)
-            updates = self.preconditioner(self.state, grad, self.step_count)
-
-        return tree_cast(updates, self.state.parameters)
-
-    @property
-    def energy(self) -> Any:
-        """Return the energy statistics from the last step."""
-        return self._loss_stats
-
-
-class CustomVMC_QR(CustomVMC):
-    """VMC driver using pivoted QR decomposition for SR.
-
-    This driver uses pivoted QR factorization to solve the SR equations,
-    which provides better numerical stability for rank-deficient Jacobians.
-    """
-
-    def __init__(
-        self,
-        hamiltonian: AbstractOperator,
-        optimizer: Any,
-        *,
-        variational_state: MCState,
-        rcond: float | None = None,
-        min_norm: bool = True,
-        gauge_config: GaugeConfig | None = None,
-    ):
-        """Initialize CustomVMC_QR driver.
-
-        Args:
-            hamiltonian: The Hamiltonian operator.
-            optimizer: Optimizer.
-            variational_state: The variational state.
-            rcond: Relative condition number for rank truncation.
-            min_norm: If True, compute minimum-norm solution.
-            gauge_config: Optional gauge configuration.
-        """
-        preconditioner = SRPreconditioner(
-            formulation=SRFormulation(),
-            strategy=QRSolve(rcond=rcond, min_norm=min_norm),
-            gauge_config=gauge_config,
-        )
-        super().__init__(
-            hamiltonian,
-            optimizer,
-            variational_state=variational_state,
-            preconditioner=preconditioner,
-        )
-
-    def __repr__(self) -> str:
-        return f"CustomVMC_QR(step_count={self.step_count}, state={self.state})"
-
-
-class CustomVMC_SR(CustomVMC):
-    """VMC driver using Stochastic Reconfiguration (SR/minSR).
-
-    This driver implements the SR algorithm with optional minSR (NTK) formulation
-    and various linear solvers.
-    """
-
-    def __init__(
-        self,
-        hamiltonian: AbstractOperator,
-        optimizer: Any,
-        *,
-        diag_shift: float = 1e-2,
-        variational_state: MCState,
-        use_ntk: bool = True,
-        gauge_config: GaugeConfig | None = None,
-        solver: LinearSolver = solve_cholesky,
-    ):
-        """Initialize CustomVMC_SR driver.
-
-        Args:
-            hamiltonian: The Hamiltonian operator.
-            optimizer: Optimizer.
-            diag_shift: Regularization parameter for the QGT.
-            variational_state: The variational state.
-            use_ntk: If True, use minSR/NTK formulation (sample-space).
-            gauge_config: Optional gauge configuration.
-            solver: Linear solver function.
-        """
-        formulation = MinSRFormulation() if use_ntk else SRFormulation()
-        preconditioner = SRPreconditioner(
-            formulation=formulation,
-            strategy=DirectSolve(solver),
-            diag_shift=diag_shift,
-            gauge_config=gauge_config,
-        )
-        super().__init__(
-            hamiltonian,
-            optimizer,
-            variational_state=variational_state,
-            preconditioner=preconditioner,
-        )
-
-    def __repr__(self) -> str:
-        return f"CustomVMC_SR(step_count={self.step_count}, state={self.state})"
-
-
-
-
-class CustomTDVP_SR:
-    """TDVP driver with SR preconditioner for time evolution.
-
-    This driver integrates real- or imaginary-time dynamics using
-    explicit time-stepping with configurable integrators.
-    """
-
-    def __init__(
-        self,
-        hamiltonian: AbstractOperator,
-        variational_state: MCState,
-        *,
+        sampler: Callable,
+        preconditioner: SRPreconditioner,
         dt: float,
         t0: float = 0.0,
-        propagation: PropagationType | None = None,
+        time_unit: TimeUnit | None = None,
         integrator: Integrator | None = None,
-        diag_shift: float = 1e-2,
-        use_ntk: bool = True,
-        gauge_config: GaugeConfig | None = None,
-        solver: LinearSolver = solve_cholesky,
-        preconditioner: SRPreconditioner | None = None,
+        sampler_key: jax.Array | None = None,
     ):
-        """Initialize CustomTDVP_SR driver.
-
-        Args:
-            hamiltonian: The Hamiltonian operator.
-            variational_state: The variational state.
-            dt: Fixed time step for integration.
-            t0: Initial time.
-            propagation: Propagation type instance (default: RealTime).
-            integrator: Time integrator instance (default: from propagation type).
-            diag_shift: Regularization parameter for the QGT.
-            use_ntk: If True, use minSR/NTK formulation.
-            gauge_config: Optional gauge configuration.
-            solver: Linear solver function.
-            preconditioner: Optional pre-built preconditioner.
-        """
-        if dt <= 0:
-            raise ValueError("dt must be a positive float.")
-
-        # Set propagation type
-        if propagation is None:
-            propagation = RealTime()
-        self.propagation = propagation
-        self._loss_grad_factor = propagation.grad_factor
-
-        # Set integrator (use propagation default if not provided)
-        if integrator is None:
-            integrator = propagation.default_integrator()
-        self.integrator = integrator
-
+        self.model = model
+        self.operator = operator
+        self.sampler = sampler
+        self.preconditioner = preconditioner
         self.dt = float(dt)
-        self.state = variational_state
-        self._ham = (
-            hamiltonian.collect() if hasattr(hamiltonian, "collect") else hamiltonian
-        )
         self.t = float(t0)
         self.step_count = 0
         self._loss_stats = None
+        self.last_samples = None
+        self.last_o = None
+        self.last_p = None
+        self.last_sampler_info = None
 
-        if preconditioner is None:
-            formulation = MinSRFormulation() if use_ntk else SRFormulation()
-            preconditioner = SRPreconditioner(
-                formulation=formulation,
-                strategy=DirectSolve(solver),
-                diag_shift=diag_shift,
-                gauge_config=gauge_config,
-            )
-        self.preconditioner = preconditioner
+        if time_unit is None:
+            time_unit = RealTimeUnit()
+        self.time_unit = time_unit
+
+        if integrator is None:
+            integrator = time_unit.default_integrator()
+        self.integrator = integrator
+
+        if sampler_key is None:
+            sampler_key = jax.random.key(0)
+        self._sampler_key = sampler_key
+
         self.diag_shift_error: float | None = None
         self.residual_error: float | None = None
         self.solve_time: float | None = None
 
-    def generator(self, t: float):
-        """Get the Hamiltonian at time t (for time-dependent Hamiltonians)."""
-        if callable(self._ham) and not isinstance(self._ham, AbstractOperator):
-            return self._ham(t)
-        return self._ham
-
     def _sync_preconditioner_metrics(self) -> None:
-        """Copy metrics from preconditioner to driver for logging."""
         for name in ("diag_shift_error", "residual_error", "solve_time"):
             if hasattr(self.preconditioner, name):
                 setattr(self, name, getattr(self.preconditioner, name))
 
-    def _time_derivative(self, params: dict, t: float, *, stage: int) -> dict:
-        """Compute the time derivative of parameters."""
-        self.state.parameters = params
-        self.state.reset()
+    def _operator_at(self, t: float):
+        if callable(self.operator) and not hasattr(self.operator, "get_conn_padded"):
+            return self.operator(t)
+        return self.operator
 
-        op_t = self.generator(t)
-        local_energies = self.state.local_estimators(op_t)
+    def _time_derivative(self, params: Any, t: float, *, stage: int) -> Any:
+        self._set_model_params(params)
+        result = self.sampler(self.model, key=self._sampler_key)
+        if len(result) == 4:
+            samples, o, p, self._sampler_key = result
+            info = None
+        elif len(result) == 5:
+            samples, o, p, self._sampler_key, info = result
+        else:
+            raise ValueError("sampler must return 4 or 5 values")
+        self.last_samples = samples
+        self.last_o = o
+        self.last_p = p
+        self.last_sampler_info = info
+        op_t = self._operator_at(t)
+        local_energies = local_estimate(self.model, samples, op_t)
         if stage == 0:
             self._loss_stats = nkstats.statistics(local_energies)
 
         updates = self.preconditioner.apply(
-            self.state,
+            self.model,
+            samples,
+            o,
+            p,
             local_energies,
             step=self.step_count,
-            grad_factor=self._loss_grad_factor,
+            grad_factor=self.time_unit.grad_factor,
             stage=stage,
         )
         if stage == 0:
             self._sync_preconditioner_metrics()
-        return tree_cast(updates, self.state.parameters)
+        return updates
 
     @staticmethod
     @jax.jit
-    def _tree_add_scaled(base: dict, delta: dict, scale: float) -> dict:
-        """Compute base + scale * delta for pytrees."""
+    def _tree_add_scaled(base: Any, delta: Any, scale: float) -> Any:
         return jax.tree_util.tree_map(
             lambda x, y: jax.lax.add(
                 x, jax.lax.mul(jnp.asarray(scale, dtype=y.dtype), y)
@@ -450,37 +237,36 @@ class CustomTDVP_SR:
 
     @staticmethod
     @jax.jit
-    def _tree_weighted_sum(k1: dict, k2: dict, k3: dict, k4: dict) -> dict:
-        """Compute RK4 weighted sum: (k1 + 2*k2 + 2*k3 + k4) / 6."""
-
+    def _tree_weighted_sum(k1: Any, k2: Any, k3: Any, k4: Any) -> Any:
         def combine(a, b, c, d):
             weighted = a + 2.0 * b + 2.0 * c + d
             return jax.lax.mul(weighted, jnp.asarray(1.0 / 6.0, dtype=weighted.dtype))
 
         return jax.tree_util.tree_map(combine, k1, k2, k3, k4)
 
+    def _get_model_params(self) -> Any:
+        return jax.tree_util.tree_map(jnp.asarray, self.model.tensors)
+
+    def _set_model_params(self, params: Any) -> None:
+        flat_params, _ = jax.tree_util.tree_flatten(params)
+        flat_tensors = jax.tree_util.tree_leaves(self.model.tensors)
+        for tensor, value in zip(flat_tensors, flat_params):
+            tensor.value = value
+
     def step(self, dt: float | None = None) -> None:
-        """Perform one integration step."""
         dt_step = self.dt if dt is None else float(dt)
-        params = self.state.parameters
-
+        params = self._get_model_params()
         params_new = self.integrator.step(self, params, self.t, dt_step)
-
-        params_new = tree_cast(params_new, self.state.parameters)
-        self.state.parameters = params_new
-        self.state.reset()
+        self._set_model_params(params_new)
         self.t += dt_step
         self.step_count += 1
 
-    def run(self, T: float, *, show_progress: bool = True, out=None) -> None:
-        """Run the time evolution for a total time T."""
+    def run(self, T: float, *, show_progress: bool = True) -> None:
         if T <= 0:
             return
-        _ = out
         t_end = self.t + float(T)
         total = float(T)
         pbar = tqdm(total=total, disable=not show_progress, unit="t")
-
         n_steps = int(float(jnp.ceil(total / self.dt)))
         for _ in range(n_steps):
             remaining = t_end - self.t
@@ -492,3 +278,7 @@ class CustomTDVP_SR:
                 pbar.update(dt_step)
         if show_progress:
             pbar.close()
+
+    @property
+    def energy(self) -> Any:
+        return self._loss_stats

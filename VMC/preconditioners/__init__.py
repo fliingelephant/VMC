@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from VMC.preconditioners.preconditioners import (
+    DiagonalSolve,
     DirectSolve,
     LinearSolver,
     QRSolve,
@@ -10,6 +11,7 @@ from VMC.preconditioners.preconditioners import (
 from VMC.qgt.solvers import solve_cg, solve_cholesky, solve_svd
 
 __all__ = [
+    "DiagonalSolve",
     "DirectSolve",
     "LinearSolver",
     "QRSolve",

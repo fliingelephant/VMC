@@ -12,8 +12,12 @@
 - `VMC/models/peps.py`: Custom-VJP amplitude pipeline and environment-gradient helpers.
 
 ### Drivers
-- `VMC/drivers/custom_driver.py`: `Integrator` ABC (`Euler`, `RK4`), `PropagationType` ABC (`RealTime`, `ImaginaryTime`).
-- `VMC/drivers/custom_driver.py`: `CustomVMC`, `CustomVMC_SR`, `CustomVMC_QR`, `CustomTDVP_SR`.
+- `VMC/drivers/custom_driver.py`: `Integrator` ABC (`Euler`, `RK4`), `TimeUnit` ABC (`RealTimeUnit`, `ImaginaryTimeUnit`).
+- `VMC/drivers/custom_driver.py`: `DynamicsDriver` (single model-based driver).
+
+### Samplers
+- `VMC/samplers/sequential.py`: Sequential Metropolis sampler for MPS/PEPS; one recorded sample per sweep; environment reuse during sweeps; gradient recording reuses cached environments.
+- `VMC/samplers/sequential.py`: `peps_sequential_sweep` for a single PEPS sweep.
 
 ### QGT Module
 - `VMC/qgt/jacobian.py`: `Jacobian`, `SlicedJacobian`, `PhysicalOrdering`, `SiteOrdering`.
@@ -22,13 +26,14 @@
 - `VMC/qgt/netket_compat.py`: `QGTOperator`, `DenseSR` (NetKet LinearOperator adapter).
 
 ### Preconditioners
-- `VMC/preconditioners/preconditioners.py`: `DirectSolve`, `QRSolve`, `DiagonalSolve`, `SRPreconditioner`.
+- `VMC/preconditioners/preconditioners.py`: `DirectSolve`, `QRSolve`, `DiagonalSolve`, `SRPreconditioner` (model/samples-based apply).
 
 ### Gauge
 - `VMC/gauge/gauge.py`: `GaugeConfig`, `compute_gauge_projection` for MPS.
 
 ### Utilities
-- `VMC/utils/vmc_utils.py`: `flatten_samples`, `get_apply_fun`, `build_dense_jac`.
+- `VMC/utils/vmc_utils.py`: `flatten_samples`, `get_apply_fun`, `build_dense_jac`, `local_estimate`.
+- `VMC/utils/independent_set_sampling.py`: `IndependentSetSampler`, `DiscardBlockedSampler` for independent-set MCMC (`n_steps` controls MH steps).
 
 ## QGT Class Diagram
 
@@ -113,7 +118,8 @@ classDiagram
         strategy: DirectSolve | QRSolve | DiagonalSolve
         diag_shift: float
         gauge_config: GaugeConfig | None
-        apply(state, local_energies) dict
+        ordering: PhysicalOrdering | SiteOrdering
+        apply(model, samples, o, p, local_energies) dict
     }
 
     SRPreconditioner --> DirectSolve
@@ -121,6 +127,46 @@ classDiagram
     SRPreconditioner --> DiagonalSolve
     SRPreconditioner --> ParameterSpace
     SRPreconditioner --> SampleSpace
+```
+
+## Driver Class Diagram
+
+```mermaid
+classDiagram
+    class TimeUnit {
+        <<abstract>>
+        grad_factor: complex
+        default_integrator()
+    }
+    class RealTimeUnit
+    class ImaginaryTimeUnit
+
+    class Integrator {
+        <<abstract>>
+        step(driver, params, t, dt)
+    }
+    class Euler
+    class RK4
+
+    class DynamicsDriver {
+        model
+        operator
+        sampler
+        preconditioner
+        time_unit
+        integrator
+        dt: float
+        t: float
+        step()
+        run(T)
+    }
+
+    TimeUnit <|-- RealTimeUnit
+    TimeUnit <|-- ImaginaryTimeUnit
+    Integrator <|-- Euler
+    Integrator <|-- RK4
+    DynamicsDriver --> TimeUnit
+    DynamicsDriver --> Integrator
 ```
 
 ## Flowchart
@@ -146,12 +192,14 @@ flowchart TD
     end
 
     subgraph Drivers
-        CustomVMC["CustomVMC"]
-        CustomSR["CustomVMC_SR"]
-        TDVP["CustomTDVP_SR"]
+        Dynamics["DynamicsDriver"]
+    end
+    subgraph Samplers
+        Seq["Sequential Samplers"]
     end
 
     Models --> Drivers
+    Samplers --> Drivers
     Jac --> QGTCore
     Space --> QGTCore
     QGTCore --> Solvers

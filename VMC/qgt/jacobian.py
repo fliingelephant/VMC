@@ -4,10 +4,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import jax
+import jax.numpy as jnp
+from plum import dispatch
 
 from VMC import config  # noqa: F401
 
-__all__ = ["PhysicalOrdering", "SiteOrdering", "Jacobian", "SlicedJacobian"]
+__all__ = [
+    "PhysicalOrdering",
+    "SiteOrdering",
+    "Jacobian",
+    "SlicedJacobian",
+    "jacobian_mean",
+]
 
 
 @dataclass(frozen=True)
@@ -53,3 +61,44 @@ class SlicedJacobian:
         if ordering is None:
             ordering = PhysicalOrdering()
         return cls(o, p, model.phys_dim, ordering)
+
+
+@dispatch
+def jacobian_mean(jac: Jacobian) -> jax.Array:
+    return jnp.mean(jac.O, axis=0)
+
+
+@dispatch
+def jacobian_mean(jac: SlicedJacobian) -> jax.Array:
+    return _sliced_mean(jac.ordering, jac.o, jac.p, jac.phys_dim)
+
+
+@dispatch
+def _sliced_mean(
+    ordering: SiteOrdering,
+    o: jax.Array,
+    p: jax.Array,
+    phys_dim: int,
+) -> jax.Array:
+    blocks = []
+    i = 0
+    for n in ordering.params_per_site:
+        for k in range(phys_dim):
+            ok = jnp.where(p[:, i : i + n] == k, o[:, i : i + n], 0)
+            blocks.append(jnp.mean(ok, axis=0))
+        i += n
+    return jnp.concatenate(blocks, axis=0)
+
+
+@dispatch
+def _sliced_mean(
+    ordering: PhysicalOrdering,
+    o: jax.Array,
+    p: jax.Array,
+    phys_dim: int,
+) -> jax.Array:
+    blocks = []
+    for k in range(phys_dim):
+        ok = jnp.where(p == k, o, 0)
+        blocks.append(jnp.mean(ok, axis=0))
+    return jnp.concatenate(blocks, axis=0)

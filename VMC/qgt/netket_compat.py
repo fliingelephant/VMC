@@ -63,7 +63,10 @@ class DenseSR(AbstractLinearPreconditioner):
     ) -> QGTOperator:
         samples = flatten_samples(vstate.samples)
         apply_fun, params, model_state, _ = get_apply_fun(vstate)
-        O = build_dense_jac(apply_fun, params, model_state, samples, holomorphic=self.holomorphic)
+        O = build_dense_jac(
+            apply_fun, params, model_state, samples, holomorphic=self.holomorphic
+        )
+        O = O * jnp.sqrt(samples.shape[0])
         params_struct = jax.tree_util.tree_map(
             lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype), params
         )

@@ -10,12 +10,15 @@ from typing import TYPE_CHECKING, Callable
 import jax
 import jax.numpy as jnp
 import jax.scipy as jsp
+from jax.flatten_util import ravel_pytree
 from netket.jax import tree_cast
 from plum import dispatch
 
-from VMC.qgt import DiagonalQGT, QGT, Jacobian, ParameterSpace, SampleSpace
+from VMC.qgt import DiagonalQGT, QGT, Jacobian, ParameterSpace, SampleSpace, SlicedJacobian
+from VMC.qgt.jacobian import PhysicalOrdering, SiteOrdering, jacobian_mean
+from VMC.qgt.qgt import _params_per_site
 from VMC.qgt.solvers import solve_cg, solve_cholesky, solve_svd
-from VMC.utils.vmc_utils import build_dense_jac, flatten_samples
+from VMC.utils.smallo import params_per_site
 
 if TYPE_CHECKING:
     from VMC.gauge import GaugeConfig
@@ -65,19 +68,69 @@ class DiagonalSolve:
 
 
 @dispatch
-def _solve_sr(
-    strategy: DirectSolve,
+def _reorder_updates(
+    ordering: PhysicalOrdering,
+    updates_flat: jax.Array,
+    pps: tuple[int, ...],
+    phys_dim: int,
+) -> jax.Array:
+    total = sum(pps)
+    perm = []
+    site_offset = 0
+    for n in pps:
+        for k in range(phys_dim):
+            base = k * total + site_offset
+            perm.extend(range(base, base + n))
+        site_offset += n
+    return updates_flat[jnp.asarray(perm)]
+
+
+@dispatch
+def _reorder_updates(
+    ordering: SiteOrdering,
+    updates_flat: jax.Array,
+    pps: tuple[int, ...],
+    phys_dim: int,
+) -> jax.Array:
+    _ = (ordering, pps, phys_dim)
+    return updates_flat
+
+
+@dispatch
+def _adjoint_matvec(jac: Jacobian, v: jax.Array) -> jax.Array:
+    mean = jacobian_mean(jac)
+    return jac.O.conj().T @ v - mean.conj() * jnp.sum(v)
+
+
+@dispatch
+def _adjoint_matvec(jac: SlicedJacobian, v: jax.Array) -> jax.Array:
+    o, p, d = jac.o, jac.p, jac.phys_dim
+    pps = _params_per_site(jac.ordering, o)
+    parts = []
+    i = 0
+    for n in pps:
+        for k in range(d):
+            ok = jnp.where(p[:, i : i + n] == k, o[:, i : i + n], 0)
+            parts.append(ok.conj().T @ v)
+        i += n
+    result = jnp.concatenate(parts, axis=0)
+    mean = jacobian_mean(jac)
+    return result - mean.conj() * jnp.sum(v)
+
+
+@dispatch
+def _direct_solve(
     space: ParameterSpace,
-    O: jax.Array,
+    jac: Jacobian | SlicedJacobian,
     dv: jax.Array,
     diag_shift: float,
+    solver: LinearSolver,
 ) -> tuple[jax.Array, dict]:
-    """Direct solve in parameter space: (O†O + λI) x = O†dv."""
-    qgt = QGT(Jacobian(O), space=ParameterSpace())
+    qgt = QGT(jac, space=ParameterSpace())
     S = qgt.to_dense()
-    rhs = O.conj().T @ dv
+    rhs = _adjoint_matvec(jac, dv)
     mat = S + diag_shift * jnp.eye(S.shape[0], dtype=S.dtype)
-    x = strategy.solver(mat, rhs)
+    x = solver(mat, rhs)
     metrics = {
         "residual_error": jnp.linalg.norm(S @ x - rhs) ** 2 / jnp.linalg.norm(rhs) ** 2,
     }
@@ -85,19 +138,18 @@ def _solve_sr(
 
 
 @dispatch
-def _solve_sr(
-    strategy: DirectSolve,
+def _direct_solve(
     space: SampleSpace,
-    O: jax.Array,
+    jac: Jacobian | SlicedJacobian,
     dv: jax.Array,
     diag_shift: float,
+    solver: LinearSolver,
 ) -> tuple[jax.Array, dict]:
-    """Direct solve in sample space: (OO† + λI) y = dv, then x = O†y."""
-    qgt = QGT(Jacobian(O), space=SampleSpace())
+    qgt = QGT(jac, space=SampleSpace())
     S = qgt.to_dense()
     mat = S + diag_shift * jnp.eye(S.shape[0], dtype=S.dtype)
-    y = strategy.solver(mat, dv)
-    x = O.conj().T @ y  # Recovery step
+    y = solver(mat, dv)
+    x = _adjoint_matvec(jac, y)
     metrics = {
         "residual_error": jnp.linalg.norm(S @ y - dv) ** 2 / jnp.linalg.norm(dv) ** 2,
     }
@@ -106,14 +158,41 @@ def _solve_sr(
 
 @dispatch
 def _solve_sr(
+    strategy: DirectSolve,
+    space: ParameterSpace,
+    jac: Jacobian | SlicedJacobian,
+    dv: jax.Array,
+    diag_shift: float,
+) -> tuple[jax.Array, dict]:
+    return _direct_solve(space, jac, dv, diag_shift, strategy.solver)
+
+
+@dispatch
+def _solve_sr(
+    strategy: DirectSolve,
+    space: SampleSpace,
+    jac: Jacobian | SlicedJacobian,
+    dv: jax.Array,
+    diag_shift: float,
+) -> tuple[jax.Array, dict]:
+    return _direct_solve(space, jac, dv, diag_shift, strategy.solver)
+
+
+@dispatch
+def _solve_sr(
     strategy: QRSolve,
     space: ParameterSpace,
-    O: jax.Array,
+    jac: Jacobian,
     dv: jax.Array,
     diag_shift: float,
 ) -> tuple[jax.Array, dict]:
     """QR solve in parameter space."""
-    q, r, piv = jax.lax.linalg.qr(O, full_matrices=False, pivoting=True, use_magma=True)
+    _ = diag_shift
+    mean = jacobian_mean(jac)
+    o_centered = jac.O - mean[None, :]
+    q, r, piv = jax.lax.linalg.qr(
+        o_centered, full_matrices=False, pivoting=True, use_magma=True
+    )
     y = q.conj().T @ dv
 
     if strategy.rcond is None:
@@ -125,7 +204,7 @@ def _solve_sr(
     n2 = n_red - r_rank
 
     if r_rank == 0:
-        x = jnp.zeros((n_red,), dtype=O.dtype)
+        x = jnp.zeros((n_red,), dtype=jac.O.dtype)
     else:
         r11, r12, y1 = r[:r_rank, :r_rank], r[:r_rank, r_rank:], y[:r_rank]
 
@@ -137,12 +216,12 @@ def _solve_sr(
             x1 = r11_inv_y1 - r11_inv_r12 @ x2
         else:
             x1 = jsp.linalg.solve_triangular(r11, y1, lower=False)
-            x2 = jnp.zeros((n2,), dtype=O.dtype)
+            x2 = jnp.zeros((n2,), dtype=jac.O.dtype)
 
-        x = jnp.zeros((n_red,), dtype=O.dtype).at[piv].set(jnp.concatenate([x1, x2]))
+        x = jnp.zeros((n_red,), dtype=jac.O.dtype).at[piv].set(jnp.concatenate([x1, x2]))
 
-    rhs = O.conj().T @ dv
-    resid = O.conj().T @ (O @ x) - rhs
+    rhs = o_centered.conj().T @ dv
+    resid = o_centered.conj().T @ (o_centered @ x) - rhs
     metrics = {
         "residual_error": jnp.linalg.norm(resid) ** 2 / jnp.linalg.norm(rhs) ** 2,
         "rank": r_rank,
@@ -153,11 +232,24 @@ def _solve_sr(
 @dispatch
 def _solve_sr(
     strategy: QRSolve,
-    space: SampleSpace,
-    O: jax.Array,
+    space: ParameterSpace,
+    jac: SlicedJacobian,
     dv: jax.Array,
     diag_shift: float,
 ) -> tuple[jax.Array, dict]:
+    _ = (strategy, space, dv, diag_shift)
+    raise NotImplementedError("QRSolve not supported for SlicedJacobian")
+
+
+@dispatch
+def _solve_sr(
+    strategy: QRSolve,
+    space: SampleSpace,
+    jac: Jacobian | SlicedJacobian,
+    dv: jax.Array,
+    diag_shift: float,
+) -> tuple[jax.Array, dict]:
+    _ = (strategy, space, jac, dv, diag_shift)
     raise NotImplementedError("QRSolve not supported for SampleSpace")
 
 
@@ -165,13 +257,15 @@ def _solve_sr(
 def _solve_sr(
     strategy: DiagonalSolve,
     space: ParameterSpace,
-    O: jax.Array,
+    jac: Jacobian | SlicedJacobian,
     dv: jax.Array,
     diag_shift: float,
 ) -> tuple[jax.Array, dict]:
-    qgt = DiagonalQGT(Jacobian(O), space=ParameterSpace(), params_per_site=strategy.params_per_site)
+    if strategy.params_per_site is None:
+        raise ValueError("DiagonalSolve requires params_per_site")
+    qgt = DiagonalQGT(jac, space=ParameterSpace(), params_per_site=strategy.params_per_site)
     S = qgt.to_dense()
-    rhs = O.conj().T @ dv
+    rhs = _adjoint_matvec(jac, dv)
     mat = S + diag_shift * jnp.eye(S.shape[0], dtype=S.dtype)
     x = jnp.zeros_like(rhs)
     i = 0
@@ -189,11 +283,42 @@ def _solve_sr(
 def _solve_sr(
     strategy: DiagonalSolve,
     space: SampleSpace,
-    O: jax.Array,
+    jac: Jacobian | SlicedJacobian,
     dv: jax.Array,
     diag_shift: float,
 ) -> tuple[jax.Array, dict]:
+    _ = (strategy, space, jac, dv, diag_shift)
     raise NotImplementedError("DiagonalSolve not supported for SampleSpace")
+
+
+@dispatch
+def _resolve_strategy(
+    strategy: DirectSolve,
+    model: object,
+) -> DirectSolve:
+    _ = model
+    return strategy
+
+
+@dispatch
+def _resolve_strategy(
+    strategy: QRSolve,
+    model: object,
+) -> QRSolve:
+    _ = model
+    return strategy
+
+
+@dispatch
+def _resolve_strategy(
+    strategy: DiagonalSolve,
+    model: object,
+) -> DiagonalSolve:
+    if strategy.params_per_site is None:
+        return DiagonalSolve(
+            solver=strategy.solver, params_per_site=tuple(params_per_site(model))
+        )
+    return strategy
 
 
 # --------------------------------------------------------------------------- #
@@ -210,11 +335,13 @@ class SRPreconditioner:
         strategy: DirectSolve | QRSolve | DiagonalSolve | None = None,
         diag_shift: float = 1e-2,
         gauge_config: "GaugeConfig | None" = None,
+        ordering: PhysicalOrdering | SiteOrdering | None = None,
     ):
         self.space = space if space is not None else ParameterSpace()
         self.strategy = strategy if strategy is not None else DirectSolve()
         self.diag_shift = diag_shift
         self.gauge_config = gauge_config
+        self.ordering = ordering if ordering is not None else PhysicalOrdering()
         self.uses_local_energies = True
         self._metrics: dict | None = None
 
@@ -226,41 +353,71 @@ class SRPreconditioner:
 
     def apply(
         self,
-        state,
+        model,
+        samples: jax.Array,
+        o: jax.Array,
+        p: jax.Array | None,
         local_energies: jax.Array,
         *,
         step: int | None = None,
         grad_factor: complex = 1.0,
         stage: int = 0,
     ) -> dict:
+        _ = (step, stage)
         from VMC.gauge import compute_gauge_projection
 
-        samples = flatten_samples(state.samples)
-        O = build_dense_jac(state._apply_fun, state.parameters, state.model_state, samples)
-
-        dv = (local_energies.reshape(-1) - jnp.mean(local_energies)) / jnp.sqrt(samples.shape[0])
+        dv = (local_energies.reshape(-1) - jnp.mean(local_energies)) / samples.shape[0]
         dv = grad_factor * dv
 
-        # Gauge projection
+        params = jax.tree_util.tree_map(jnp.asarray, model.tensors)
+        pps = tuple(params_per_site(model)) if p is not None else None
         Q = None
-        O_eff = O
         if self.gauge_config is not None:
-            Q, _ = compute_gauge_projection(self.gauge_config, state.model, state.parameters, return_info=True)
-            O_eff = O @ Q
+            params_dict = {"tensors": params}
+            Q, _ = compute_gauge_projection(
+                self.gauge_config, model, params_dict, return_info=True
+            )
+            if p is None:
+                o_eff = o @ Q
+            else:
+                blocks = []
+                i = 0
+                for n in pps:
+                    for k in range(model.phys_dim):
+                        ok = jnp.where(p[:, i : i + n] == k, o[:, i : i + n], 0)
+                        blocks.append(ok)
+                    i += n
+                o_eff = jnp.concatenate(blocks, axis=1) @ Q
+            jac = Jacobian(o_eff)
+        elif p is None:
+            jac = Jacobian(o)
+        else:
+            jac = SlicedJacobian(
+                o,
+                p,
+                model.phys_dim,
+                self.ordering,
+            )
 
-        # Solve
-        updates_red, self._metrics = _solve_sr(self.strategy, self.space, O_eff, dv, self.diag_shift)
+        strategy = _resolve_strategy(self.strategy, model)
 
-        # Transform back
+        updates_red, self._metrics = _solve_sr(
+            strategy, self.space, jac, dv, self.diag_shift
+        )
+
         updates_flat = Q @ updates_red if Q is not None else updates_red
-
-        # Unravel
-        _, unravel = jax.flatten_util.ravel_pytree(state.parameters)
+        if Q is None and p is not None:
+            updates_flat = _reorder_updates(
+                self.ordering, updates_flat, pps, model.phys_dim
+            )
+        _, unravel = ravel_pytree(params)
         updates = unravel(updates_flat)
         if jnp.isrealobj(grad_factor):
             updates = jax.tree_util.tree_map(
-                lambda x, t: (2.0 * x.real).astype(t.dtype) if not jnp.iscomplexobj(t) else x,
+                lambda x, t: (2.0 * x.real).astype(t.dtype)
+                if not jnp.iscomplexobj(t)
+                else x,
                 updates,
-                state.parameters,
+                params,
             )
-        return tree_cast(updates, state.parameters)
+        return tree_cast(updates, params)

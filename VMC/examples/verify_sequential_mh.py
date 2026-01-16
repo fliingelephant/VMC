@@ -41,7 +41,6 @@ logger = logging.getLogger(__name__)
 BOND_DIM = 3
 CHI = BOND_DIM ** 2  # 9
 N_SAMPLES = 4096
-N_SWEEPS = 10
 BURN_IN = 200
 PROGRESS_INTERVAL = 1000
 SEED = 42
@@ -125,7 +124,6 @@ def _sequential_mps_sweep_with_accept(
 def _sequential_mps_with_progress(
     model: MPS,
     n_samples: int,
-    n_sweeps: int,
     burn_in: int,
     key: jax.Array,
 ) -> tuple[jax.Array, float]:
@@ -149,20 +147,16 @@ def _sequential_mps_with_progress(
             tensors_padded, indices, key=key, n_sites=n_sites
         )
 
-    # Sampling with progress
-    collected = 0
-    while collected < n_samples:
-        # Run sweeps
-        for _ in range(n_sweeps):
-            indices, key, n_accept = _sequential_mps_sweep_with_accept(
-                tensors_padded, indices, key=key, n_sites=n_sites
-            )
-            total_accept += int(n_accept)
-            total_proposals += n_sites
+    # Sampling with progress (one sweep per recorded sample)
+    for sample_idx in range(n_samples):
+        indices, key, n_accept = _sequential_mps_sweep_with_accept(
+            tensors_padded, indices, key=key, n_sites=n_sites
+        )
+        total_accept += int(n_accept)
+        total_proposals += n_sites
         spins = 2 * indices - 1
         all_samples.append(spins)
-        collected += 1
-        _log_progress(collected, n_samples)
+        _log_progress(sample_idx + 1, n_samples)
 
     acceptance_ratio = total_accept / total_proposals if total_proposals > 0 else 0.0
     return jnp.stack(all_samples, axis=0).astype(jnp.int32), acceptance_ratio
@@ -267,7 +261,6 @@ def _peps_sequential_sweep_with_accept(
 def _sequential_peps_with_progress(
     model: PEPS,
     n_samples: int,
-    n_sweeps: int,
     burn_in: int,
     key: jax.Array,
 ) -> tuple[jax.Array, float]:
@@ -288,19 +281,16 @@ def _sequential_peps_with_progress(
             tensors, spins, shape, model.strategy, key
         )
 
-    # Sampling with progress
+    # Sampling with progress (one sweep per recorded sample)
     all_samples = []
-    collected = 0
-    while collected < n_samples:
-        for _ in range(n_sweeps):
-            spins, key, n_accept = _peps_sequential_sweep_with_accept(
-                tensors, spins, shape, model.strategy, key
-            )
-            total_accept += int(n_accept)
-            total_proposals += n_sites
+    for sample_idx in range(n_samples):
+        spins, key, n_accept = _peps_sequential_sweep_with_accept(
+            tensors, spins, shape, model.strategy, key
+        )
+        total_accept += int(n_accept)
+        total_proposals += n_sites
         all_samples.append(spins.reshape(n_sites))
-        collected += 1
-        _log_progress(collected, n_samples)
+        _log_progress(sample_idx + 1, n_samples)
 
     samples = jnp.stack(all_samples, axis=0)
     samples = 2 * samples - 1
@@ -380,11 +370,10 @@ def _netket_mh_energy(
     hamiltonian,
     model,
     n_samples: int,
-    n_sweeps: int,
     seed: int,
 ) -> tuple[complex, float, float]:
     """Compute energy using NetKet MetropolisLocal sampler. Returns (energy, std, acceptance)."""
-    sweep_size = int(hi.size * n_sweeps)
+    sweep_size = int(hi.size)
     sampler = nk.sampler.MetropolisLocal(
         hi, n_chains=1, sweep_size=sweep_size, reset_chains=False
     )
@@ -392,7 +381,7 @@ def _netket_mh_energy(
         sampler,
         model,
         n_samples=n_samples,
-        n_discard_per_chain=BURN_IN * n_sweeps,
+        n_discard_per_chain=BURN_IN,
         sampler_seed=seed,
     )
     stats = vstate.expect(hamiltonian)
@@ -408,7 +397,7 @@ def _netket_mh_energy(
 def test_mps_fullsum(length: int) -> bool:
     """Test MPS sequential sampling against FullSum."""
     logger.info(f"\n--- MPS {length}x{length} (FullSum baseline) ---")
-    logger.info(f"  bond_dim={BOND_DIM}, n_samples={N_SAMPLES}, sweeps={N_SWEEPS}")
+    logger.info(f"  bond_dim={BOND_DIM}, n_samples={N_SAMPLES}, burn_in={BURN_IN}")
 
     hi, hamiltonian, _ = build_heisenberg_square(length, pbc=False)
     n_sites = int(hi.size)
@@ -422,7 +411,7 @@ def test_mps_fullsum(length: int) -> bool:
     # Sequential sampling
     t0 = time.perf_counter()
     samples, seq_accept = _sequential_mps_with_progress(
-        model, N_SAMPLES, N_SWEEPS, BURN_IN, jax.random.key(SEED)
+        model, N_SAMPLES, BURN_IN, jax.random.key(SEED)
     )
     t_sample = time.perf_counter() - t0
 
@@ -459,10 +448,11 @@ def test_mps_fullsum(length: int) -> bool:
 def test_peps_fullsum(length: int) -> bool:
     """Test PEPS sequential sampling against FullSum."""
     logger.info(f"\n--- PEPS {length}x{length} (FullSum baseline) ---")
-    logger.info(f"  bond_dim={BOND_DIM}, chi={CHI}, n_samples={N_SAMPLES}, sweeps={N_SWEEPS}")
+    logger.info(
+        f"  bond_dim={BOND_DIM}, chi={CHI}, n_samples={N_SAMPLES}, burn_in={BURN_IN}"
+    )
 
     hi, hamiltonian, _ = build_heisenberg_square(length, pbc=False)
-    n_sites = int(hi.size)
     shape = (length, length)
 
     model = PEPS(
@@ -475,7 +465,7 @@ def test_peps_fullsum(length: int) -> bool:
     # Sequential sampling
     t0 = time.perf_counter()
     samples, seq_accept = _sequential_peps_with_progress(
-        model, N_SAMPLES, N_SWEEPS, BURN_IN, jax.random.key(SEED)
+        model, N_SAMPLES, BURN_IN, jax.random.key(SEED)
     )
     t_sample = time.perf_counter() - t0
 
@@ -512,7 +502,7 @@ def test_peps_fullsum(length: int) -> bool:
 def test_mps_netket(length: int) -> bool:
     """Test MPS sequential sampling against NetKet MetropolisLocal."""
     logger.info(f"\n--- MPS {length}x{length} (NetKet MH baseline) ---")
-    logger.info(f"  bond_dim={BOND_DIM}, n_samples={N_SAMPLES}, sweeps={N_SWEEPS}")
+    logger.info(f"  bond_dim={BOND_DIM}, n_samples={N_SAMPLES}, burn_in={BURN_IN}")
 
     hi, hamiltonian, _ = build_heisenberg_square(length, pbc=False)
     n_sites = int(hi.size)
@@ -526,7 +516,7 @@ def test_mps_netket(length: int) -> bool:
     # Sequential sampling
     t0 = time.perf_counter()
     samples, seq_accept = _sequential_mps_with_progress(
-        model, N_SAMPLES, N_SWEEPS, BURN_IN, jax.random.key(SEED)
+        model, N_SAMPLES, BURN_IN, jax.random.key(SEED)
     )
     t_seq = time.perf_counter() - t0
 
@@ -539,7 +529,7 @@ def test_mps_netket(length: int) -> bool:
     # NetKet baseline
     t0 = time.perf_counter()
     nk_energy, nk_std, nk_accept = _netket_mh_energy(
-        hi, hamiltonian, model, N_SAMPLES, N_SWEEPS, SEED + 100
+        hi, hamiltonian, model, N_SAMPLES, SEED + 100
     )
     t_nk = time.perf_counter() - t0
 
@@ -567,13 +557,16 @@ def test_peps_netket(length: int) -> bool:
     """Test PEPS sequential sampling against reduced NetKet MH baseline."""
     # Use fewer samples for NetKet because it's O(N) slower per sample for PEPS
     nk_samples = 256  # Reduced for tractability
-    nk_sweeps = 2     # Reduced sweeps
     nk_burn_in = 50   # Reduced burn-in
 
     logger.info(f"\n--- PEPS {length}x{length} (NetKet MH baseline - reduced) ---")
     logger.info(f"  bond_dim={BOND_DIM}, chi={CHI}")
-    logger.info(f"  Sequential: n_samples={N_SAMPLES}, sweeps={N_SWEEPS}")
-    logger.info(f"  NetKet:     n_samples={nk_samples}, sweeps={nk_sweeps} (reduced - PEPS contraction is expensive)")
+    logger.info(f"  Sequential: n_samples={N_SAMPLES}, burn_in={BURN_IN}")
+    logger.info(
+        "  NetKet:     n_samples=%d, burn_in=%d (reduced - PEPS contraction is expensive)",
+        nk_samples,
+        nk_burn_in,
+    )
 
     hi, hamiltonian, _ = build_heisenberg_square(length, pbc=False)
     n_sites = int(hi.size)
@@ -589,7 +582,7 @@ def test_peps_netket(length: int) -> bool:
     # Sequential sampling (full)
     t0 = time.perf_counter()
     samples, seq_accept = _sequential_peps_with_progress(
-        model, N_SAMPLES, N_SWEEPS, BURN_IN, jax.random.key(SEED)
+        model, N_SAMPLES, BURN_IN, jax.random.key(SEED)
     )
     t_seq = time.perf_counter() - t0
 
@@ -602,7 +595,7 @@ def test_peps_netket(length: int) -> bool:
     # NetKet baseline (reduced samples)
     logger.info(f"  Running reduced NetKet MH baseline...")
     t0 = time.perf_counter()
-    sweep_size = int(hi.size * nk_sweeps)
+    sweep_size = int(hi.size)
     nk_sampler = nk.sampler.MetropolisLocal(
         hi, n_chains=1, sweep_size=sweep_size, reset_chains=False
     )
@@ -610,7 +603,7 @@ def test_peps_netket(length: int) -> bool:
         nk_sampler,
         model,
         n_samples=nk_samples,
-        n_discard_per_chain=nk_burn_in * nk_sweeps,
+        n_discard_per_chain=nk_burn_in,
         sampler_seed=SEED + 100,
     )
     nk_stats = nk_vstate.expect(hamiltonian)
@@ -650,7 +643,6 @@ def main() -> None:
     logger.info(f"  bond_dim = {BOND_DIM}")
     logger.info(f"  chi = {CHI} (ZipUp truncation)")
     logger.info(f"  n_samples = {N_SAMPLES}")
-    logger.info(f"  n_sweeps = {N_SWEEPS}")
     logger.info(f"  burn_in = {BURN_IN}")
 
     results = []

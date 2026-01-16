@@ -7,6 +7,9 @@ The goal is to reuse environments aggressively while keeping the transition kern
 
 - **MPS**: `_sequential_mps_sweep` in `VMC/samplers/sequential.py` performs one sweep.
   `sequential_sample` wraps burn-in and sampling loops via plum dispatch.
+  Recorded samples are taken once per sweep.
+  `n_samples` controls how many sweeps are recorded; total samples are `n_samples`
+  (burn-in sweeps are not recorded).
   - Precompute right environments for the current configuration.
   - Sweep sites left-to-right, propose a single-spin flip, and accept with
     `min(1, |psi_new|^2 / |psi_old|^2)`.
@@ -15,6 +18,9 @@ The goal is to reuse environments aggressively while keeping the transition kern
 
 - **PEPS**: `peps_sequential_sweep` in `VMC/samplers/sequential.py` performs one sweep.
   `sequential_sample` wraps burn-in and sampling loops via plum dispatch.
+  Recorded samples are taken once per sweep.
+  `n_samples` controls how many sweeps are recorded; total samples are `n_samples`
+  (burn-in sweeps are not recorded).
   - Build bottom environments once per sweep.
   - For each row, build right environments once and reuse a left environment while moving left-to-right.
   - Propose a single-spin flip at each site and accept with the same ratio.

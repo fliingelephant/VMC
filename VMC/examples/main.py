@@ -2,19 +2,21 @@ from __future__ import annotations
 
 from VMC import config  # noqa: F401 - JAX config must be imported first
 
+import functools
 import logging
 
-import jax.numpy as jnp
+import jax
 import netket as nk
 from flax import nnx
 
-from VMC.drivers.custom_driver import CustomVMC, CustomVMC_SR
+from VMC.drivers import DynamicsDriver, ImaginaryTimeUnit
+from VMC.examples.real_time import build_heisenberg_square
 from VMC.gauge import GaugeConfig
 from VMC.models.mps import MPS
-from VMC.qgt import DenseSR
+from VMC.preconditioners import SRPreconditioner
+from VMC.samplers.sequential import sequential_sample_with_gradients
 
 __all__ = [
-    "DenseSR",
     "MPS",
     "build_heisenberg_square",
     "main",
@@ -23,24 +25,16 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 
-def build_heisenberg_square(length: int, *, pbc: bool = False):
-    graph = nk.graph.Square(length=length, pbc=pbc)
-    hi = nk.hilbert.Spin(s=1 / 2, N=graph.n_nodes)
-    H = nk.operator.Heisenberg(hi, graph, dtype=jnp.complex128)
-    return hi, H, (length, length)
-
-
 def main():
     length = 3
     n_sites = length * length
     mps_bond = 12
-    n_samples = 4096
-    n_iter = 100
+    n_samples = 512
+    n_steps = 100
+    dt = 3e-2
 
     hi, H, _ = build_heisenberg_square(length, pbc=False)
-    sampler_kwargs = {"n_chains": 8}
 
-    # Exact ground-state energy for reference (small 3x3 lattice).
     exact_e = nk.exact.lanczos_ed(H, k=1)[0].real
     logger.info("=" * 60)
     logger.info(
@@ -50,122 +44,41 @@ def main():
         exact_e,
     )
 
-    def run_case(name: str, driver):
-        logger.info("\n%s", "=" * 60)
-        logger.info(name)
-        logger.info("=" * 60)
-        driver.run(n_iter=n_iter, show_progress=True, out=None)
-        energy = driver.state.expect(H).mean
-        logger.info("%s final energy: %.6f", name, energy.real)
-        if hasattr(driver, "diag_shift_error") or hasattr(driver, "residual_error"):
-            diag_shift_error = getattr(driver, "diag_shift_error", None)
-            residual_error = getattr(driver, "residual_error", None)
-            if diag_shift_error is not None:
-                logger.info(
-                    "%s final diag_shift_error: %.3e", name, diag_shift_error
-                )
-            if residual_error is not None:
-                logger.info("%s final residual_error: %.3e", name, residual_error)
-
-    optimizer = nk.optimizer.Sgd(learning_rate=3e-2)
-
-    mps_gauge_removed = MPS(
-        rngs=nnx.Rngs(6), n_sites=n_sites, bond_dim=mps_bond
-    )
-    vstate = nk.vqs.MCState(
-        nk.sampler.MetropolisLocal(hi, **sampler_kwargs),
-        mps_gauge_removed,
+    model = MPS(rngs=nnx.Rngs(6), n_sites=n_sites, bond_dim=mps_bond)
+    sampler = functools.partial(
+        sequential_sample_with_gradients,
         n_samples=n_samples,
-        n_discard_per_chain=16,
+        burn_in=8,
+        full_gradient=False,
     )
-    run_case(
-        "MPS + Custom VMC SR (gauge removal)",
-        CustomVMC_SR(
-            H,
-            optimizer,
-            variational_state=vstate,
-            diag_shift=1e-8,
-            use_ntk=False,
-            gauge_config=GaugeConfig(),
-        ),
+    preconditioner = SRPreconditioner(
+        diag_shift=1e-8,
+        gauge_config=GaugeConfig(),
     )
-
-    mps_custom_driver_netket_qgt = MPS(
-        rngs=nnx.Rngs(6), n_sites=n_sites, bond_dim=mps_bond
-    )
-    vstate = nk.vqs.MCState(
-        nk.sampler.MetropolisLocal(hi, **sampler_kwargs),
-        mps_custom_driver_netket_qgt,
-        n_samples=n_samples,
-        n_discard_per_chain=16,
-    )
-    sr_netket_custom = nk.optimizer.SR(
-        qgt=nk.optimizer.qgt.QGTJacobianDense(holomorphic=True),
-        diag_shift=1e-2,
-    )
-    run_case(
-        "MPS + Custom VMC (NetKet QGT)",
-        CustomVMC(
-            H,
-            optimizer,
-            variational_state=vstate,
-            preconditioner=sr_netket_custom,
-        ),
+    driver = DynamicsDriver(
+        model,
+        H,
+        sampler=sampler,
+        preconditioner=preconditioner,
+        dt=dt,
+        time_unit=ImaginaryTimeUnit(),
+        sampler_key=jax.random.key(0),
     )
 
-    mps_custom_driver_custom_qgt = MPS(
-        rngs=nnx.Rngs(6), n_sites=n_sites, bond_dim=mps_bond
-    )
-    vstate = nk.vqs.MCState(
-        nk.sampler.MetropolisLocal(hi, **sampler_kwargs),
-        mps_custom_driver_custom_qgt,
-        n_samples=n_samples,
-        n_discard_per_chain=16,
-    )
-    sr_custom_driver = DenseSR(diag_shift=1e-2)
-    run_case(
-        "MPS + Custom VMC (custom QGT)",
-        CustomVMC(
-            H,
-            optimizer,
-            variational_state=vstate,
-            preconditioner=sr_custom_driver,
-        ),
-    )
+    logger.info("=" * 60)
+    logger.info("MPS + SR (imaginary time)")
+    logger.info("=" * 60)
+    logger.info("samples=%d", n_samples)
+    for step in range(n_steps):
+        driver.step()
+        stats = driver.energy
+        if step % 10 == 0 and stats is not None:
+            logger.info("step=%d energy=%.6f", step, float(stats.mean.real))
 
-    mps_netket_custom = MPS(
-        rngs=nnx.Rngs(6), n_sites=n_sites, bond_dim=mps_bond
-    )
-    vstate = nk.vqs.MCState(
-        nk.sampler.MetropolisLocal(hi, **sampler_kwargs),
-        mps_netket_custom,
-        n_samples=n_samples,
-        n_discard_per_chain=16,
-    )
-    sr_custom = DenseSR(diag_shift=1e-2)
-    run_case(
-        "MPS + NetKet VMC (custom dense SR)",
-        nk.driver.VMC(H, optimizer, variational_state=vstate, preconditioner=sr_custom),
-    )
+    if driver.energy is not None:
+        logger.info("final energy: %.6f", float(driver.energy.mean.real))
 
-    mps_netket_driver = MPS(
-        rngs=nnx.Rngs(6), n_sites=n_sites, bond_dim=mps_bond
-    )
-    vstate = nk.vqs.MCState(
-        nk.sampler.MetropolisLocal(hi, **sampler_kwargs),
-        mps_netket_driver,
-        n_samples=n_samples,
-        n_discard_per_chain=16,
-    )
-
-    sr_netket = nk.optimizer.SR(
-        qgt=nk.optimizer.qgt.QGTJacobianDense(holomorphic=True),
-        diag_shift=1e-2,
-    )
-    run_case(
-        "MPS + NetKet VMC (NetKet SR)",
-        nk.driver.VMC(H, optimizer, variational_state=vstate, preconditioner=sr_netket),
-    )
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     main()

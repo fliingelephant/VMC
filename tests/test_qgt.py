@@ -46,7 +46,11 @@ class QGTTest(unittest.TestCase):
         qgt_full = QGT(Jacobian(grads_full / amps[:, None]), space=ParameterSpace())
 
         amps, grads, p = _value_and_grad_batch(model, samples_flat, full_gradient=False)
-        qgt_sliced = QGT(SlicedJacobian(grads / amps[:, None], p, model.phys_dim), space=ParameterSpace())
+        pps = tuple(params_per_site(model))
+        qgt_sliced = QGT(
+            SlicedJacobian(grads / amps[:, None], p, model.phys_dim, SiteOrdering(pps)),
+            space=ParameterSpace(),
+        )
 
         err = float(jnp.linalg.norm(qgt_full.to_dense() - qgt_sliced.to_dense()) / jnp.linalg.norm(qgt_full.to_dense()))
         self.assertLess(err, 1e-10)
@@ -173,11 +177,12 @@ class QGTTest(unittest.TestCase):
         x, _ = _solve_sr(
             DiagonalSolve(solver=solve_cholesky, params_per_site=pps),
             ParameterSpace(),
-            O,
+            Jacobian(O),
             dv,
             diag_shift,
         )
-        rhs = O.conj().T @ dv
+        mean = jnp.mean(O, axis=0)
+        rhs = O.conj().T @ dv - mean.conj() * jnp.sum(dv)
         full = QGT(Jacobian(O), space=ParameterSpace()).to_dense()
         expected = jnp.zeros_like(rhs)
         i = 0
@@ -206,7 +211,7 @@ class QGTTest(unittest.TestCase):
             _solve_sr(
                 DiagonalSolve(solver=solve_cholesky, params_per_site=pps),
                 SampleSpace(),
-                O,
+                Jacobian(O),
                 dv,
                 1e-4,
             )

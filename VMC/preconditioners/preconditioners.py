@@ -1,15 +1,8 @@
-"""Preconditioners for variational Monte Carlo optimization.
-
-This module provides SR (Stochastic Reconfiguration) preconditioners with a
-two-level abstraction using plum multiple dispatch:
-- SpaceFormulation types: How to build the linear system (SR vs minSR)
-- SolveStrategy types: How to solve it (Direct vs QR-enhanced)
-"""
+"""Preconditioners for variational Monte Carlo optimization."""
 from __future__ import annotations
 
-from VMC import config  # noqa: F401 - JAX config must be imported first
+from VMC import config  # noqa: F401
 
-import functools
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
@@ -17,11 +10,15 @@ from typing import TYPE_CHECKING, Callable
 import jax
 import jax.numpy as jnp
 import jax.scipy as jsp
-import jax.scipy.sparse.linalg as jspsl
+from jax.flatten_util import ravel_pytree
 from netket.jax import tree_cast
 from plum import dispatch
 
-from VMC.utils.vmc_utils import build_dense_jac, flatten_samples
+from VMC.qgt import DiagonalQGT, QGT, Jacobian, ParameterSpace, SampleSpace, SlicedJacobian
+from VMC.qgt.jacobian import PhysicalOrdering, SiteOrdering, jacobian_mean
+from VMC.qgt.qgt import _params_per_site
+from VMC.qgt.solvers import solve_cg, solve_cholesky, solve_svd
+from VMC.utils.smallo import params_per_site
 
 if TYPE_CHECKING:
     from VMC.gauge import GaugeConfig
@@ -29,280 +26,175 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    # Linear solvers
     "LinearSolver",
     "solve_cg",
     "solve_cholesky",
     "solve_svd",
-    # Space formulations (marker types)
-    "SRFormulation",
-    "MinSRFormulation",
-    # Solve strategies (marker types)
     "DirectSolve",
     "QRSolve",
-    # Dispatched functions
-    "build_system",
-    "recover_updates",
-    "solve",
-    # Unified preconditioner
+    "DiagonalSolve",
     "SRPreconditioner",
 ]
-
 
 LinearSolver = Callable[[jax.Array, jax.Array], jax.Array]
 
 
-@functools.partial(jax.jit, static_argnames=("maxiter", "tol"))
-def solve_cg(
-    mat: jax.Array, rhs: jax.Array, *, maxiter: int = 1000, tol: float = 1e-5
-) -> jax.Array:
-    """Solve linear system using conjugate gradient."""
-    sol, _ = jspsl.cg(mat, rhs, maxiter=maxiter, tol=tol)
-    return sol
-
-
-@functools.partial(jax.jit, static_argnames=("rcond",))
-def solve_svd(mat: jax.Array, rhs: jax.Array, *, rcond: float = 1e-12) -> jax.Array:
-    """Solve linear system using SVD with regularization."""
-    U, S, Vh = jsp.linalg.svd(mat, full_matrices=False)
-    cutoff = rcond * jnp.max(S)
-    S_inv = jnp.where(S > cutoff, 1.0 / S, 0.0)
-    y = U.conj().T @ rhs
-    return Vh.conj().T @ (S_inv * y)
-
-
-@jax.jit
-def solve_cholesky(mat: jax.Array, rhs: jax.Array) -> jax.Array:
-    """Solve positive-definite linear system using Cholesky decomposition."""
-    return jsp.linalg.cho_solve(jsp.linalg.cho_factor(mat), rhs)
-
-
-@dataclass(frozen=True)
-class SRFormulation:
-    """Parameter-space SR formulation marker.
-
-    Solves: (O^H @ O + diag_shift * I) @ x = O^H @ dv
-    Matrix size: (n_params_reduced, n_params_reduced)
-    """
-
-    pass
-
-
-@dataclass(frozen=True)
-class MinSRFormulation:
-    """Sample-space SR formulation marker (minSR / NTK).
-
-    Solves: (O @ O^H + diag_shift * I) @ x = dv
-    Then recovers: updates = O^H @ x
-    Matrix size: (n_samples, n_samples)
-    """
-
-    pass
-
-
-@dispatch
-def build_system(
-    f: SRFormulation, O_eff: jax.Array, dv: jax.Array, diag_shift: float
-) -> tuple[jax.Array, jax.Array, jax.Array]:
-    """Build the linear system for parameter-space SR.
-
-    Args:
-        f: SRFormulation marker.
-        O_eff: Effective Jacobian matrix (n_samples, n_params_reduced).
-        dv: Gradient vector (n_samples,).
-        diag_shift: Regularization parameter.
-
-    Returns:
-        Tuple of (matrix, rhs, base_matrix) where base_matrix is without diag_shift.
-    """
-    base_mat = O_eff.conj().T @ O_eff
-    mat = base_mat + diag_shift * jnp.eye(base_mat.shape[0], dtype=base_mat.dtype)
-    rhs = O_eff.conj().T @ dv
-    return mat, rhs, base_mat
-
-
-@dispatch
-def build_system(
-    f: MinSRFormulation, O_eff: jax.Array, dv: jax.Array, diag_shift: float
-) -> tuple[jax.Array, jax.Array, jax.Array]:
-    """Build the linear system for sample-space SR (minSR/NTK).
-
-    Args:
-        f: MinSRFormulation marker.
-        O_eff: Effective Jacobian matrix (n_samples, n_params_reduced).
-        dv: Gradient vector (n_samples,).
-        diag_shift: Regularization parameter.
-
-    Returns:
-        Tuple of (matrix, rhs, base_matrix) where base_matrix is without diag_shift.
-    """
-    base_mat = O_eff @ O_eff.conj().T
-    mat = base_mat + diag_shift * jnp.eye(base_mat.shape[0], dtype=base_mat.dtype)
-    rhs = dv
-    return mat, rhs, base_mat
-
-
-@dispatch
-def recover_updates(f: SRFormulation, O_eff: jax.Array, solution: jax.Array) -> jax.Array:
-    """Transform solution back to parameter space for SR formulation.
-
-    Args:
-        f: SRFormulation marker.
-        O_eff: Effective Jacobian matrix.
-        solution: Solution from the linear solver.
-
-    Returns:
-        Updates in the reduced parameter space.
-    """
-    # Solution is already in parameter space
-    return solution
-
-
-@dispatch
-def recover_updates(
-    f: MinSRFormulation, O_eff: jax.Array, solution: jax.Array
-) -> jax.Array:
-    """Transform solution back to parameter space for minSR formulation.
-
-    Args:
-        f: MinSRFormulation marker.
-        O_eff: Effective Jacobian matrix.
-        solution: Solution from the linear solver.
-
-    Returns:
-        Updates in the reduced parameter space.
-    """
-    # Transform from sample space to parameter space
-    return O_eff.conj().T @ solution
-
-
 @dataclass(frozen=True)
 class DirectSolve:
-    """Direct solve strategy marker.
-
-    Solves via matrix inverse with a dispatched linear solver.
-    Supports: solve_cholesky, solve_svd, solve_cg, or any compatible solver.
-
-    Attributes:
-        solver: Linear solver function (default: solve_cholesky).
-    """
+    """Direct solve strategy using matrix solver."""
 
     solver: LinearSolver = solve_cholesky
 
 
 @dataclass(frozen=True)
 class QRSolve:
-    """QR solve strategy marker.
-
-    Solves via pivoted QR decomposition.
-    Only valid with SRFormulation.
-
-    Attributes:
-        rcond: Relative condition number for rank truncation.
-        min_norm: If True, compute minimum-norm solution.
-    """
+    """QR solve strategy (only for ParameterSpace)."""
 
     rcond: float | None = None
     min_norm: bool = True
 
 
+@dataclass(frozen=True)
+class DiagonalSolve:
+    """Block-diagonal solve strategy (ParameterSpace only)."""
+
+    solver: LinearSolver = solve_cholesky
+    params_per_site: tuple[int, ...] | None = None
+
+
+# --------------------------------------------------------------------------- #
+# Solve dispatch
+# --------------------------------------------------------------------------- #
+
+
 @dispatch
-def solve(
+def _reorder_updates(
+    ordering: PhysicalOrdering,
+    updates_flat: jax.Array,
+    pps: tuple[int, ...],
+    phys_dim: int,
+) -> jax.Array:
+    total = sum(pps)
+    perm = []
+    site_offset = 0
+    for n in pps:
+        for k in range(phys_dim):
+            base = k * total + site_offset
+            perm.extend(range(base, base + n))
+        site_offset += n
+    return updates_flat[jnp.asarray(perm)]
+
+
+@dispatch
+def _reorder_updates(
+    ordering: SiteOrdering,
+    updates_flat: jax.Array,
+    pps: tuple[int, ...],
+    phys_dim: int,
+) -> jax.Array:
+    _ = (ordering, pps, phys_dim)
+    return updates_flat
+
+
+@dispatch
+def _adjoint_matvec(jac: Jacobian, v: jax.Array) -> jax.Array:
+    mean = jacobian_mean(jac)
+    return jac.O.conj().T @ v - mean.conj() * jnp.sum(v)
+
+
+@dispatch
+def _adjoint_matvec(jac: SlicedJacobian, v: jax.Array) -> jax.Array:
+    o, p, d = jac.o, jac.p, jac.phys_dim
+    pps = _params_per_site(jac.ordering, o)
+    parts = []
+    i = 0
+    for n in pps:
+        for k in range(d):
+            ok = jnp.where(p[:, i : i + n] == k, o[:, i : i + n], 0)
+            parts.append(ok.conj().T @ v)
+        i += n
+    result = jnp.concatenate(parts, axis=0)
+    mean = jacobian_mean(jac)
+    return result - mean.conj() * jnp.sum(v)
+
+
+@dispatch
+def _direct_solve(
+    space: ParameterSpace,
+    jac: Jacobian | SlicedJacobian,
+    dv: jax.Array,
+    diag_shift: float,
+    solver: LinearSolver,
+) -> tuple[jax.Array, dict]:
+    qgt = QGT(jac, space=ParameterSpace())
+    S = qgt.to_dense()
+    rhs = _adjoint_matvec(jac, dv)
+    mat = S + diag_shift * jnp.eye(S.shape[0], dtype=S.dtype)
+    x = solver(mat, rhs)
+    metrics = {
+        "residual_error": jnp.linalg.norm(S @ x - rhs) ** 2 / jnp.linalg.norm(rhs) ** 2,
+    }
+    return x, metrics
+
+
+@dispatch
+def _direct_solve(
+    space: SampleSpace,
+    jac: Jacobian | SlicedJacobian,
+    dv: jax.Array,
+    diag_shift: float,
+    solver: LinearSolver,
+) -> tuple[jax.Array, dict]:
+    qgt = QGT(jac, space=SampleSpace())
+    S = qgt.to_dense()
+    mat = S + diag_shift * jnp.eye(S.shape[0], dtype=S.dtype)
+    y = solver(mat, dv)
+    x = _adjoint_matvec(jac, y)
+    metrics = {
+        "residual_error": jnp.linalg.norm(S @ y - dv) ** 2 / jnp.linalg.norm(dv) ** 2,
+    }
+    return x, metrics
+
+
+@dispatch
+def _solve_sr(
     strategy: DirectSolve,
-    formulation: SRFormulation,
-    O_eff: jax.Array,
+    space: ParameterSpace,
+    jac: Jacobian | SlicedJacobian,
     dv: jax.Array,
     diag_shift: float,
 ) -> tuple[jax.Array, dict]:
-    """Solve SR equations using direct method with SRFormulation.
-
-    Args:
-        strategy: DirectSolve configuration.
-        formulation: SRFormulation marker.
-        O_eff: Effective Jacobian matrix.
-        dv: Gradient vector.
-        diag_shift: Regularization parameter.
-
-    Returns:
-        Tuple of (updates_reduced, metrics_dict).
-    """
-    mat, rhs, base_mat = build_system(formulation, O_eff, dv, diag_shift)
-    solution = strategy.solver(mat, rhs)
-    updates_red = recover_updates(formulation, O_eff, solution)
-
-    metrics = {
-        "diag_shift_error": (
-            jnp.linalg.norm(mat @ solution - rhs) ** 2 / jnp.linalg.norm(rhs) ** 2
-        ),
-        "residual_error": (
-            jnp.linalg.norm(base_mat @ solution - rhs) ** 2 / jnp.linalg.norm(rhs) ** 2
-        ),
-    }
-    return updates_red, metrics
+    return _direct_solve(space, jac, dv, diag_shift, strategy.solver)
 
 
 @dispatch
-def solve(
+def _solve_sr(
     strategy: DirectSolve,
-    formulation: MinSRFormulation,
-    O_eff: jax.Array,
+    space: SampleSpace,
+    jac: Jacobian | SlicedJacobian,
     dv: jax.Array,
     diag_shift: float,
 ) -> tuple[jax.Array, dict]:
-    """Solve SR equations using direct method with MinSRFormulation.
-
-    Args:
-        strategy: DirectSolve configuration.
-        formulation: MinSRFormulation marker.
-        O_eff: Effective Jacobian matrix.
-        dv: Gradient vector.
-        diag_shift: Regularization parameter.
-
-    Returns:
-        Tuple of (updates_reduced, metrics_dict).
-    """
-    mat, rhs, base_mat = build_system(formulation, O_eff, dv, diag_shift)
-    solution = strategy.solver(mat, rhs)
-    updates_red = recover_updates(formulation, O_eff, solution)
-
-    metrics = {
-        "diag_shift_error": (
-            jnp.linalg.norm(mat @ solution - rhs) ** 2 / jnp.linalg.norm(rhs) ** 2
-        ),
-        "residual_error": (
-            jnp.linalg.norm(base_mat @ solution - rhs) ** 2 / jnp.linalg.norm(rhs) ** 2
-        ),
-    }
-    return updates_red, metrics
+    return _direct_solve(space, jac, dv, diag_shift, strategy.solver)
 
 
 @dispatch
-def solve(
+def _solve_sr(
     strategy: QRSolve,
-    formulation: SRFormulation,
-    O_eff: jax.Array,
+    space: ParameterSpace,
+    jac: Jacobian,
     dv: jax.Array,
     diag_shift: float,
 ) -> tuple[jax.Array, dict]:
-    """Solve SR equations using pivoted QR with SRFormulation.
-
-    Args:
-        strategy: QRSolve configuration.
-        formulation: SRFormulation marker.
-        O_eff: Effective Jacobian matrix.
-        dv: Gradient vector.
-        diag_shift: Regularization parameter (unused in QR method).
-
-    Returns:
-        Tuple of (updates_reduced, metrics_dict).
-    """
-    # Pivoted QR decomposition
+    """QR solve in parameter space."""
+    _ = diag_shift
+    mean = jacobian_mean(jac)
+    o_centered = jac.O - mean[None, :]
     q, r, piv = jax.lax.linalg.qr(
-        O_eff, full_matrices=False, pivoting=True, use_magma=True
+        o_centered, full_matrices=False, pivoting=True, use_magma=True
     )
     y = q.conj().T @ dv
 
-    # Determine rank
     if strategy.rcond is None:
         r_rank = int(jnp.linalg.matrix_rank(r))
     else:
@@ -312,204 +204,220 @@ def solve(
     n2 = n_red - r_rank
 
     if r_rank == 0:
-        updates_red = jnp.zeros((n_red,), dtype=O_eff.dtype)
+        x = jnp.zeros((n_red,), dtype=jac.O.dtype)
     else:
-        r11 = r[:r_rank, :r_rank]
-        r12 = r[:r_rank, r_rank:]
-        y1 = y[:r_rank]
+        r11, r12, y1 = r[:r_rank, :r_rank], r[:r_rank, r_rank:], y[:r_rank]
 
         if strategy.min_norm and n2 > 0:
             r11_inv_y1 = jsp.linalg.solve_triangular(r11, y1, lower=False)
             r11_inv_r12 = jsp.linalg.solve_triangular(r11, r12, lower=False)
             lhs = r11_inv_r12.conj().T @ r11_inv_r12 + jnp.eye(n2, dtype=r12.dtype)
-            rhs_minorm = r11_inv_r12.conj().T @ r11_inv_y1
-            x2 = jsp.linalg.solve(lhs, rhs_minorm, assume_a="pos")
+            x2 = jsp.linalg.solve(lhs, r11_inv_r12.conj().T @ r11_inv_y1, assume_a="pos")
             x1 = r11_inv_y1 - r11_inv_r12 @ x2
         else:
             x1 = jsp.linalg.solve_triangular(r11, y1, lower=False)
-            x2 = jnp.zeros((n2,), dtype=O_eff.dtype)
+            x2 = jnp.zeros((n2,), dtype=jac.O.dtype)
 
-        x = jnp.concatenate([x1, x2], axis=0)
-        updates_red = jnp.zeros((n_red,), dtype=O_eff.dtype).at[piv].set(x)
+        x = jnp.zeros((n_red,), dtype=jac.O.dtype).at[piv].set(jnp.concatenate([x1, x2]))
 
-    # Compute metrics
-    rhs_full = O_eff.conj().T @ dv
-    resid = O_eff.conj().T @ (O_eff @ updates_red) - rhs_full
-    numer = jnp.linalg.norm(resid) ** 2
-    denom = jnp.linalg.norm(rhs_full) ** 2
-    residual_error = jnp.where(denom > 0, numer / denom, jnp.inf)
-
+    rhs = o_centered.conj().T @ dv
+    resid = o_centered.conj().T @ (o_centered @ x) - rhs
     metrics = {
-        "residual_error": residual_error,
-        "rank_R": r_rank,
-        "rcond": strategy.rcond,
+        "residual_error": jnp.linalg.norm(resid) ** 2 / jnp.linalg.norm(rhs) ** 2,
+        "rank": r_rank,
     }
-    return updates_red, metrics
+    return x, metrics
 
 
 @dispatch
-def solve(
+def _solve_sr(
     strategy: QRSolve,
-    formulation: MinSRFormulation,
-    O_eff: jax.Array,
+    space: ParameterSpace,
+    jac: SlicedJacobian,
     dv: jax.Array,
     diag_shift: float,
 ) -> tuple[jax.Array, dict]:
-    """QR solve with MinSRFormulation is not implemented.
-
-    Raises:
-        NotImplementedError: Always raises - use DirectSolve with MinSRFormulation.
-    """
-    raise NotImplementedError(
-        "QR-enhanced solving for minSR formulation is not yet implemented. "
-        "Use DirectSolve with MinSRFormulation, or use "
-        "SRFormulation with QRSolve."
-    )
+    _ = (strategy, space, dv, diag_shift)
+    raise NotImplementedError("QRSolve not supported for SlicedJacobian")
 
 
-# Type aliases for formulation and strategy markers
-FormulationType = SRFormulation | MinSRFormulation
-StrategyType = DirectSolve | QRSolve
+@dispatch
+def _solve_sr(
+    strategy: QRSolve,
+    space: SampleSpace,
+    jac: Jacobian | SlicedJacobian,
+    dv: jax.Array,
+    diag_shift: float,
+) -> tuple[jax.Array, dict]:
+    _ = (strategy, space, jac, dv, diag_shift)
+    raise NotImplementedError("QRSolve not supported for SampleSpace")
+
+
+@dispatch
+def _solve_sr(
+    strategy: DiagonalSolve,
+    space: ParameterSpace,
+    jac: Jacobian | SlicedJacobian,
+    dv: jax.Array,
+    diag_shift: float,
+) -> tuple[jax.Array, dict]:
+    if strategy.params_per_site is None:
+        raise ValueError("DiagonalSolve requires params_per_site")
+    qgt = DiagonalQGT(jac, space=ParameterSpace(), params_per_site=strategy.params_per_site)
+    S = qgt.to_dense()
+    rhs = _adjoint_matvec(jac, dv)
+    mat = S + diag_shift * jnp.eye(S.shape[0], dtype=S.dtype)
+    x = jnp.zeros_like(rhs)
+    i = 0
+    for n in strategy.params_per_site:
+        block = mat[i : i + n, i : i + n]
+        x = x.at[i : i + n].set(strategy.solver(block, rhs[i : i + n]))
+        i += n
+    metrics = {
+        "residual_error": jnp.linalg.norm(S @ x - rhs) ** 2 / jnp.linalg.norm(rhs) ** 2,
+    }
+    return x, metrics
+
+
+@dispatch
+def _solve_sr(
+    strategy: DiagonalSolve,
+    space: SampleSpace,
+    jac: Jacobian | SlicedJacobian,
+    dv: jax.Array,
+    diag_shift: float,
+) -> tuple[jax.Array, dict]:
+    _ = (strategy, space, jac, dv, diag_shift)
+    raise NotImplementedError("DiagonalSolve not supported for SampleSpace")
+
+
+@dispatch
+def _resolve_strategy(
+    strategy: DirectSolve,
+    model: object,
+) -> DirectSolve:
+    _ = model
+    return strategy
+
+
+@dispatch
+def _resolve_strategy(
+    strategy: QRSolve,
+    model: object,
+) -> QRSolve:
+    _ = model
+    return strategy
+
+
+@dispatch
+def _resolve_strategy(
+    strategy: DiagonalSolve,
+    model: object,
+) -> DiagonalSolve:
+    if strategy.params_per_site is None:
+        return DiagonalSolve(
+            solver=strategy.solver, params_per_site=tuple(params_per_site(model))
+        )
+    return strategy
+
+
+# --------------------------------------------------------------------------- #
+# SRPreconditioner
+# --------------------------------------------------------------------------- #
 
 
 class SRPreconditioner:
-    """Unified SR preconditioner with two-level abstraction.
-
-    Composes a formulation type (SR vs minSR) with a strategy type
-    (Direct vs QR-enhanced) using plum dispatch.
-
-    Attributes:
-        formulation: Space formulation marker (SRFormulation or MinSRFormulation).
-        strategy: Solving strategy marker (DirectSolve or QRSolve).
-        diag_shift: Regularization parameter added to the diagonal.
-        gauge_config: Optional gauge projection configuration for tensor networks.
-        uses_local_energies: Flag indicating this preconditioner uses local energies.
-    """
+    """SR preconditioner with configurable space and solve strategy."""
 
     def __init__(
         self,
-        formulation: FormulationType | None = None,
-        strategy: StrategyType | None = None,
+        space: ParameterSpace | SampleSpace | None = None,
+        strategy: DirectSolve | QRSolve | DiagonalSolve | None = None,
         diag_shift: float = 1e-2,
         gauge_config: "GaugeConfig | None" = None,
+        ordering: PhysicalOrdering | SiteOrdering | None = None,
     ):
-        """Initialize SRPreconditioner.
-
-        Args:
-            formulation: Space formulation marker (default: SRFormulation()).
-            strategy: Solving strategy marker (default: DirectSolve()).
-            diag_shift: Regularization parameter.
-            gauge_config: Optional gauge projection config for MPS/PEPS.
-        """
-        self.formulation = formulation if formulation is not None else SRFormulation()
+        self.space = space if space is not None else ParameterSpace()
         self.strategy = strategy if strategy is not None else DirectSolve()
         self.diag_shift = diag_shift
         self.gauge_config = gauge_config
+        self.ordering = ordering if ordering is not None else PhysicalOrdering()
         self.uses_local_energies = True
-
-        # Runtime metrics (mutable, lazily computed)
         self._metrics: dict | None = None
 
     @property
-    def diag_shift_error(self) -> float | None:
-        """Diagonal shift error from last solve (materialized on access)."""
-        if self._metrics is None or "diag_shift_error" not in self._metrics:
-            return None
-        return float(jax.block_until_ready(self._metrics["diag_shift_error"]))
-
-    @property
     def residual_error(self) -> float | None:
-        """Residual error from last solve (materialized on access)."""
         if self._metrics is None or "residual_error" not in self._metrics:
             return None
         return float(jax.block_until_ready(self._metrics["residual_error"]))
 
     def apply(
         self,
-        state,
+        model,
+        samples: jax.Array,
+        o: jax.Array,
+        p: jax.Array | None,
         local_energies: jax.Array,
         *,
         step: int | None = None,
         grad_factor: complex = 1.0,
         stage: int = 0,
     ) -> dict:
-        """Apply SR preconditioner to compute parameter updates.
-
-        Args:
-            state: Variational state with samples and parameters.
-            local_energies: Local energy estimates for each sample.
-            step: Current optimization step (for logging).
-            grad_factor: Multiplicative factor for the gradient.
-            stage: RK stage index (only log on stage 0).
-
-        Returns:
-            Parameter updates as a pytree matching state.parameters.
-        """
-        # Import here to avoid circular import
+        _ = (step, stage)
         from VMC.gauge import compute_gauge_projection
 
-        samples = flatten_samples(state.samples)
-        O = build_dense_jac(
-            state._apply_fun,
-            state.parameters,
-            state.model_state,
-            samples,
-        )
-
-        # Compute gradient vector
-        de = local_energies.reshape(-1) - jnp.mean(local_energies)
-        dv = de / jnp.sqrt(samples.shape[0])
+        dv = (local_energies.reshape(-1) - jnp.mean(local_energies)) / samples.shape[0]
         dv = grad_factor * dv
 
-        # Apply gauge removal if provided
+        params = jax.tree_util.tree_map(jnp.asarray, model.tensors)
+        pps = tuple(params_per_site(model)) if p is not None else None
         Q = None
-        gauge_info = None
-        O_eff = O
         if self.gauge_config is not None:
-            Q, gauge_info = compute_gauge_projection(
-                self.gauge_config,
-                state.model,
-                state.parameters,
-                return_info=True,
+            params_dict = {"tensors": params}
+            Q, _ = compute_gauge_projection(
+                self.gauge_config, model, params_dict, return_info=True
             )
-            O_eff = O @ Q
+            if p is None:
+                o_eff = o @ Q
+            else:
+                blocks = []
+                i = 0
+                for n in pps:
+                    for k in range(model.phys_dim):
+                        ok = jnp.where(p[:, i : i + n] == k, o[:, i : i + n], 0)
+                        blocks.append(ok)
+                    i += n
+                o_eff = jnp.concatenate(blocks, axis=1) @ Q
+            jac = Jacobian(o_eff)
+        elif p is None:
+            jac = Jacobian(o)
+        else:
+            jac = SlicedJacobian(
+                o,
+                p,
+                model.phys_dim,
+                self.ordering,
+            )
 
-        # Solve using dispatch (strategy + formulation determine implementation)
-        updates_red, self._metrics = solve(
-            self.strategy, self.formulation, O_eff, dv, self.diag_shift
+        strategy = _resolve_strategy(self.strategy, model)
+
+        updates_red, self._metrics = _solve_sr(
+            strategy, self.space, jac, dv, self.diag_shift
         )
 
-        # Transform back to full parameter space
         updates_flat = Q @ updates_red if Q is not None else updates_red
-
-        # Debug logging (guarded to skip expensive computations when not debugging)
-        if logger.isEnabledFor(logging.DEBUG) and stage == 0:
-            msg = (
-                f"[SRPreconditioner] formulation={type(self.formulation).__name__} "
-                f"strategy={type(self.strategy).__name__} shape(O)={O.shape} rank(O)={int(jnp.linalg.matrix_rank(O))} "
+        if Q is None and p is not None:
+            updates_flat = _reorder_updates(
+                self.ordering, updates_flat, pps, model.phys_dim
             )
-            if "diag_shift_error" in self._metrics:
-                msg += f" diag_shift_error={self.diag_shift_error:.3e}"
-            if "residual_error" in self._metrics:
-                msg += f" residual_error={self.residual_error:.3e}"
-            if gauge_info is not None:
-                msg += (
-                    f" shape(O_eff)={O_eff.shape} rank(O_eff)={int(jnp.linalg.matrix_rank(O_eff))} "
-                    f"rank(T)={gauge_info['rank_T']} null_rank={gauge_info['null_rank']}"
-                )
-            logger.debug(msg)
-
-        # Unravel to pytree structure
-        _, unravel = jax.flatten_util.ravel_pytree(state.parameters)
+        _, unravel = ravel_pytree(params)
         updates = unravel(updates_flat)
         if jnp.isrealobj(grad_factor):
             updates = jax.tree_util.tree_map(
-                lambda x, target: (
-                    (2.0 * x.real).astype(target.dtype)
-                    if not jnp.iscomplexobj(target)
-                    else x
-                ),
+                lambda x, t: (2.0 * x.real).astype(t.dtype)
+                if not jnp.iscomplexobj(t)
+                else x,
                 updates,
-                state.parameters,
+                params,
             )
-        return tree_cast(updates, state.parameters)
+        return tree_cast(updates, params)

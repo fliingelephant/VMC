@@ -314,7 +314,7 @@ def sample_with_progress(
     *,
     key: jax.Array,
     n_samples: int,
-    n_sweeps: int,
+    n_steps: int,
     label: str,
     log_interval: int,
 ) -> tuple[jax.Array, jax.Array]:
@@ -332,7 +332,7 @@ def sample_with_progress(
         if batch_size <= 0:
             break
         batch_samples, _, _, acceptance = sampler.sample(
-            log_prob, n_samples=batch_size, n_sweeps=n_sweeps, key=batch_key
+            log_prob, n_samples=batch_size, n_steps=n_steps, key=batch_key
         )
         all_samples.append(batch_samples)
         elapsed = time.time() - start_time
@@ -354,7 +354,7 @@ def compare_mh_statistical_distribution(
     sampler: IndependentSetSampler,
     key: jax.Array,
     n_samples: int,
-    n_sweeps: int,
+    n_steps: int,
     label: str,
     alpha: float = 1e-3,
     log_interval: int = 1000,
@@ -372,7 +372,7 @@ def compare_mh_statistical_distribution(
         log_prob,
         key=key,
         n_samples=n_samples,
-        n_sweeps=n_sweeps,
+        n_steps=n_steps,
         label=f"{label} MH",
         log_interval=log_interval,
     )
@@ -413,7 +413,7 @@ def compare_mh_statistical_distribution(
         "p_value": p_value,
         "min_expected": min_expected,
         "n_samples": int(n_samples),
-        "n_sweeps": int(n_sweeps),
+        "n_steps": int(n_steps),
     }
     METRICS.append(metric)
     if p_value < alpha:
@@ -483,13 +483,13 @@ def run_fullsum_check(
     mask: jax.Array,
     seed: int,
     key: jax.Array,
-    n_sweeps: int,
+    n_steps: int,
 ) -> None:
     log_prob_full = batched_eval(log_prob, full_samples, batch_size=BATCH_SIZE)
     exact = weighted_stats(log_prob_full, full_samples)
 
     samples, _, _, acceptance = sampler.sample(
-        log_prob, n_samples=N_SAMPLES, n_sweeps=n_sweeps, key=key
+        log_prob, n_samples=N_SAMPLES, n_steps=n_steps, key=key
     )
     verify_no_violations(samples, neighbors, mask, f"{model_name} seed={seed} fullsum")
     stats = sample_stats(samples)
@@ -528,7 +528,7 @@ def run_energy_check(
     mask: jax.Array,
     seed: int,
     key: jax.Array,
-    n_sweeps: int,
+    n_steps: int,
 ) -> None:
     log_prob_full = batched_eval(log_prob, full_samples, batch_size=BATCH_SIZE)
     full_spins = occupancy_to_spin(full_samples)
@@ -540,7 +540,7 @@ def run_energy_check(
     exact_energy_tfim = weighted_mean(log_prob_full, local_energy_full_tfim)
 
     samples, _, _, acceptance = sampler.sample(
-        log_prob, n_samples=N_SAMPLES, n_sweeps=n_sweeps, key=key
+        log_prob, n_samples=N_SAMPLES, n_steps=n_steps, key=key
     )
     verify_no_violations(samples, neighbors, mask, f"{model_name} seed={seed} energy")
     sample_spins = occupancy_to_spin(samples)
@@ -599,7 +599,7 @@ def run_sampler_comparison(
     mask: jax.Array,
     seed: int,
     key: jax.Array,
-    n_sweeps: int,
+    n_steps: int,
     log_interval: int = 1000,
 ) -> None:
     key_a, key_b = jax.random.split(key, 2)
@@ -609,7 +609,7 @@ def run_sampler_comparison(
         log_prob,
         key=key_a,
         n_samples=N_SAMPLES,
-        n_sweeps=n_sweeps,
+        n_steps=n_steps,
         label=f"{model_name} seed={seed} sampler_a",
         log_interval=log_interval,
     )
@@ -618,7 +618,7 @@ def run_sampler_comparison(
         log_prob,
         key=key_b,
         n_samples=N_SAMPLES,
-        n_sweeps=n_sweeps,
+        n_steps=n_steps,
         label=f"{model_name} seed={seed} sampler_b",
         log_interval=log_interval,
     )
@@ -705,10 +705,10 @@ def main() -> None:
 
     n_sites_full = shape_full[0] * shape_full[1]
     n_sites_fullsum = shape_fullsum[0] * shape_fullsum[1]
-    n_sweeps_full = SWEEP_FACTOR_MPS_FULL * n_sites_full
-    n_sweeps_full_peps = SWEEP_FACTOR_PEPS_FULL * n_sites_full
-    n_sweeps_fullsum_mps = SWEEP_FACTOR_MPS_FULLSUM * n_sites_fullsum
-    n_sweeps_fullsum_peps = SWEEP_FACTOR_PEPS_FULLSUM * n_sites_fullsum
+    n_steps_full = SWEEP_FACTOR_MPS_FULL * n_sites_full
+    n_steps_full_peps = SWEEP_FACTOR_PEPS_FULL * n_sites_full
+    n_steps_fullsum_mps = SWEEP_FACTOR_MPS_FULLSUM * n_sites_fullsum
+    n_steps_fullsum_peps = SWEEP_FACTOR_PEPS_FULLSUM * n_sites_fullsum
 
     logger.info("Running independent-set sampler checks...")
 
@@ -753,7 +753,7 @@ def main() -> None:
                 sampler=sampler_full,
                 key=key_hilbert,
                 n_samples=N_SAMPLES,
-                n_sweeps=n_sweeps_full,
+                n_steps=n_steps_full,
                 label=f"MPS {shape_full[0]}x{shape_full[1]} seed={seed}",
             )
             run_energy_check(
@@ -767,7 +767,7 @@ def main() -> None:
                 mask=mask_full,
                 seed=seed,
                 key=key_energy,
-                n_sweeps=n_sweeps_full,
+                n_steps=n_steps_full,
             )
             mps_fullsum = MPS(
                 rngs=nnx.Rngs(seed),
@@ -791,7 +791,7 @@ def main() -> None:
                 mask=mask_fullsum,
                 seed=seed,
                 key=key_full,
-                n_sweeps=n_sweeps_fullsum_mps,
+                n_steps=n_steps_fullsum_mps,
             )
 
             compare_keys = jax.random.split(key_compare, len(compare_configs))
@@ -818,7 +818,7 @@ def main() -> None:
                     mask=cfg["mask"],
                     seed=seed,
                     key=cfg_key,
-                    n_sweeps=SWEEP_FACTOR_MPS_COMPARE * cfg["n_sites"],
+                    n_steps=SWEEP_FACTOR_MPS_COMPARE * cfg["n_sites"],
                 )
 
     if RUN_PEPS:
@@ -858,7 +858,7 @@ def main() -> None:
                 sampler=sampler_full,
                 key=key_hilbert,
                 n_samples=N_SAMPLES,
-                n_sweeps=n_sweeps_full_peps,
+                n_steps=n_steps_full_peps,
                 label=f"PEPS {shape_full[0]}x{shape_full[1]} seed={seed}",
             )
             run_energy_check(
@@ -872,7 +872,7 @@ def main() -> None:
                 mask=mask_full,
                 seed=seed,
                 key=key_energy,
-                n_sweeps=n_sweeps_full_peps,
+                n_steps=n_steps_full_peps,
             )
             peps_fullsum = PEPS(
                 rngs=nnx.Rngs(seed),
@@ -899,7 +899,7 @@ def main() -> None:
                 mask=mask_fullsum,
                 seed=seed,
                 key=key_full,
-                n_sweeps=n_sweeps_fullsum_peps,
+                n_steps=n_steps_fullsum_peps,
             )
 
             compare_keys = jax.random.split(key_compare, len(compare_configs))
@@ -929,7 +929,7 @@ def main() -> None:
                     mask=cfg["mask"],
                     seed=seed,
                     key=cfg_key,
-                    n_sweeps=SWEEP_FACTOR_PEPS_COMPARE * cfg["n_sites"],
+                    n_steps=SWEEP_FACTOR_PEPS_COMPARE * cfg["n_sites"],
                 )
 
 

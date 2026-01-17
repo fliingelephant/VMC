@@ -41,7 +41,9 @@ def minsr_demo_mps(
     logger.info("QGT matrix shape: %s", qgt.matrix.shape)
 
     # Solve with random RHS
-    dv = jax.random.normal(jax.random.key(seed + 1), (n_samples,), dtype=jnp.complex128)
+    dv = jax.random.normal(
+        jax.random.key(seed + 1), (n_samples,), dtype=jnp.complex128
+    )
     updates, _ = qgt.solve(dv, diag_shift, samples=samples)
     logger.info("Updates shape: %s", updates.shape)
 
@@ -75,7 +77,9 @@ def minsr_demo_peps(
     logger.info("QGT matrix shape: %s", qgt.matrix.shape)
 
     # Solve
-    dv = jax.random.normal(jax.random.key(seed + 1), (n_samples,), dtype=jnp.complex128)
+    dv = jax.random.normal(
+        jax.random.key(seed + 1), (n_samples,), dtype=jnp.complex128
+    )
     updates, _ = qgt.solve(dv, diag_shift, samples=samples)
     logger.info("Updates shape: %s", updates.shape)
 

@@ -3,15 +3,12 @@ from __future__ import annotations
 
 from VMC import config  # noqa: F401 - JAX config must be imported first
 
-import logging
 from typing import Callable, Iterator, Sequence
 
 import jax
 import jax.numpy as jnp
 
 from VMC.utils.utils import occupancy_to_spin, spin_to_occupancy  # noqa: F401
-
-logger = logging.getLogger(__name__)
 
 __all__ = [
     "DiscardBlockedSampler",
@@ -40,17 +37,8 @@ def build_neighbor_arrays(
     Returns:
         Tuple of (neighbors, mask) arrays with shape (num_sites, max_degree).
     """
-    if num_sites <= 0:
-        raise ValueError("num_sites must be positive.")
     adjacency = [set() for _ in range(num_sites)]
-    for edge in edges:
-        if len(edge) != 2:
-            raise ValueError(f"Edge must have two entries, got {edge}.")
-        u, v = edge
-        if u == v:
-            raise ValueError(f"Self-loop detected at {u}.")
-        if not (0 <= u < num_sites and 0 <= v < num_sites):
-            raise ValueError(f"Edge {edge} out of bounds for num_sites={num_sites}.")
+    for u, v in edges:
         adjacency[u].add(v)
         adjacency[v].add(u)
 
@@ -74,8 +62,6 @@ def build_neighbor_arrays(
 
 def grid_edges(n_rows: int, n_cols: int) -> list[tuple[int, int]]:
     """Return undirected edges for a 2D square lattice."""
-    if n_rows <= 0 or n_cols <= 0:
-        raise ValueError("grid dimensions must be positive.")
     edges = []
     for r in range(n_rows):
         for c in range(n_cols):
@@ -100,8 +86,6 @@ def _valid_row_masks(n_cols: int) -> tuple[list[int], jax.Array]:
 
 def enumerate_independent_sets_grid(n_rows: int, n_cols: int) -> jax.Array:
     """Enumerate all independent sets on a 2D grid as occupancies."""
-    if n_rows <= 0 or n_cols <= 0:
-        raise ValueError("grid dimensions must be positive.")
     masks, row_bits = _valid_row_masks(n_cols)
     sequences: list[tuple[int, ...]] = [()]
     for _ in range(n_rows):
@@ -133,8 +117,6 @@ def config_codes(samples: jax.Array) -> jax.Array:
 
 def enumerate_all_configs(num_sites: int) -> jax.Array:
     """Enumerate all 0/1 configurations for a given number of sites."""
-    if num_sites <= 0:
-        raise ValueError("num_sites must be positive.")
     shifts = jnp.arange(num_sites, dtype=jnp.uint32)
     indices = jnp.arange(1 << num_sites, dtype=jnp.uint32)
     occupancies = (indices[:, None] >> shifts) & jnp.uint32(1)
@@ -145,10 +127,6 @@ def all_config_batches(
     num_sites: int, *, batch_size: int
 ) -> Iterator[tuple[jax.Array, jax.Array]]:
     """Generate all configurations in batches as occupancies and codes."""
-    if num_sites <= 0:
-        raise ValueError("num_sites must be positive.")
-    if batch_size <= 0:
-        raise ValueError("batch_size must be positive.")
     total = 1 << num_sites
     shifts = jnp.arange(num_sites, dtype=jnp.uint32)
     for start in range(0, total, batch_size):
@@ -179,25 +157,14 @@ def _prepare_samples(
     init_samples: jax.Array | None,
     n_samples: int,
     num_sites: int,
-    neighbors: jax.Array,
-    mask: jax.Array,
 ) -> jax.Array:
-    """Initialize samples and validate independent-set constraints."""
+    """Initialize samples."""
     if init_samples is None:
         samples = jnp.zeros((n_samples, num_sites), dtype=jnp.int32)
     else:
         samples = jnp.asarray(init_samples, dtype=jnp.int32)
         if samples.ndim == 1:
             samples = jnp.tile(samples[None, :], (n_samples, 1))
-        if samples.shape != (n_samples, num_sites):
-            raise ValueError(
-                "init_samples must have shape "
-                f"({n_samples}, {num_sites}), got {samples.shape}."
-            )
-
-    violations = independent_set_violations(samples, neighbors, mask)
-    if bool(jnp.any(violations)):
-        raise ValueError("init_samples must contain only independent sets.")
     return samples
 
 
@@ -205,8 +172,6 @@ class IndependentSetSampler:
     """Standalone Metropolis-Hastings sampler for independent sets."""
 
     def __init__(self, num_sites: int, edges: Sequence[tuple[int, int]]):
-        if num_sites <= 0:
-            raise ValueError("num_sites must be positive.")
         self._num_sites = int(num_sites)
         self._neighbors, self._mask = build_neighbor_arrays(num_sites, edges)
 
@@ -219,18 +184,18 @@ class IndependentSetSampler:
         log_prob_fn: Callable[[jax.Array], jax.Array] | None,
         *,
         n_samples: int,
-        n_sweeps: int,
+        n_steps: int,
         key: jax.Array,
         init_samples: jax.Array | None = None,
         log_prob_is_batched: bool = True,
     ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
-        """Run blocked-aware Metropolis-Hastings sweeps.
+        """Run blocked-aware Metropolis-Hastings steps.
 
         Args:
             log_prob_fn: Callable returning log-probabilities for a batch of samples.
                 Use log |psi|^2 for VMC. If None, samples uniformly over independent sets.
             n_samples: Number of parallel chains.
-            n_sweeps: Number of Metropolis sweeps to run.
+            n_steps: Number of Metropolis steps to run.
             key: JAX PRNG key.
             init_samples: Optional initial samples with shape (n_samples, num_sites).
             log_prob_is_batched: If False, log_prob_fn is vmapped over samples.
@@ -238,11 +203,6 @@ class IndependentSetSampler:
         Returns:
             Tuple of (samples, log_prob, key, acceptance).
         """
-        if n_samples <= 0:
-            raise ValueError("n_samples must be positive.")
-        if n_sweeps <= 0:
-            raise ValueError("n_sweeps must be positive.")
-
         if log_prob_fn is None:
             def _zero_log_prob(batch_samples: jax.Array) -> jax.Array:
                 return jnp.zeros((batch_samples.shape[0],), dtype=jnp.float64)
@@ -253,13 +213,9 @@ class IndependentSetSampler:
             log_prob_fn = jax.vmap(log_prob_fn)
 
         samples = _prepare_samples(
-            init_samples, n_samples, self._num_sites, self._neighbors, self._mask
+            init_samples, n_samples, self._num_sites
         )
         log_prob = jnp.real(jnp.asarray(log_prob_fn(samples), dtype=jnp.float64))
-        if log_prob.shape != (samples.shape[0],):
-            raise ValueError(
-                f"log_prob must have shape ({samples.shape[0]},), got {log_prob.shape}."
-            )
 
         batch_idx = jnp.arange(n_samples)
 
@@ -267,7 +223,7 @@ class IndependentSetSampler:
             blocked = _blocked_counts(batch_samples, self._neighbors, self._mask)
             return (batch_samples == 1) | ((batch_samples == 0) & (blocked == 0))
 
-        def sweep(carry, _):
+        def step(carry, _):
             batch_samples, batch_log_prob, key_in = carry
             key_out, key_site, key_u = jax.random.split(key_in, 3)
 
@@ -282,11 +238,6 @@ class IndependentSetSampler:
             log_prob_prop = jnp.real(
                 jnp.asarray(log_prob_fn(proposed), dtype=jnp.float64)
             )
-            if log_prob_prop.shape != (batch_samples.shape[0],):
-                raise ValueError(
-                    "log_prob must have shape "
-                    f"({batch_samples.shape[0]},), got {log_prob_prop.shape}."
-                )
 
             flippable_prop = flippable_mask(proposed)
             n_flippable_prop = jnp.sum(flippable_prop, axis=-1).astype(jnp.float64)
@@ -306,7 +257,7 @@ class IndependentSetSampler:
             return (batch_samples, batch_log_prob, key_out), accept
 
         (samples, log_prob, key), accepts = jax.lax.scan(
-            sweep, (samples, log_prob, key), None, length=int(n_sweeps)
+            step, (samples, log_prob, key), None, length=int(n_steps)
         )
         acceptance = jnp.mean(accepts)
         return samples, log_prob, key, acceptance
@@ -316,8 +267,6 @@ class DiscardBlockedSampler:
     """Metropolis sampler that discards blocked proposals."""
 
     def __init__(self, num_sites: int, edges: Sequence[tuple[int, int]]):
-        if num_sites <= 0:
-            raise ValueError("num_sites must be positive.")
         self._num_sites = int(num_sites)
         self._neighbors, self._mask = build_neighbor_arrays(num_sites, edges)
 
@@ -330,39 +279,30 @@ class DiscardBlockedSampler:
         log_prob_fn: Callable[[jax.Array], jax.Array],
         *,
         n_samples: int,
-        n_sweeps: int,
+        n_steps: int,
         key: jax.Array,
         init_samples: jax.Array | None = None,
     ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
-        """Run Metropolis-Hastings sweeps with invalid moves rejected.
+        """Run Metropolis-Hastings steps with invalid moves rejected.
 
         Args:
             log_prob_fn: Callable returning log-probabilities for a batch of samples.
             n_samples: Number of parallel chains.
-            n_sweeps: Number of Metropolis sweeps to run.
+            n_steps: Number of Metropolis steps to run.
             key: JAX PRNG key.
             init_samples: Optional initial samples with shape (n_samples, num_sites).
 
         Returns:
             Tuple of (samples, log_prob, key, acceptance).
         """
-        if n_samples <= 0:
-            raise ValueError("n_samples must be positive.")
-        if n_sweeps <= 0:
-            raise ValueError("n_sweeps must be positive.")
-
         samples = _prepare_samples(
-            init_samples, n_samples, self._num_sites, self._neighbors, self._mask
+            init_samples, n_samples, self._num_sites
         )
         log_prob = jnp.real(jnp.asarray(log_prob_fn(samples), dtype=jnp.float64))
-        if log_prob.shape != (samples.shape[0],):
-            raise ValueError(
-                f"log_prob must have shape ({samples.shape[0]},), got {log_prob.shape}."
-            )
 
         batch_idx = jnp.arange(n_samples)
 
-        def sweep(carry, _):
+        def step(carry, _):
             batch_samples, batch_log_prob, key_in = carry
             key_out, key_site, key_u = jax.random.split(key_in, 3)
             site_idx = jax.random.randint(
@@ -376,11 +316,6 @@ class DiscardBlockedSampler:
             log_prob_prop = jnp.real(
                 jnp.asarray(log_prob_fn(proposed), dtype=jnp.float64)
             )
-            if log_prob_prop.shape != (batch_samples.shape[0],):
-                raise ValueError(
-                    "log_prob must have shape "
-                    f"({batch_samples.shape[0]},), got {log_prob_prop.shape}."
-                )
 
             log_accept = jnp.where(
                 invalid, -jnp.inf, log_prob_prop - batch_log_prob
@@ -393,7 +328,7 @@ class DiscardBlockedSampler:
             return (batch_samples, batch_log_prob, key_out), accept
 
         (samples, log_prob, key), accepts = jax.lax.scan(
-            sweep, (samples, log_prob, key), None, length=int(n_sweeps)
+            step, (samples, log_prob, key), None, length=int(n_steps)
         )
         acceptance = jnp.mean(accepts)
         return samples, log_prob, key, acceptance

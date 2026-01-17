@@ -1,121 +1,485 @@
-"""Quantum Geometric Tensor."""
+"""Quantum Geometric Tensor with lazy matvec."""
 from __future__ import annotations
 
-import functools
+from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
 from plum import dispatch
 
 from VMC import config  # noqa: F401
-from VMC.gauge import WeightConfig, compute_weight_projection
-from VMC.preconditioners import solve_cholesky
-from VMC.qgt.jacobian import Jacobian, SlicedJacobian, PhysicalOrdering, SiteOrdering
+from VMC.qgt.jacobian import (
+    Jacobian,
+    PhysicalOrdering,
+    SiteOrdering,
+    SlicedJacobian,
+    jacobian_mean,
+)
 
-__all__ = ["QGT"]
+__all__ = ["QGT", "DiagonalQGT", "ParameterSpace", "SampleSpace"]
 
 
+@dataclass(frozen=True)
+class ParameterSpace:
+    """O†O formulation (n_params x n_params)."""
+
+    pass
+
+
+@dataclass(frozen=True)
+class SampleSpace:
+    """OO† formulation (n_samples x n_samples)."""
+
+    pass
+
+
+@dataclass
 class QGT:
-    """Quantum Geometric Tensor supporting both spaces and Jacobian types."""
+    """Lazy quantum geometric tensor supporting full and sliced Jacobians."""
 
-    def __init__(self, jac: Jacobian | SlicedJacobian, space: str):
-        self.jac = jac
-        self.space = space
-        self.matrix = self._build_matrix()
+    jac: Jacobian | SlicedJacobian
+    space: ParameterSpace | SampleSpace = ParameterSpace()
 
-    def to_dense(self) -> jax.Array:
-        """Expand block-diagonal physical space O†O to full dense matrix."""
-        if not (isinstance(self.jac, SlicedJacobian) and self.space == "physical"):
-            return self.matrix
-        o, p, d = self.jac.o, self.jac.p, self.jac.phys_dim
-        n_s, n = o.shape
-        col = d * jnp.arange(n)[None, :] + p
-        O = jnp.zeros((n_s, d * n), dtype=o.dtype).at[jnp.arange(n_s)[:, None], col].set(o)
-        return O.conj().T @ O
+    def __matmul__(self, v):
+        """S @ v without building S explicitly."""
+        return _matvec(self.jac, self.space, v)
 
-    def _build_matrix(self) -> jax.Array:
-        if isinstance(self.jac, Jacobian):
-            O = self.jac.O
-            return O.conj().T @ O if self.space == "physical" else O @ O.conj().T
-        jac = self.jac
-        pps = _get_pps(jac.ordering, jac.o.shape[1])
-        if self.space == "sample":
-            return _build_OOdag(jac.o, jac.p, jac.phys_dim, pps)
-        return _build_OdagO(jac.o, jac.p, jac.phys_dim, pps)
+    def to_dense(self):
+        """Build explicit S matrix."""
+        return _to_dense(self.jac, self.space)
 
-    def solve(self, rhs: jax.Array, diag_shift: float, samples=None, project_null: bool = True):
-        """Solve (QGT + λI) @ x = rhs."""
-        if project_null and self.space == "sample":
-            if samples is None:
-                raise ValueError("samples required for null projection")
-            null = compute_weight_projection(WeightConfig(), samples)
-            q = _nullspace_from_vector(null)
-            T, rhs_proj = q.conj().T @ self.matrix @ q, q.conj().T @ (rhs - jnp.mean(rhs))
-        else:
-            q, T, rhs_proj = None, self.matrix, rhs
 
-        x = solve_cholesky(T + diag_shift * jnp.eye(T.shape[0], dtype=T.dtype), rhs_proj)
-        if q is not None:
-            x = q @ x
-        if self.space == "sample" and isinstance(self.jac, SlicedJacobian):
-            jac = self.jac
-            x = _recover(jac.o, jac.p, x, jac.phys_dim, _get_pps(jac.ordering, jac.o.shape[1]))
-        return x, {}
+@dataclass
+class DiagonalQGT:
+    """Block-diagonal approximation of the QGT in parameter space."""
+
+    jac: Jacobian | SlicedJacobian
+    space: ParameterSpace | SampleSpace = ParameterSpace()
+    params_per_site: tuple[int, ...] | None = None
+
+    def __matmul__(self, v):
+        return _diag_space_matvec(self.space, self.jac, v, self.params_per_site)
+
+    def to_dense(self):
+        return _diag_space_to_dense(self.space, self.jac, self.params_per_site)
 
 
 @dispatch
-def _get_pps(ordering: PhysicalOrdering, n: int) -> tuple[int, ...]:
-    return (n,)
+def _diag_space_matvec(
+    space: ParameterSpace,
+    jac: Jacobian | SlicedJacobian,
+    v: jax.Array,
+    params_per_site: tuple[int, ...] | None,
+) -> jax.Array:
+    _ = space
+    return _diag_matvec(jac, v, params_per_site)
+
 
 @dispatch
-def _get_pps(ordering: SiteOrdering, n: int) -> tuple[int, ...]:
+def _diag_space_matvec(
+    space: SampleSpace,
+    jac: Jacobian | SlicedJacobian,
+    v: jax.Array,
+    params_per_site: tuple[int, ...] | None,
+) -> jax.Array:
+    _ = (space, jac, v, params_per_site)
+    raise NotImplementedError("DiagonalQGT only supports ParameterSpace")
+
+
+@dispatch
+def _diag_space_to_dense(
+    space: ParameterSpace,
+    jac: Jacobian | SlicedJacobian,
+    params_per_site: tuple[int, ...] | None,
+) -> jax.Array:
+    _ = space
+    return _diag_to_dense(jac, params_per_site)
+
+
+@dispatch
+def _diag_space_to_dense(
+    space: SampleSpace,
+    jac: Jacobian | SlicedJacobian,
+    params_per_site: tuple[int, ...] | None,
+) -> jax.Array:
+    _ = (space, jac, params_per_site)
+    raise NotImplementedError("DiagonalQGT only supports ParameterSpace")
+
+
+@dispatch
+def _params_per_site(ordering: SiteOrdering, o: jax.Array) -> tuple[int, ...]:
     return ordering.params_per_site
 
 
-def _nullspace_from_vector(null: jax.Array) -> jax.Array:
-    """Build orthonormal basis orthogonal to null vector."""
-    null = null[:, None] / jnp.linalg.norm(null)
-    q, _ = jnp.linalg.qr(null, mode="complete")
-    return q[:, 1:]
+@dispatch
+def _params_per_site(ordering: PhysicalOrdering, o: jax.Array) -> tuple[int, ...]:
+    return (o.shape[1],)
 
 
-@functools.partial(jax.jit, static_argnames=("d", "pps"))
-def _build_OOdag(o, p, d: int, pps: tuple[int, ...]) -> jax.Array:
-    """OO† = Σ_{s,k} o_sk @ o_sk†."""
-    G = jnp.zeros((o.shape[0], o.shape[0]), dtype=o.dtype)
+@dispatch
+def _diag_params_per_site(
+    ordering: SiteOrdering, params_per_site: tuple[int, ...] | None
+) -> tuple[int, ...] | None:
+    return ordering.params_per_site
+
+
+@dispatch
+def _diag_params_per_site(
+    ordering: PhysicalOrdering, params_per_site: tuple[int, ...] | None
+) -> tuple[int, ...] | None:
+    return params_per_site
+
+
+@dispatch
+def _diag_matvec(
+    jac: Jacobian, v: jax.Array, params_per_site: tuple[int, ...] | None
+) -> jax.Array:
+    mean = jacobian_mean(jac)
+    result = jnp.zeros_like(v, dtype=jac.O.dtype)
     i = 0
-    for n in pps:
-        for k in range(d):
-            ok = jnp.where(p[:, i:i+n] == k, o[:, i:i+n], 0)
-            G = G + ok @ ok.conj().T
+    for n in params_per_site:
+        o_site = jac.O[:, i : i + n]
+        block = (o_site.conj().T @ (o_site @ v[i : i + n])) / jac.O.shape[0]
+        mean_block = mean[i : i + n]
+        block = block - mean_block.conj() * jnp.dot(mean_block, v[i : i + n])
+        result = result.at[i : i + n].set(block)
         i += n
-    return G
+    return result
 
 
-@functools.partial(jax.jit, static_argnames=("d", "pps"))
-def _build_OdagO(o, p, d: int, pps: tuple[int, ...]) -> jax.Array:
-    """O†O = Σ_{s,k} o_sk† @ o_sk (block diagonal)."""
+@dispatch
+def _diag_matvec(
+    jac: SlicedJacobian, v: jax.Array, params_per_site: tuple[int, ...] | None
+) -> jax.Array:
+    o, p, d = jac.o, jac.p, jac.phys_dim
+    pps = _diag_params_per_site(jac.ordering, params_per_site)
+    mean = jacobian_mean(jac)
+    return _diag_sliced_matvec(jac.ordering, o, p, v, pps, d, mean)
+
+
+@dispatch
+def _diag_to_dense(
+    jac: Jacobian, params_per_site: tuple[int, ...] | None
+) -> jax.Array:
+    mean = jacobian_mean(jac)
+    m = jac.O.shape[1]
+    S = jnp.zeros((m, m), dtype=jac.O.dtype)
+    i = 0
+    for n in params_per_site:
+        o_site = jac.O[:, i : i + n]
+        block = (o_site.conj().T @ o_site) / jac.O.shape[0]
+        mean_block = mean[i : i + n]
+        block = block - mean_block.conj()[:, None] * mean_block[None, :]
+        S = S.at[i : i + n, i : i + n].set(block)
+        i += n
+    return S
+
+
+@dispatch
+def _diag_to_dense(
+    jac: SlicedJacobian, params_per_site: tuple[int, ...] | None
+) -> jax.Array:
+    o, p, d = jac.o, jac.p, jac.phys_dim
+    pps = _diag_params_per_site(jac.ordering, params_per_site)
     m = sum(d * n for n in pps)
-    S = jnp.zeros((m, m), dtype=o.dtype)
+    mean = jacobian_mean(jac)
+    return _diag_sliced_to_dense(jac.ordering, o, p, pps, d, m, mean)
+
+
+@dispatch
+def _diag_sliced_matvec(
+    ordering: SiteOrdering,
+    o: jax.Array,
+    p: jax.Array,
+    v: jax.Array,
+    pps: tuple[int, ...],
+    phys_dim: int,
+    mean: jax.Array,
+) -> jax.Array:
+    result = jnp.zeros_like(v, dtype=o.dtype)
     i, j = 0, 0
     for n in pps:
-        for k in range(d):
-            ok = jnp.where(p[:, i:i+n] == k, o[:, i:i+n], 0)
-            S = S.at[j:j+n, j:j+n].set(ok.conj().T @ ok)
+        for k in range(phys_dim):
+            ok = jnp.where(p[:, i : i + n] == k, o[:, i : i + n], 0)
+            block = (ok.conj().T @ (ok @ v[j : j + n])) / o.shape[0]
+            mean_block = mean[j : j + n]
+            block = block - mean_block.conj() * jnp.dot(mean_block, v[j : j + n])
+            result = result.at[j : j + n].add(block)
+            j += n
+        i += n
+    return result
+
+
+@dispatch
+def _diag_sliced_matvec(
+    ordering: PhysicalOrdering,
+    o: jax.Array,
+    p: jax.Array,
+    v: jax.Array,
+    pps: tuple[int, ...],
+    phys_dim: int,
+    mean: jax.Array,
+) -> jax.Array:
+    total = sum(pps)
+    result = jnp.zeros_like(v, dtype=o.dtype)
+    site_offset = 0
+    for n in pps:
+        for k in range(phys_dim):
+            ok = jnp.where(
+                p[:, site_offset : site_offset + n] == k,
+                o[:, site_offset : site_offset + n],
+                0,
+            )
+            base = k * total + site_offset
+            block = (ok.conj().T @ (ok @ v[base : base + n])) / o.shape[0]
+            mean_block = mean[base : base + n]
+            block = block - mean_block.conj() * jnp.dot(mean_block, v[base : base + n])
+            result = result.at[base : base + n].add(block)
+        site_offset += n
+    return result
+
+
+@dispatch
+def _diag_sliced_to_dense(
+    ordering: SiteOrdering,
+    o: jax.Array,
+    p: jax.Array,
+    pps: tuple[int, ...],
+    phys_dim: int,
+    size: int,
+    mean: jax.Array,
+) -> jax.Array:
+    S = jnp.zeros((size, size), dtype=o.dtype)
+    i, j = 0, 0
+    for n in pps:
+        for k in range(phys_dim):
+            ok = jnp.where(p[:, i : i + n] == k, o[:, i : i + n], 0)
+            block = (ok.conj().T @ ok) / o.shape[0]
+            mean_block = mean[j : j + n]
+            block = block - mean_block.conj()[:, None] * mean_block[None, :]
+            S = S.at[j : j + n, j : j + n].set(block)
             j += n
         i += n
     return S
 
 
-@functools.partial(jax.jit, static_argnames=("d", "pps"))
-def _recover(o, p, y, d: int, pps: tuple[int, ...]) -> jax.Array:
-    """O† @ y."""
-    u = jnp.zeros(sum(d * n for n in pps), dtype=o.dtype)
-    i, j = 0, 0
+@dispatch
+def _diag_sliced_to_dense(
+    ordering: PhysicalOrdering,
+    o: jax.Array,
+    p: jax.Array,
+    pps: tuple[int, ...],
+    phys_dim: int,
+    size: int,
+    mean: jax.Array,
+) -> jax.Array:
+    S = jnp.zeros((size, size), dtype=o.dtype)
+    total = sum(pps)
+    site_offset = 0
+    for n in pps:
+        for k in range(phys_dim):
+            ok = jnp.where(
+                p[:, site_offset : site_offset + n] == k,
+                o[:, site_offset : site_offset + n],
+                0,
+            )
+            block = (ok.conj().T @ ok) / o.shape[0]
+            base = k * total + site_offset
+            mean_block = mean[base : base + n]
+            block = block - mean_block.conj()[:, None] * mean_block[None, :]
+            S = S.at[base : base + n, base : base + n].set(block)
+        site_offset += n
+    return S
+
+
+def _iter_sliced_blocks(
+    o: jax.Array,
+    p: jax.Array,
+    phys_dim: int,
+    pps: tuple[int, ...],
+):
+    i = 0
+    for n in pps:
+        for k in range(phys_dim):
+            ok = jnp.where(p[:, i : i + n] == k, o[:, i : i + n], 0)
+            yield ok, n
+        i += n
+
+
+def _sliced_forward_matvec(jac: SlicedJacobian, v: jax.Array) -> jax.Array:
+    o, p, d = jac.o, jac.p, jac.phys_dim
+    pps = _params_per_site(jac.ordering, o)
+    result = jnp.zeros((o.shape[0],), dtype=o.dtype)
+    offset = 0
+    for ok, n in _iter_sliced_blocks(o, p, d, pps):
+        result = result + ok @ v[offset : offset + n]
+        offset += n
+    return result
+
+
+def _sliced_adjoint_matvec(jac: SlicedJacobian, v: jax.Array) -> jax.Array:
+    o, p, d = jac.o, jac.p, jac.phys_dim
+    pps = _params_per_site(jac.ordering, o)
+    parts = [ok.conj().T @ v for ok, _ in _iter_sliced_blocks(o, p, d, pps)]
+    return jnp.concatenate(parts, axis=0)
+
+
+def _sliced_dense_blocks(
+    o: jax.Array,
+    p: jax.Array,
+    phys_dim: int,
+    pps: tuple[int, ...],
+) -> jax.Array:
+    blocks = [ok for ok, _ in _iter_sliced_blocks(o, p, phys_dim, pps)]
+    return jnp.concatenate(blocks, axis=1)
+
+
+@dispatch
+def _sliced_dense(
+    ordering: PhysicalOrdering,
+    o: jax.Array,
+    p: jax.Array,
+    phys_dim: int,
+    pps: tuple[int, ...],
+) -> jax.Array:
+    _ = ordering
+    return _sliced_dense_blocks(o, p, phys_dim, pps)
+
+
+@dispatch
+def _sliced_dense(
+    ordering: SiteOrdering,
+    o: jax.Array,
+    p: jax.Array,
+    phys_dim: int,
+    pps: tuple[int, ...],
+) -> jax.Array:
+    _ = ordering
+    return _sliced_dense_blocks(o, p, phys_dim, pps)
+
+
+# --------------------------------------------------------------------------- #
+# Matvec dispatch
+# --------------------------------------------------------------------------- #
+
+
+@dispatch
+def _matvec(jac: Jacobian, space: ParameterSpace, v):
+    scale = 1.0 / jac.O.shape[0]
+    result = (jac.O.conj().T @ (jac.O @ v)) * scale
+    mean = jacobian_mean(jac)
+    result = result - mean.conj() * jnp.dot(mean, v)
+    return result
+
+
+@dispatch
+def _matvec(jac: Jacobian, space: SampleSpace, v):
+    scale = 1.0 / jac.O.shape[0]
+    result = (jac.O @ (jac.O.conj().T @ v)) * scale
+    mean = jacobian_mean(jac)
+    ones = jnp.ones((jac.O.shape[0],), dtype=result.dtype)
+    v_sum = jnp.sum(v)
+    w = jac.O @ mean.conj()
+    result = result - w * (v_sum * scale)
+    result = result - ones * (jnp.vdot(w, v) * scale)
+    result = result + ones * (jnp.vdot(mean, mean) * v_sum * scale)
+    return result
+
+
+@dispatch
+def _matvec(jac: SlicedJacobian, space: ParameterSpace, v):
+    o = jac.o
+    result = _sliced_adjoint_matvec(jac, _sliced_forward_matvec(jac, v))
+    scale = 1.0 / o.shape[0]
+    result = result * scale
+    mean = jacobian_mean(jac)
+    result = result - mean.conj() * jnp.dot(mean, v)
+    return result
+
+
+@dispatch
+def _matvec(jac: SlicedJacobian, space: SampleSpace, v):
+    o, p, d = jac.o, jac.p, jac.phys_dim
+    pps = _params_per_site(jac.ordering, o)
+    result = jnp.zeros_like(v, dtype=o.dtype)
+    i = 0
     for n in pps:
         for k in range(d):
-            ok = jnp.where(p[:, i:i+n] == k, o[:, i:i+n], 0)
-            u = u.at[j:j+n].set(ok.conj().T @ y)
-            j += n
+            ok = jnp.where(p[:, i : i + n] == k, o[:, i : i + n], 0)
+            result = result + ok @ (ok.conj().T @ v)
         i += n
-    return u
+    scale = 1.0 / o.shape[0]
+    result = result * scale
+    mean = jacobian_mean(jac)
+    ones = jnp.ones((o.shape[0],), dtype=result.dtype)
+    v_sum = jnp.sum(v)
+    w = _sliced_forward_matvec(jac, mean.conj())
+    result = result - w * (v_sum * scale)
+    result = result - ones * (jnp.vdot(w, v) * scale)
+    result = result + ones * (jnp.vdot(mean, mean) * v_sum * scale)
+    return result
+
+
+# --------------------------------------------------------------------------- #
+# to_dense dispatch
+# --------------------------------------------------------------------------- #
+
+
+@dispatch
+def _to_dense(jac: Jacobian, space: ParameterSpace):
+    scale = 1.0 / jac.O.shape[0]
+    S = (jac.O.conj().T @ jac.O) * scale
+    mean = jacobian_mean(jac)
+    S = S - mean.conj()[:, None] * mean[None, :]
+    return S
+
+
+@dispatch
+def _to_dense(jac: Jacobian, space: SampleSpace):
+    scale = 1.0 / jac.O.shape[0]
+    G = (jac.O @ jac.O.conj().T) * scale
+    mean = jacobian_mean(jac)
+    ones = jnp.ones((jac.O.shape[0],), dtype=G.dtype)
+    w = jac.O @ mean.conj()
+    G = G - (w[:, None] * ones[None, :]) * scale
+    G = G - (ones[:, None] * w.conj()[None, :]) * scale
+    G = G + (jnp.vdot(mean, mean) * scale) * (
+        ones[:, None] * ones[None, :]
+    )
+    return G
+
+
+@dispatch
+def _to_dense(jac: SlicedJacobian, space: ParameterSpace):
+    o, p, d = jac.o, jac.p, jac.phys_dim
+    pps = _params_per_site(jac.ordering, o)
+    O = _sliced_dense(jac.ordering, o, p, d, pps)
+    scale = 1.0 / o.shape[0]
+    S = (O.conj().T @ O) * scale
+    mean = jacobian_mean(jac)
+    S = S - mean.conj()[:, None] * mean[None, :]
+    return S
+
+
+@dispatch
+def _to_dense(jac: SlicedJacobian, space: SampleSpace):
+    o, p, d = jac.o, jac.p, jac.phys_dim
+    pps = _params_per_site(jac.ordering, o)
+    G = jnp.zeros((o.shape[0], o.shape[0]), dtype=o.dtype)
+    i = 0
+    for n in pps:
+        for k in range(d):
+            ok = jnp.where(p[:, i : i + n] == k, o[:, i : i + n], 0)
+            G = G + ok @ ok.conj().T
+        i += n
+    scale = 1.0 / o.shape[0]
+    G = G * scale
+    mean = jacobian_mean(jac)
+    ones = jnp.ones((o.shape[0],), dtype=G.dtype)
+    w = _sliced_forward_matvec(jac, mean.conj())
+    G = G - (w[:, None] * ones[None, :]) * scale
+    G = G - (ones[:, None] * w.conj()[None, :]) * scale
+    G = G + (jnp.vdot(mean, mean) * scale) * (
+        ones[:, None] * ones[None, :]
+    )
+    return G

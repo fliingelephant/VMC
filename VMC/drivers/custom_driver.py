@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 import jax
 import jax.numpy as jnp
 from netket import stats as nkstats
+from flax import nnx
 from tqdm.auto import tqdm
 
 from VMC.preconditioners import SRPreconditioner
@@ -192,7 +193,7 @@ class DynamicsDriver:
         return self.operator
 
     def _time_derivative(self, params: Any, t: float, *, stage: int) -> Any:
-        self._set_model_params(params)
+        self._assign_params(self.model.tensors, params)
         result = self.sampler(self.model, key=self._sampler_key)
         if len(result) == 4:
             samples, o, p, self._sampler_key = result
@@ -247,17 +248,22 @@ class DynamicsDriver:
     def _get_model_params(self) -> Any:
         return jax.tree_util.tree_map(jnp.asarray, self.model.tensors)
 
-    def _set_model_params(self, params: Any) -> None:
-        flat_params, _ = jax.tree_util.tree_flatten(params)
-        flat_tensors = jax.tree_util.tree_leaves(self.model.tensors)
-        for tensor, value in zip(flat_tensors, flat_params):
-            tensor.value = value
+    @staticmethod
+    def _assign_params(target: Any, values: Any) -> None:
+        if isinstance(target, (list, tuple, nnx.List)):
+            for target_item, value_item in zip(target, values):
+                DynamicsDriver._assign_params(target_item, value_item)
+            return
+        if isinstance(target, nnx.Variable):
+            target.copy_from(values)
+            return
+        target[...] = values
 
     def step(self, dt: float | None = None) -> None:
         dt_step = self.dt if dt is None else float(dt)
         params = self._get_model_params()
         params_new = self.integrator.step(self, params, self.t, dt_step)
-        self._set_model_params(params_new)
+        self._assign_params(self.model.tensors, params)
         self.t += dt_step
         self.step_count += 1
 

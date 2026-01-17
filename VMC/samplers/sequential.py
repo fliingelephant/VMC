@@ -4,6 +4,7 @@ from __future__ import annotations
 from VMC import config  # noqa: F401 - JAX config must be imported first
 
 import functools
+import math
 
 import jax
 import jax.numpy as jnp
@@ -23,6 +24,7 @@ from VMC.models.peps import (
     _contract_left_partial,
     _contract_right_partial,
 )
+from VMC.utils.utils import occupancy_to_spin
 
 __all__ = [
     "sequential_sample",
@@ -182,6 +184,7 @@ def sequential_sample(
     model: MPS,
     *,
     n_samples: int = 1,
+    n_chains: int = 1,
     key: jax.Array,
     burn_in: int = 0,
     progress_interval: int | None = None,
@@ -189,17 +192,26 @@ def sequential_sample(
 ) -> jax.Array | tuple[jax.Array, jax.Array]:
     """Sequential sampling for MPS using Metropolis sweeps.
 
-    Records one sample per sweep. ``n_samples`` counts recorded sweeps; burn-in
-    sweeps are not recorded. ``progress_interval`` counts samples.
+    Records one sample per sweep. ``n_samples`` counts recorded sweeps across
+    chains; burn-in sweeps are not recorded. ``progress_interval`` counts samples.
     """
     num_samples = int(n_samples)
+    num_chains = int(n_chains)
     num_burn_in = int(burn_in)
     tensors = [jnp.asarray(t) for t in model.tensors]
     n_sites = len(tensors)
     tensors_padded = _pad_mps_tensors(tensors, model.bond_dim)
 
-    key, subkey = jax.random.split(key)
-    indices = jax.random.bernoulli(subkey, 0.5, shape=(n_sites,)).astype(jnp.int32)
+    chain_length = int(math.ceil(num_samples / num_chains))
+    total_samples = chain_length * num_chains
+
+    key, init_key = jax.random.split(key)
+    key, chain_key = jax.random.split(key)
+    init_keys = jax.random.split(init_key, num_chains)
+    indices = jax.vmap(
+        lambda k: jax.random.bernoulli(k, 0.5, shape=(n_sites,)).astype(jnp.int32)
+    )(init_keys)
+    chain_keys = jax.random.split(chain_key, num_chains)
 
     def sweep_once(indices, key):
         return _sequential_mps_sweep(
@@ -209,27 +221,26 @@ def sequential_sample(
             n_sites=n_sites,
         )
 
-    indices, key = _run_sweeps(sweep_once, indices, key, num_burn_in)
+    sweep_batched = jax.vmap(sweep_once, in_axes=(0, 0))
+    indices, chain_keys = _run_sweeps(
+        sweep_batched, indices, chain_keys, num_burn_in
+    )
 
     def sample_step(carry, _):
-        indices, key = carry
-        indices, key = _sequential_mps_sweep(
-            tensors_padded,
-            indices,
-            key=key,
-            n_sites=n_sites,
-        )
-        return (indices, key), indices
+        indices, chain_keys = carry
+        indices, chain_keys = sweep_batched(indices, chain_keys)
+        return (indices, chain_keys), indices
 
-    (_, key), samples = _collect_steps(
+    (_, _), samples = _collect_steps(
         sample_step,
-        (indices, key),
-        num_samples,
+        (indices, chain_keys),
+        chain_length,
         progress_interval,
         "Sequential sampling",
     )
-    spins_batch = samples
-    spins_batch = (2 * spins_batch - 1).astype(jnp.int32)
+    # TODO: properly distribute n_samples, avoid sampling overhead.
+    samples = samples.reshape(total_samples, n_sites)[:num_samples]
+    spins_batch = occupancy_to_spin(samples)
     if return_key:
         return spins_batch, key
     return spins_batch
@@ -240,6 +251,7 @@ def sequential_sample(
     model: PEPS,
     *,
     n_samples: int = 1,
+    n_chains: int = 1,
     key: jax.Array,
     burn_in: int = 0,
     progress_interval: int | None = None,
@@ -247,18 +259,27 @@ def sequential_sample(
 ) -> jax.Array | tuple[jax.Array, jax.Array]:
     """Sequential sampling for PEPS using Metropolis sweeps.
 
-    Records one sample per sweep. ``n_samples`` counts recorded sweeps; burn-in
-    sweeps are not recorded. ``progress_interval`` counts samples.
+    Records one sample per sweep. ``n_samples`` counts recorded sweeps across
+    chains; burn-in sweeps are not recorded. ``progress_interval`` counts samples.
     """
     num_samples = int(n_samples)
+    num_chains = int(n_chains)
     num_burn_in = int(burn_in)
     shape = model.shape
     n_rows, n_cols = shape
     n_sites = int(n_rows * n_cols)
     tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
 
-    key, subkey = jax.random.split(key)
-    spins = jax.random.bernoulli(subkey, 0.5, shape=shape).astype(jnp.int32)
+    chain_length = int(math.ceil(num_samples / num_chains))
+    total_samples = chain_length * num_chains
+
+    key, init_key = jax.random.split(key)
+    key, chain_key = jax.random.split(key)
+    init_keys = jax.random.split(init_key, num_chains)
+    spins = jax.vmap(
+        lambda k: jax.random.bernoulli(k, 0.5, shape=shape).astype(jnp.int32)
+    )(init_keys)
+    chain_keys = jax.random.split(chain_key, num_chains)
 
     def sweep_once(spins, key):
         return peps_sequential_sweep(
@@ -269,27 +290,26 @@ def sequential_sample(
             key,
         )
 
-    spins, key = _run_sweeps(sweep_once, spins, key, num_burn_in)
+    sweep_batched = jax.vmap(sweep_once, in_axes=(0, 0))
+    spins, chain_keys = _run_sweeps(
+        sweep_batched, spins, chain_keys, num_burn_in
+    )
 
     def sample_step(carry, _):
-        spins, key = carry
-        spins, key = peps_sequential_sweep(
-            tensors,
-            spins,
-            shape,
-            model.strategy,
-            key,
-        )
-        return (spins, key), spins.reshape(n_sites)
+        spins, chain_keys = carry
+        spins, chain_keys = sweep_batched(spins, chain_keys)
+        return (spins, chain_keys), spins.reshape(num_chains, n_sites)
 
-    (_, key), samples = _collect_steps(
+    (_, _), samples = _collect_steps(
         sample_step,
-        (spins, key),
-        num_samples,
+        (spins, chain_keys),
+        chain_length,
         progress_interval,
         "Sequential sampling",
     )
-    samples = (2 * samples - 1).astype(jnp.int32)
+    # TODO: properly distribute n_samples, avoid sampling overhead.
+    samples = samples.reshape(total_samples, n_sites)[:num_samples]
+    samples = occupancy_to_spin(samples)
     if return_key:
         return samples, key
     return samples
@@ -300,6 +320,7 @@ def sequential_sample_with_gradients(
     model: MPS,
     *,
     n_samples: int = 1,
+    n_chains: int = 1,
     key: jax.Array,
     burn_in: int = 0,
     progress_interval: int | None = None,
@@ -311,9 +332,10 @@ def sequential_sample_with_gradients(
 ):
     """Sequential sampling for MPS with per-sample gradient recording.
 
-    Total samples are ``n_samples`` (burn-in sweeps are not recorded).
+    Total samples are ``n_samples`` across chains (burn-in sweeps are not recorded).
     """
     num_samples = int(n_samples)
+    num_chains = int(n_chains)
     num_burn_in = int(burn_in)
     tensors = [jnp.asarray(t) for t in model.tensors]
     n_sites = len(tensors)
@@ -321,20 +343,42 @@ def sequential_sample_with_gradients(
     phys_dim = model.phys_dim
     tensors_padded = _pad_mps_tensors(tensors, bond_dim)
 
-    key, subkey = jax.random.split(key)
-    indices = jax.random.bernoulli(subkey, 0.5, shape=(n_sites,)).astype(jnp.int32)
-    right_envs = _mps_right_envs(tensors_padded, indices, n_sites=n_sites)
+    chain_length = int(math.ceil(num_samples / num_chains))
+    total_samples = chain_length * num_chains
+
+    key, init_key = jax.random.split(key)
+    key, chain_key = jax.random.split(key)
+    init_keys = jax.random.split(init_key, num_chains)
+    indices = jax.vmap(
+        lambda k: jax.random.bernoulli(k, 0.5, shape=(n_sites,)).astype(jnp.int32)
+    )(init_keys)
+    chain_keys = jax.random.split(chain_key, num_chains)
+    right_envs = jax.vmap(
+        lambda idx: _mps_right_envs(tensors_padded, idx, n_sites=n_sites)
+    )(indices)
+
+    def sweep_with_envs(indices, chain_keys, right_envs, collect_left_envs):
+        def sweep_single(idx, key, right_env):
+            return _sequential_mps_sweep_with_envs(
+                tensors_padded,
+                idx,
+                right_env,
+                key=key,
+                n_sites=n_sites,
+                collect_left_envs=collect_left_envs,
+            )
+
+        return jax.vmap(sweep_single, in_axes=(0, 0, 0))(
+            indices, chain_keys, right_envs
+        )
 
     for _ in range(num_burn_in):
-        indices, key, _, _ = _sequential_mps_sweep_with_envs(
-            tensors_padded,
-            indices,
-            right_envs,
-            key=key,
-            n_sites=n_sites,
-            collect_left_envs=False,
+        indices, chain_keys, _, _ = sweep_with_envs(
+            indices, chain_keys, right_envs, False
         )
-        right_envs = _mps_right_envs(tensors_padded, indices, n_sites=n_sites)
+        right_envs = jax.vmap(
+            lambda idx: _mps_right_envs(tensors_padded, idx, n_sites=n_sites)
+        )(indices)
 
     def flatten_full_gradients(indices, left_envs, right_envs):
         grad_parts = []
@@ -367,64 +411,68 @@ def sequential_sample_with_gradients(
 
     if full_gradient:
         def sample_step(carry, _):
-            indices, key, right_envs = carry
-            indices, key, left_envs, left_env = _sequential_mps_sweep_with_envs(
-                tensors_padded,
-                indices,
-                right_envs,
-                key=key,
-                n_sites=n_sites,
-                collect_left_envs=True,
+            indices, chain_keys, right_envs = carry
+            indices, chain_keys, left_envs, left_env = sweep_with_envs(
+                indices, chain_keys, right_envs, True
             )
-            right_envs_next = _mps_right_envs(
-                tensors_padded, indices, n_sites=n_sites
-            )
-            amp = left_env[0]
-            grad_row = flatten_full_gradients(
+            right_envs_next = jax.vmap(
+                lambda idx: _mps_right_envs(tensors_padded, idx, n_sites=n_sites)
+            )(indices)
+            amp = left_env[:, 0]
+            grad_row = jax.vmap(flatten_full_gradients)(
                 indices, left_envs, right_envs_next
-            ) / amp
-            sample = (2 * indices - 1).astype(jnp.int32)
+            )
+            grad_row = grad_row / amp[:, None]
+            sample = indices
             prob = jnp.abs(amp) ** 2
-            return (indices, key, right_envs_next), (sample, grad_row, prob)
+            return (indices, chain_keys, right_envs_next), (sample, grad_row, prob)
 
-        (_, key, _), (samples, grads, probs) = _collect_steps(
+        (_, _, _), (samples, grads, probs) = _collect_steps(
             sample_step,
-            (indices, key, right_envs),
-            num_samples,
+            (indices, chain_keys, right_envs),
+            chain_length,
             progress_interval,
             "Sequential sampling",
         )
         p = None
     else:
         def sample_step(carry, _):
-            indices, key, right_envs = carry
-            indices, key, left_envs, left_env = _sequential_mps_sweep_with_envs(
-                tensors_padded,
-                indices,
-                right_envs,
-                key=key,
-                n_sites=n_sites,
-                collect_left_envs=True,
+            indices, chain_keys, right_envs = carry
+            indices, chain_keys, left_envs, left_env = sweep_with_envs(
+                indices, chain_keys, right_envs, True
             )
-            right_envs_next = _mps_right_envs(
-                tensors_padded, indices, n_sites=n_sites
-            )
-            amp = left_env[0]
-            grad_row, p_row = flatten_sliced_gradients(
+            right_envs_next = jax.vmap(
+                lambda idx: _mps_right_envs(tensors_padded, idx, n_sites=n_sites)
+            )(indices)
+            amp = left_env[:, 0]
+            grad_row, p_row = jax.vmap(flatten_sliced_gradients)(
                 indices, left_envs, right_envs_next
             )
-            grad_row = grad_row / amp
-            sample = (2 * indices - 1).astype(jnp.int32)
+            grad_row = grad_row / amp[:, None]
+            sample = indices
             prob = jnp.abs(amp) ** 2
-            return (indices, key, right_envs_next), (sample, grad_row, p_row, prob)
+            return (indices, chain_keys, right_envs_next), (
+                sample,
+                grad_row,
+                p_row,
+                prob,
+            )
 
-        (_, key, _), (samples, grads, p, probs) = _collect_steps(
+        (_, _, _), (samples, grads, p, probs) = _collect_steps(
             sample_step,
-            (indices, key, right_envs),
-            num_samples,
+            (indices, chain_keys, right_envs),
+            chain_length,
             progress_interval,
             "Sequential sampling",
         )
+
+    # TODO: properly distribute n_samples, avoid sampling overhead.
+    samples = samples.reshape(total_samples, n_sites)[:num_samples]
+    samples = occupancy_to_spin(samples)
+    grads = grads.reshape(total_samples, -1)[:num_samples]
+    probs = probs.reshape(total_samples)[:num_samples]
+    if p is not None:
+        p = p.reshape(total_samples, -1)[:num_samples]
 
     info = {"prob": probs} if return_prob else None
     if info is None:
@@ -437,6 +485,7 @@ def sequential_sample_with_gradients(
     model: PEPS,
     *,
     n_samples: int = 1,
+    n_chains: int = 1,
     key: jax.Array,
     burn_in: int = 0,
     progress_interval: int | None = None,
@@ -448,9 +497,10 @@ def sequential_sample_with_gradients(
 ):
     """Sequential sampling for PEPS with per-sample gradient recording.
 
-    Total samples are ``n_samples`` (burn-in sweeps are not recorded).
+    Total samples are ``n_samples`` across chains (burn-in sweeps are not recorded).
     """
     num_samples = int(n_samples)
+    num_chains = int(n_chains)
     num_burn_in = int(burn_in)
     shape = model.shape
     n_rows, n_cols = shape
@@ -459,21 +509,43 @@ def sequential_sample_with_gradients(
     bond_dim = model.bond_dim
     dtype = tensors[0][0].dtype
 
-    key, subkey = jax.random.split(key)
-    spins = jax.random.bernoulli(subkey, 0.5, shape=shape).astype(jnp.int32)
-    bottom_envs = _peps_bottom_envs(tensors, spins, shape, model.strategy)
+    chain_length = int(math.ceil(num_samples / num_chains))
+    total_samples = chain_length * num_chains
+
+    key, init_key = jax.random.split(key)
+    key, chain_key = jax.random.split(key)
+    init_keys = jax.random.split(init_key, num_chains)
+    spins = jax.vmap(
+        lambda k: jax.random.bernoulli(k, 0.5, shape=shape).astype(jnp.int32)
+    )(init_keys)
+    chain_keys = jax.random.split(chain_key, num_chains)
+    bottom_envs = jax.vmap(
+        lambda s: _peps_bottom_envs(tensors, s, shape, model.strategy)
+    )(spins)
+
+    def sweep_with_envs(spins, chain_keys, bottom_envs, collect_top_envs):
+        def sweep_single(s, key, envs):
+            return _peps_sequential_sweep_with_envs(
+                tensors,
+                s,
+                shape,
+                model.strategy,
+                key,
+                envs,
+                collect_top_envs,
+            )
+
+        return jax.vmap(sweep_single, in_axes=(0, 0, 0))(
+            spins, chain_keys, bottom_envs
+        )
 
     for _ in range(num_burn_in):
-        spins, key, _, _ = _peps_sequential_sweep_with_envs(
-            tensors,
-            spins,
-            shape,
-            model.strategy,
-            key,
-            bottom_envs,
-            False,
+        spins, chain_keys, _, _ = sweep_with_envs(
+            spins, chain_keys, bottom_envs, False
         )
-        bottom_envs = _peps_bottom_envs(tensors, spins, shape, model.strategy)
+        bottom_envs = jax.vmap(
+            lambda s: _peps_bottom_envs(tensors, s, shape, model.strategy)
+        )(spins)
 
     def build_gradients(spins, top_envs):
         bottom_env = _peps_boundary_mps(n_cols, dtype)
@@ -516,58 +588,60 @@ def sequential_sample_with_gradients(
 
     if full_gradient:
         def sample_step(carry, _):
-            spins, key, bottom_envs = carry
-            spins, key, top_envs, top_env = _peps_sequential_sweep_with_envs(
-                tensors,
-                spins,
-                shape,
-                model.strategy,
-                key,
-                bottom_envs,
-                True,
+            spins, chain_keys, bottom_envs = carry
+            spins, chain_keys, top_envs, top_env = sweep_with_envs(
+                spins, chain_keys, bottom_envs, True
             )
-            amp = _contract_bottom_static(top_env)
-            env_grads, bottom_envs_next = build_gradients(spins, top_envs)
-            grad_row = flatten_full_gradients(env_grads, spins) / amp
-            sample = (2 * spins.reshape(n_sites) - 1).astype(jnp.int32)
+            amp = jax.vmap(_contract_bottom_static)(top_env)
+            env_grads, bottom_envs_next = jax.vmap(build_gradients)(spins, top_envs)
+            grad_row = jax.vmap(flatten_full_gradients)(env_grads, spins)
+            grad_row = grad_row / amp[:, None]
+            sample = spins.reshape(num_chains, n_sites)
             prob = jnp.abs(amp) ** 2
-            return (spins, key, bottom_envs_next), (sample, grad_row, prob)
+            return (spins, chain_keys, bottom_envs_next), (sample, grad_row, prob)
 
-        (_, key, _), (samples, grads, probs) = _collect_steps(
+        (_, _, _), (samples, grads, probs) = _collect_steps(
             sample_step,
-            (spins, key, bottom_envs),
-            num_samples,
+            (spins, chain_keys, bottom_envs),
+            chain_length,
             progress_interval,
             "Sequential sampling",
         )
         p = None
     else:
         def sample_step(carry, _):
-            spins, key, bottom_envs = carry
-            spins, key, top_envs, top_env = _peps_sequential_sweep_with_envs(
-                tensors,
-                spins,
-                shape,
-                model.strategy,
-                key,
-                bottom_envs,
-                True,
+            spins, chain_keys, bottom_envs = carry
+            spins, chain_keys, top_envs, top_env = sweep_with_envs(
+                spins, chain_keys, bottom_envs, True
             )
-            amp = _contract_bottom_static(top_env)
-            env_grads, bottom_envs_next = build_gradients(spins, top_envs)
-            grad_row, p_row = flatten_sliced_gradients(env_grads, spins)
-            grad_row = grad_row / amp
-            sample = (2 * spins.reshape(n_sites) - 1).astype(jnp.int32)
+            amp = jax.vmap(_contract_bottom_static)(top_env)
+            env_grads, bottom_envs_next = jax.vmap(build_gradients)(spins, top_envs)
+            grad_row, p_row = jax.vmap(flatten_sliced_gradients)(env_grads, spins)
+            grad_row = grad_row / amp[:, None]
+            sample = spins.reshape(num_chains, n_sites)
             prob = jnp.abs(amp) ** 2
-            return (spins, key, bottom_envs_next), (sample, grad_row, p_row, prob)
+            return (spins, chain_keys, bottom_envs_next), (
+                sample,
+                grad_row,
+                p_row,
+                prob,
+            )
 
-        (_, key, _), (samples, grads, p, probs) = _collect_steps(
+        (_, _, _), (samples, grads, p, probs) = _collect_steps(
             sample_step,
-            (spins, key, bottom_envs),
-            num_samples,
+            (spins, chain_keys, bottom_envs),
+            chain_length,
             progress_interval,
             "Sequential sampling",
         )
+
+    # TODO: properly distribute n_samples, avoid sampling overhead.
+    samples = samples.reshape(total_samples, n_sites)[:num_samples]
+    samples = occupancy_to_spin(samples)
+    grads = grads.reshape(total_samples, -1)[:num_samples]
+    probs = probs.reshape(total_samples)[:num_samples]
+    if p is not None:
+        p = p.reshape(total_samples, -1)[:num_samples]
 
     info = {"prob": probs} if return_prob else None
     if info is None:

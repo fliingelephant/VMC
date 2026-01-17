@@ -34,6 +34,8 @@ class QGTOperator(LinearOperator):
         self, solve_fun: Callable, y: PyTree, *, x0: PyTree | None = None
     ) -> tuple[PyTree, Any]:
         y_flat, unravel = jax.flatten_util.ravel_pytree(y)
+        if x0 is not None:
+            x0 = jax.flatten_util.ravel_pytree(x0)[0]
         out, info = solve_fun(self, y_flat, x0=x0)
         return unravel(out), info
 

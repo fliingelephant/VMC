@@ -494,11 +494,6 @@ def make_peps_amplitude(
     Returns:
         A function `(tensors, sample) -> amplitude` with a custom VJP.
     """
-    if not isinstance(strategy, ContractionStrategy):
-        raise TypeError(
-            "strategy must be a ContractionStrategy instance, "
-            f"got {type(strategy)}"
-        )
 
     @jax.custom_vjp
     def amplitude_fn(tensors: Any, sample: jax.Array) -> jax.Array:
@@ -576,11 +571,6 @@ class PEPS(nnx.Module):
         if contraction_strategy is None:
             contraction_strategy = ZipUp(
                 truncate_bond_dimension=self.bond_dim * self.bond_dim
-            )
-        if not isinstance(contraction_strategy, ContractionStrategy):
-            raise TypeError(
-                "contraction_strategy must be a ContractionStrategy instance, "
-                f"got {type(contraction_strategy)}"
             )
         self.strategy = contraction_strategy
 

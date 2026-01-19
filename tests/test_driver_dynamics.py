@@ -20,22 +20,39 @@ from flax import nnx
 
 from VMC.drivers import DynamicsDriver, ImaginaryTimeUnit, RealTimeUnit
 from VMC.models.mps import MPS
+from VMC.models.peps import PEPS, ZipUp
 from VMC.preconditioners import SRPreconditioner
 from VMC.samplers.sequential import sequential_sample, sequential_sample_with_gradients
-from VMC.core.eval import _value_and_grad_batch
+from VMC.core.eval import _value_and_grad
 from VMC.utils.utils import spin_to_occupancy
 from VMC.utils.vmc_utils import local_estimate, model_params
 
 logger = logging.getLogger(__name__)
 
 
-def _mps_apply_fun(variables, x, **kwargs):
-    del kwargs
-    tensors = variables["params"]["tensors"]
-    samples = x if x.ndim == 2 else x[None, :]
-    amps = MPS._batch_amplitudes(tensors, samples)
-    log_amps = jnp.log(amps)
-    return log_amps if x.ndim == 2 else log_amps[0]
+def _make_apply_fun(model):
+    """Create a NetKet-compatible apply function from a model."""
+    from VMC.core import _value
+    def apply_fun(variables, x, **kwargs):
+        del kwargs
+        # Temporarily swap in NetKet's params
+        original = [jnp.asarray(t) for t in model.tensors]
+        for target, val in zip(model.tensors, variables["params"]["tensors"]):
+            if hasattr(target, "copy_from"):
+                target.copy_from(val)
+            else:
+                target[...] = val
+        samples = x if x.ndim == 2 else x[None, :]
+        amps = _value(model, samples)
+        log_amps = jnp.log(amps)
+        # Restore original
+        for target, val in zip(model.tensors, original):
+            if hasattr(target, "copy_from"):
+                target.copy_from(val)
+            else:
+                target[...] = val
+        return log_amps if x.ndim == 2 else log_amps[0]
+    return apply_fun
 
 
 class DynamicsDriverTest(unittest.TestCase):
@@ -85,7 +102,7 @@ class DynamicsDriverTest(unittest.TestCase):
         self,
         hi,
         hamiltonian,
-        params,
+        model,
         *,
         propagation_type: str,
         ode_solver,
@@ -101,8 +118,8 @@ class DynamicsDriverTest(unittest.TestCase):
             model=None,
             n_samples=self.N_SAMPLES,
             n_discard_per_chain=self.BURN_IN,
-            variables={"params": params},
-            apply_fun=_mps_apply_fun,
+            variables={"params": model_params(model)},
+            apply_fun=_make_apply_fun(model),
             sampler_seed=self.SEED,
         )
         qgt = functools.partial(
@@ -206,7 +223,7 @@ class DynamicsDriverTest(unittest.TestCase):
             sampler_seed=self.SEED,
         )
         samples = jnp.asarray(vstate.samples).reshape(-1, hi.size)
-        amps, grads_sliced, _ = _value_and_grad_batch(
+        amps, grads_sliced, _ = _value_and_grad(
             model,
             samples,
             full_gradient=False,
@@ -248,6 +265,19 @@ class DynamicsDriverTest(unittest.TestCase):
         diff = jnp.max(jnp.abs(grads_log - jac))
         logger.warning("max_log_deriv_diff=%s", float(diff))
         self.assertLess(diff, 1e-12)
+
+    def test_params_update_after_step(self):
+        """Regression test: verify model params change after driver.step()."""
+        _, hamiltonian, model = self._build_system()
+        driver = self._build_driver(model, hamiltonian, time_unit=ImaginaryTimeUnit())
+        params_before = jax.tree.map(jnp.copy, driver._get_model_params())
+        driver.step()
+        params_after = driver._get_model_params()
+        changed = jax.tree.map(
+            lambda a, b: jnp.any(a != b), params_before, params_after
+        )
+        any_changed = jax.tree.reduce(lambda x, y: x or y, changed)
+        self.assertTrue(any_changed, "Parameters should change after step()")
 
     def test_real_time_matches_netket(self):
         self._run_comparison(

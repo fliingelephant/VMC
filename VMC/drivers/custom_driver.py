@@ -164,7 +164,7 @@ class DynamicsDriver:
         self.last_samples = None
         self.last_o = None
         self.last_p = None
-        self.last_sampler_info = None
+        self._sampler_configuration = None
 
         if time_unit is None:
             time_unit = RealTimeUnit()
@@ -194,18 +194,14 @@ class DynamicsDriver:
 
     def _time_derivative(self, params: Any, t: float, *, stage: int) -> Any:
         self._assign_params(self.model.tensors, params)
-        result = self.sampler(self.model, key=self._sampler_key)
-        if len(result) == 4:
-            samples, o, p, self._sampler_key = result
-            info = None
-        elif len(result) == 5:
-            samples, o, p, self._sampler_key, info = result
-        else:
-            raise ValueError("sampler must return 4 or 5 values")
+        samples, o, p, self._sampler_key, self._sampler_configuration = self.sampler(
+            self.model,
+            key=self._sampler_key,
+            initial_configuration=self._sampler_configuration,
+        )
         self.last_samples = samples
         self.last_o = o
         self.last_p = p
-        self.last_sampler_info = info
         op_t = self._operator_at(t)
         local_energies = local_estimate(self.model, samples, op_t)
         if stage == 0:
@@ -263,7 +259,7 @@ class DynamicsDriver:
         dt_step = self.dt if dt is None else float(dt)
         params = self._get_model_params()
         params_new = self.integrator.step(self, params, self.t, dt_step)
-        self._assign_params(self.model.tensors, params)
+        self._assign_params(self.model.tensors, params_new)
         self.t += dt_step
         self.step_count += 1
 

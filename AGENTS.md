@@ -2,6 +2,8 @@
 
 Follow [Google Python Style Guide](https://google.github.io/styleguide/pyguide.html), with JAX-native patterns in this document taking precedence.
 
+**Virtual environment**: Use `.venv` (activate with `source .venv/bin/activate`).
+
 ## Dispatching
 
 Use a **hybrid approach**: ABCs for type hierarchies + plum `@dispatch` for multi-type functions.

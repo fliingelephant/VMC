@@ -51,12 +51,12 @@ class SlicedJacobian:
     @classmethod
     def from_samples(cls, model, samples: jax.Array, ordering=None):
         """Construct from model and samples."""
-        from VMC.core import _value_and_grad_batch
+        from VMC.core import _value_and_grad
         from VMC.utils.smallo import params_per_site
         from VMC.utils.vmc_utils import flatten_samples
 
         samples = flatten_samples(samples)
-        amps, grads, p = _value_and_grad_batch(model, samples, full_gradient=False)
+        amps, grads, p = _value_and_grad(model, samples, full_gradient=False)
         o = grads / amps[:, None]
         if ordering is None:
             ordering = PhysicalOrdering()

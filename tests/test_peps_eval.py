@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from VMC.core import _value_and_grad_batch
+from VMC.core import _value_and_grad
 from VMC.models.peps import NoTruncation, PEPS, make_peps_amplitude
 from VMC.utils.utils import spin_to_occupancy
 
@@ -31,7 +31,7 @@ class PEPSEvalTest(unittest.TestCase):
         bits = (configs[:, None] >> site_ids) & 1
         samples = (2 * bits - 1).astype(jnp.int32)
 
-        amps, grads_sliced, _ = _value_and_grad_batch(
+        amps, grads_sliced, _ = _value_and_grad(
             model, samples, full_gradient=False
         )
         tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]

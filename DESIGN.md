@@ -3,6 +3,13 @@
 ### Configuration
 - `VMC/config.py`: JAX x64 setup and logging config (VMC_LOG_LEVEL).
 
+### Core Eval API
+- `VMC/core/eval.py`: Unified evaluation entrypoints with plum dispatch.
+  - `_value(model, sample)`: Compute amplitude. Auto-vmaps if `sample.ndim == 2`.
+  - `_grad(model, sample)`: Compute gradient. Auto-vmaps if `sample.ndim == 2`.
+  - `_value_and_grad(model, sample)`: Compute amplitude and gradient. Auto-vmaps if `sample.ndim == 2`.
+- All batch operations use these same functions—pass 2D arrays for batched evaluation.
+
 ### Models
 - `VMC/models/mps.py`: `MPS` open-boundary MPS log-amplitude model.
 - `VMC/models/peps.py`: `PEPS` open-boundary PEPS with boundary-MPS contraction.
@@ -14,10 +21,17 @@
 ### Drivers
 - `VMC/drivers/custom_driver.py`: `Integrator` ABC (`Euler`, `RK4`), `TimeUnit` ABC (`RealTimeUnit`, `ImaginaryTimeUnit`).
 - `VMC/drivers/custom_driver.py`: `DynamicsDriver` (single model-based driver).
+- **Stateful sampler integration**: `DynamicsDriver` maintains `_sampler_configuration` to persist Markov chain state across RK stages and steps. The sampler callable must return `(samples, o, p, key, final_configurations)`.
 
 ### Samplers
 - `VMC/samplers/sequential.py`: Sequential Metropolis sampler for MPS/PEPS; one recorded sample per sweep; environment reuse during sweeps; gradient recording reuses cached environments.
 - `VMC/samplers/sequential.py`: `peps_sequential_sweep` for a single PEPS sweep.
+- **Stateful sampling**: `sequential_sample_with_gradients` accepts `initial_configuration` and returns `final_configurations` to persist Markov chain state across calls. Signature:
+  ```python
+  samples, o, p, key, final_configurations = sequential_sample_with_gradients(
+      model, n_samples=..., key=..., initial_configuration=prev_config
+  )
+  ```
 
 ### QGT Module
 - `VMC/qgt/jacobian.py`: `Jacobian`, `SlicedJacobian`, `PhysicalOrdering`, `SiteOrdering`.
@@ -157,6 +171,7 @@ classDiagram
         integrator
         dt: float
         t: float
+        _sampler_configuration
         step()
         run(T)
     }

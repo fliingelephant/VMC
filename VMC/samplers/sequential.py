@@ -322,17 +322,25 @@ def sequential_sample_with_gradients(
     n_samples: int = 1,
     n_chains: int = 1,
     key: jax.Array,
+    initial_configuration: jax.Array | None = None,
     burn_in: int = 0,
     progress_interval: int | None = None,
     full_gradient: bool = False,
     return_prob: bool = False,
 ) -> (
-    tuple[jax.Array, jax.Array, jax.Array | None, jax.Array]
-    | tuple[jax.Array, jax.Array, jax.Array | None, jax.Array, dict[str, jax.Array]]
+    tuple[jax.Array, jax.Array, jax.Array | None, jax.Array, jax.Array]
+    | tuple[jax.Array, jax.Array, jax.Array | None, jax.Array, jax.Array, dict[str, jax.Array]]
 ):
     """Sequential sampling for MPS with per-sample gradient recording.
 
     Total samples are ``n_samples`` across chains (burn-in sweeps are not recorded).
+
+    Args:
+        initial_configuration: Optional initial chain configs, shape (n_chains, n_sites),
+            in spin format (-1/+1). If None, random initialization is used.
+
+    Returns:
+        samples, grads, p, key, final_configurations[, info]
     """
     num_samples = int(n_samples)
     num_chains = int(n_chains)
@@ -346,12 +354,15 @@ def sequential_sample_with_gradients(
     chain_length = int(math.ceil(num_samples / num_chains))
     total_samples = chain_length * num_chains
 
-    key, init_key = jax.random.split(key)
     key, chain_key = jax.random.split(key)
-    init_keys = jax.random.split(init_key, num_chains)
-    indices = jax.vmap(
-        lambda k: jax.random.bernoulli(k, 0.5, shape=(n_sites,)).astype(jnp.int32)
-    )(init_keys)
+    if initial_configuration is not None:
+        indices = ((initial_configuration + 1) // 2).astype(jnp.int32)
+    else:
+        key, init_key = jax.random.split(key)
+        init_keys = jax.random.split(init_key, num_chains)
+        indices = jax.vmap(
+            lambda k: jax.random.bernoulli(k, 0.5, shape=(n_sites,)).astype(jnp.int32)
+        )(init_keys)
     chain_keys = jax.random.split(chain_key, num_chains)
     right_envs = jax.vmap(
         lambda idx: _mps_right_envs(tensors_padded, idx, n_sites=n_sites)
@@ -427,7 +438,7 @@ def sequential_sample_with_gradients(
             prob = jnp.abs(amp) ** 2
             return (indices, chain_keys, right_envs_next), (sample, grad_row, prob)
 
-        (_, _, _), (samples, grads, probs) = _collect_steps(
+        (final_configurations, _, _), (samples, grads, probs) = _collect_steps(
             sample_step,
             (indices, chain_keys, right_envs),
             chain_length,
@@ -458,7 +469,7 @@ def sequential_sample_with_gradients(
                 prob,
             )
 
-        (_, _, _), (samples, grads, p, probs) = _collect_steps(
+        (final_configurations, _, _), (samples, grads, p, probs) = _collect_steps(
             sample_step,
             (indices, chain_keys, right_envs),
             chain_length,
@@ -473,11 +484,12 @@ def sequential_sample_with_gradients(
     probs = probs.reshape(total_samples)[:num_samples]
     if p is not None:
         p = p.reshape(total_samples, -1)[:num_samples]
+    final_configurations = occupancy_to_spin(final_configurations)
 
     info = {"prob": probs} if return_prob else None
     if info is None:
-        return samples, grads, p, key
-    return samples, grads, p, key, info
+        return samples, grads, p, key, final_configurations
+    return samples, grads, p, key, final_configurations, info
 
 
 @dispatch
@@ -487,17 +499,25 @@ def sequential_sample_with_gradients(
     n_samples: int = 1,
     n_chains: int = 1,
     key: jax.Array,
+    initial_configuration: jax.Array | None = None,
     burn_in: int = 0,
     progress_interval: int | None = None,
     full_gradient: bool = False,
     return_prob: bool = False,
 ) -> (
-    tuple[jax.Array, jax.Array, jax.Array | None, jax.Array]
-    | tuple[jax.Array, jax.Array, jax.Array | None, jax.Array, dict[str, jax.Array]]
+    tuple[jax.Array, jax.Array, jax.Array | None, jax.Array, jax.Array]
+    | tuple[jax.Array, jax.Array, jax.Array | None, jax.Array, jax.Array, dict[str, jax.Array]]
 ):
     """Sequential sampling for PEPS with per-sample gradient recording.
 
     Total samples are ``n_samples`` across chains (burn-in sweeps are not recorded).
+
+    Args:
+        initial_configuration: Optional initial chain configs, shape (n_chains, n_rows, n_cols),
+            in spin format (-1/+1). If None, random initialization is used.
+
+    Returns:
+        samples, grads, p, key, final_configurations[, info]
     """
     num_samples = int(n_samples)
     num_chains = int(n_chains)
@@ -512,12 +532,15 @@ def sequential_sample_with_gradients(
     chain_length = int(math.ceil(num_samples / num_chains))
     total_samples = chain_length * num_chains
 
-    key, init_key = jax.random.split(key)
     key, chain_key = jax.random.split(key)
-    init_keys = jax.random.split(init_key, num_chains)
-    spins = jax.vmap(
-        lambda k: jax.random.bernoulli(k, 0.5, shape=shape).astype(jnp.int32)
-    )(init_keys)
+    if initial_configuration is not None:
+        spins = ((initial_configuration + 1) // 2).astype(jnp.int32)
+    else:
+        key, init_key = jax.random.split(key)
+        init_keys = jax.random.split(init_key, num_chains)
+        spins = jax.vmap(
+            lambda k: jax.random.bernoulli(k, 0.5, shape=shape).astype(jnp.int32)
+        )(init_keys)
     chain_keys = jax.random.split(chain_key, num_chains)
     bottom_envs = jax.vmap(
         lambda s: _peps_bottom_envs(tensors, s, shape, model.strategy)
@@ -600,7 +623,7 @@ def sequential_sample_with_gradients(
             prob = jnp.abs(amp) ** 2
             return (spins, chain_keys, bottom_envs_next), (sample, grad_row, prob)
 
-        (_, _, _), (samples, grads, probs) = _collect_steps(
+        (final_spins, _, _), (samples, grads, probs) = _collect_steps(
             sample_step,
             (spins, chain_keys, bottom_envs),
             chain_length,
@@ -627,7 +650,7 @@ def sequential_sample_with_gradients(
                 prob,
             )
 
-        (_, _, _), (samples, grads, p, probs) = _collect_steps(
+        (final_spins, _, _), (samples, grads, p, probs) = _collect_steps(
             sample_step,
             (spins, chain_keys, bottom_envs),
             chain_length,
@@ -642,11 +665,12 @@ def sequential_sample_with_gradients(
     probs = probs.reshape(total_samples)[:num_samples]
     if p is not None:
         p = p.reshape(total_samples, -1)[:num_samples]
+    final_configurations = occupancy_to_spin(final_spins)
 
     info = {"prob": probs} if return_prob else None
     if info is None:
-        return samples, grads, p, key
-    return samples, grads, p, key, info
+        return samples, grads, p, key, final_configurations
+    return samples, grads, p, key, final_configurations, info
 
 
 def _peps_boundary_mps(n_cols: int, dtype: jnp.dtype) -> tuple[jax.Array, ...]:

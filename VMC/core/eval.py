@@ -23,9 +23,6 @@ __all__ = [
     "_value",
     "_grad",
     "_value_and_grad",
-    "_value_batch",
-    "_grad_batch",
-    "_value_and_grad_batch",
 ]
 
 
@@ -34,13 +31,12 @@ def _value(
     model: MPS,
     sample: jax.Array,
 ) -> jax.Array:
-    """Compute amplitude for a single MPS sample."""
+    """Compute amplitude for MPS sample(s). Auto-vmaps if sample.ndim == 2."""
     sample = jnp.asarray(sample)
-    if sample.ndim != 1:
-        raise ValueError("sample must be a 1D spin configuration.")
     tensors = [jnp.asarray(t) for t in model.tensors]
-    amps = MPS._batch_amplitudes(tensors, sample[None, :])
-    return amps[0]
+    if sample.ndim == 2:
+        return MPS._batch_amplitudes(tensors, sample)
+    return MPS._batch_amplitudes(tensors, sample[None, :])[0]
 
 
 @dispatch
@@ -48,11 +44,13 @@ def _value(
     model: PEPS,
     sample: jax.Array,
 ) -> jax.Array:
-    """Compute amplitude for a single PEPS sample."""
+    """Compute amplitude for PEPS sample(s). Auto-vmaps if sample.ndim == 2."""
     sample = jnp.asarray(sample)
-    if sample.ndim != 1:
-        raise ValueError("sample must be a 1D spin configuration.")
     tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
+    if sample.ndim == 2:
+        return jax.vmap(
+            lambda s: PEPS._single_amplitude(tensors, s, model.shape, model.strategy)
+        )(sample)
     return PEPS._single_amplitude(tensors, sample, model.shape, model.strategy)
 
 
@@ -62,7 +60,7 @@ def _grad(
     *,
     full_gradient: bool = False,
 ) -> tuple[jax.Array, jax.Array | None]:
-    """Compute amplitude gradient for a single sample."""
+    """Compute amplitude gradient for sample(s). Auto-vmaps if sample.ndim == 2."""
     _, grad_row, p_row = _value_and_grad(
         model, sample, full_gradient=full_gradient
     )
@@ -76,10 +74,10 @@ def _value_and_grad(
     *,
     full_gradient: bool = False,
 ) -> tuple[jax.Array, jax.Array, jax.Array | None]:
-    """Compute amplitude and parameter gradient for a single MPS sample."""
+    """Compute amplitude and gradient for MPS sample(s). Auto-vmaps if sample.ndim == 2."""
     sample = jnp.asarray(sample)
-    if sample.ndim != 1:
-        raise ValueError("sample must be a 1D spin configuration.")
+    if sample.ndim == 2:
+        return jax.vmap(lambda s: _value_and_grad(model, s, full_gradient=full_gradient))(sample)
 
     tensors = [jnp.asarray(t) for t in model.tensors]
     n_sites = model.n_sites
@@ -145,10 +143,10 @@ def _value_and_grad(
     *,
     full_gradient: bool = False,
 ) -> tuple[jax.Array, jax.Array, jax.Array | None]:
-    """Compute amplitude and parameter gradient for a single PEPS sample."""
+    """Compute amplitude and gradient for PEPS sample(s). Auto-vmaps if sample.ndim == 2."""
     sample = jnp.asarray(sample)
-    if sample.ndim != 1:
-        raise ValueError("sample must be a 1D spin configuration.")
+    if sample.ndim == 2:
+        return jax.vmap(lambda s: _value_and_grad(model, s, full_gradient=full_gradient))(sample)
 
     tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
     shape = model.shape
@@ -201,31 +199,3 @@ def _value_and_grad(
             p_parts.append(jnp.full((params_per_phys,), spins[r, c], dtype=jnp.int8))
 
     return amp, jnp.concatenate(grad_parts), jnp.concatenate(p_parts)
-
-
-def _value_batch(
-    model: MPS | PEPS,
-    samples: jax.Array,
-) -> jax.Array:
-    """Compute amplitudes for a batch of samples."""
-    return jax.vmap(lambda s: _value(model, s))(samples)
-
-
-def _grad_batch(
-    model: MPS | PEPS,
-    samples: jax.Array,
-    *,
-    full_gradient: bool = False,
-) -> tuple[jax.Array, jax.Array | None]:
-    """Compute amplitude gradients for a batch of samples."""
-    return jax.vmap(lambda s: _grad(model, s, full_gradient=full_gradient))(samples)
-
-
-def _value_and_grad_batch(
-    model: MPS | PEPS,
-    samples: jax.Array,
-    *,
-    full_gradient: bool = False,
-) -> tuple[jax.Array, jax.Array, jax.Array | None]:
-    """Compute amplitudes and gradients for a batch of samples."""
-    return jax.vmap(lambda s: _value_and_grad(model, s, full_gradient=full_gradient))(samples)

@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from VMC.core import _value_and_grad_batch
+from VMC.core import _value_and_grad
 from VMC.models.mps import MPS
 from VMC.models.peps import PEPS, ZipUp
 from VMC.qgt import QGT, Jacobian, SlicedJacobian, PhysicalOrdering, SiteOrdering

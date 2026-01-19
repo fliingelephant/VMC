@@ -11,7 +11,7 @@ from flax import nnx
 
 from VMC.models.mps import MPS
 from VMC.models.peps import PEPS, ZipUp
-from VMC.core import _value_and_grad_batch
+from VMC.core import _value_and_grad
 from VMC.qgt import QGT, DiagonalQGT, Jacobian, SlicedJacobian, PhysicalOrdering, SiteOrdering, ParameterSpace, SampleSpace, solve_cholesky
 from VMC.preconditioners.preconditioners import DiagonalSolve, _solve_sr
 from VMC.utils.smallo import params_per_site
@@ -27,10 +27,10 @@ class QGTTest(unittest.TestCase):
         samples = sequential_sample(model, n_samples=32, key=jax.random.key(0))
         samples_flat = flatten_samples(samples)
 
-        amps, grads_full, _ = _value_and_grad_batch(model, samples_flat, full_gradient=True)
+        amps, grads_full, _ = _value_and_grad(model, samples_flat, full_gradient=True)
         qgt_full = QGT(Jacobian(grads_full / amps[:, None]), space=SampleSpace())
 
-        amps, grads, p = _value_and_grad_batch(model, samples_flat, full_gradient=False)
+        amps, grads, p = _value_and_grad(model, samples_flat, full_gradient=False)
         qgt_sliced = QGT(SlicedJacobian(grads / amps[:, None], p, model.phys_dim), space=SampleSpace())
 
         err = float(jnp.linalg.norm(qgt_full.to_dense() - qgt_sliced.to_dense()) / jnp.linalg.norm(qgt_full.to_dense()))
@@ -42,10 +42,10 @@ class QGTTest(unittest.TestCase):
         samples = sequential_sample(model, n_samples=32, key=jax.random.key(0))
         samples_flat = flatten_samples(samples)
 
-        amps, grads_full, _ = _value_and_grad_batch(model, samples_flat, full_gradient=True)
+        amps, grads_full, _ = _value_and_grad(model, samples_flat, full_gradient=True)
         qgt_full = QGT(Jacobian(grads_full / amps[:, None]), space=ParameterSpace())
 
-        amps, grads, p = _value_and_grad_batch(model, samples_flat, full_gradient=False)
+        amps, grads, p = _value_and_grad(model, samples_flat, full_gradient=False)
         pps = tuple(params_per_site(model))
         qgt_sliced = QGT(
             SlicedJacobian(grads / amps[:, None], p, model.phys_dim, SiteOrdering(pps)),
@@ -61,7 +61,7 @@ class QGTTest(unittest.TestCase):
         samples = sequential_sample(model, n_samples=32, key=jax.random.key(0))
         samples_flat = flatten_samples(samples)
 
-        amps, grads, p = _value_and_grad_batch(model, samples_flat, full_gradient=False)
+        amps, grads, p = _value_and_grad(model, samples_flat, full_gradient=False)
         o = grads / amps[:, None]
 
         qgt_phys = QGT(SlicedJacobian(o, p, model.phys_dim, PhysicalOrdering()), space=SampleSpace())
@@ -78,7 +78,7 @@ class QGTTest(unittest.TestCase):
         samples_flat = flatten_samples(samples)
         diag_shift = 1e-4
 
-        amps, grads, p = _value_and_grad_batch(model, samples_flat, full_gradient=False)
+        amps, grads, p = _value_and_grad(model, samples_flat, full_gradient=False)
         o = grads / amps[:, None]
         jac = SlicedJacobian(o, p, model.phys_dim)
         qgt = QGT(jac, space=ParameterSpace())
@@ -99,7 +99,7 @@ class QGTTest(unittest.TestCase):
         samples_flat = flatten_samples(samples)
         diag_shift = 1e-4
 
-        amps, grads, p = _value_and_grad_batch(model, samples_flat, full_gradient=False)
+        amps, grads, p = _value_and_grad(model, samples_flat, full_gradient=False)
         o = grads / amps[:, None]
         jac = SlicedJacobian(o, p, model.phys_dim)
         qgt = QGT(jac, space=SampleSpace())
@@ -119,7 +119,7 @@ class QGTTest(unittest.TestCase):
         samples = sequential_sample(model, n_samples=32, key=jax.random.key(0))
         samples_flat = flatten_samples(samples)
 
-        amps, grads, p = _value_and_grad_batch(model, samples_flat, full_gradient=False)
+        amps, grads, p = _value_and_grad(model, samples_flat, full_gradient=False)
         o = grads / amps[:, None]
         jac = SlicedJacobian(o, p, model.phys_dim)
 
@@ -145,7 +145,7 @@ class QGTTest(unittest.TestCase):
         samples = sequential_sample(model, n_samples=32, key=jax.random.key(0))
         samples_flat = flatten_samples(samples)
 
-        amps, grads_full, _ = _value_and_grad_batch(model, samples_flat, full_gradient=True)
+        amps, grads_full, _ = _value_and_grad(model, samples_flat, full_gradient=True)
         O = grads_full / amps[:, None]
         pps = tuple(params_per_site(model))
 
@@ -169,7 +169,7 @@ class QGTTest(unittest.TestCase):
         samples_flat = flatten_samples(samples)
         diag_shift = 1e-4
 
-        amps, grads_full, _ = _value_and_grad_batch(model, samples_flat, full_gradient=True)
+        amps, grads_full, _ = _value_and_grad(model, samples_flat, full_gradient=True)
         O = grads_full / amps[:, None]
         pps = tuple(params_per_site(model))
         dv = jax.random.normal(jax.random.key(3), (samples_flat.shape[0],), dtype=jnp.complex128)
@@ -199,7 +199,7 @@ class QGTTest(unittest.TestCase):
         samples = sequential_sample(model, n_samples=32, key=jax.random.key(0))
         samples_flat = flatten_samples(samples)
 
-        amps, grads_full, _ = _value_and_grad_batch(model, samples_flat, full_gradient=True)
+        amps, grads_full, _ = _value_and_grad(model, samples_flat, full_gradient=True)
         O = grads_full / amps[:, None]
         pps = tuple(params_per_site(model))
         dv = jax.random.normal(jax.random.key(4), (samples_flat.shape[0],), dtype=jnp.complex128)

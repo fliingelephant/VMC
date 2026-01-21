@@ -16,6 +16,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
+from vmc.utils.smallo import peps_site_dims
 from vmc.utils.utils import random_tensor, spin_to_occupancy
 
 if TYPE_CHECKING:
@@ -218,11 +219,10 @@ def _apply_mpo_density_matrix(
 
 def _build_row_mpo(tensors, row_indices, row, n_cols):
     """Build row-MPO for PEPS contraction."""
-    mpo = []
-    for col in range(n_cols):
-        site = jnp.asarray(tensors[row][col])[row_indices[col]]
-        mpo.append(jnp.transpose(site, (2, 3, 0, 1)))  # (left, right, up, down)
-    return tuple(mpo)
+    return tuple(
+        jnp.transpose(jnp.asarray(tensors[row][col])[row_indices[col]], (2, 3, 0, 1))
+        for col in range(n_cols)
+    )
 
 
 def _contract_bottom(mps):
@@ -266,9 +266,7 @@ def _forward_with_cache(
         boundary = strategy.apply(boundary, mpo)
         top_envs.append(boundary)
 
-    # Contract final boundary to get amplitude
-    amp = _contract_bottom(boundary)
-    return amp, top_envs
+    return _contract_bottom(boundary), top_envs
 
 
 def _apply_mpo_from_below(
@@ -311,11 +309,12 @@ def _contract_column_transfer(
         Transfer tensor with shape (tL, tR, mL, mR, bL, bR) after contracting
         over the physical dimensions (up, down).
     """
-    # Contract top with mpo over physical/up bond (index u)
-    top_mpo = jnp.einsum("aub,cduv->abcdv", top_tensor, mpo_tensor)
-    # Contract with bottom over down bond (index v)
-    transfer = jnp.einsum("abcdv,evf->abcdef", top_mpo, bot_tensor)
-    return transfer
+    # Contract top with mpo over physical/up bond, then with bottom over down bond
+    return jnp.einsum(
+        "abcdv,evf->abcdef",
+        jnp.einsum("aub,cduv->abcdv", top_tensor, mpo_tensor),
+        bot_tensor,
+    )
 
 
 def _contract_left_partial(
@@ -368,40 +367,28 @@ def _compute_all_row_gradients(
     n_cols = len(mpo)
     dtype = mpo[0].dtype
 
-    # Compute all transfer tensors
-    transfers = []
-    for c in range(n_cols):
-        transfer = _contract_column_transfer(top_mps[c], mpo[c], bottom_mps[c])
-        transfers.append(transfer)
+    transfers = [
+        _contract_column_transfer(top_mps[c], mpo[c], bottom_mps[c])
+        for c in range(n_cols)
+    ]
 
     # Compute left environments (partial contractions from left)
     left_envs = [jnp.ones((1, 1, 1), dtype=dtype)]
-    env = left_envs[0]
     for c in range(n_cols - 1):
-        env = _contract_left_partial(env, transfers[c])
-        left_envs.append(env)
+        left_envs.append(_contract_left_partial(left_envs[-1], transfers[c]))
 
     # Compute right environments (partial contractions from right)
     right_envs = [None] * n_cols
     right_envs[n_cols - 1] = jnp.ones((1, 1, 1), dtype=dtype)
-    env = right_envs[n_cols - 1]
     for c in range(n_cols - 2, -1, -1):
-        env = _contract_right_partial(transfers[c + 1], env)
-        right_envs[c] = env
+        right_envs[c] = _contract_right_partial(transfers[c + 1], right_envs[c + 1])
 
-    # Compute gradient for each tensor
-    grads = []
-    for c in range(n_cols):
-        grad = _compute_single_gradient(
-            left_envs[c],
-            right_envs[c],
-            top_mps[c],
-            bottom_mps[c],
-            mpo[c].shape,
+    return [
+        _compute_single_gradient(
+            left_envs[c], right_envs[c], top_mps[c], bottom_mps[c], mpo[c].shape
         )
-        grads.append(grad)
-
-    return grads
+        for c in range(n_cols)
+    ]
 
 
 def _compute_single_gradient(
@@ -423,15 +410,13 @@ def _compute_single_gradient(
     Returns:
         Gradient tensor with shape (up, down, mL, mR).
     """
+    # TODO: optimize tensor network contraction order for better performance
     # Contract left_env with top_tensor over tL
     tmp1 = jnp.einsum("ace,aub->ceub", left_env, top_tensor)
     # Contract with bot_tensor over bL
     tmp2 = jnp.einsum("ceub,evf->cubvf", tmp1, bot_tensor)
-    # Contract with right_env over tR and bR
-    grad_mpo = jnp.einsum("cubvf,bdf->cuvd", tmp2, right_env)
-    # Transpose to (up, down, left, right)
-    grad = jnp.transpose(grad_mpo, (1, 2, 0, 3))
-    return grad
+    # Contract with right_env over tR and bR, transpose to (up, down, left, right)
+    return jnp.transpose(jnp.einsum("cubvf,bdf->cuvd", tmp2, right_env), (1, 2, 0, 3))
 
 
 def _compute_all_gradients(
@@ -511,34 +496,26 @@ def make_peps_amplitude(
         """Forward pass returning residuals."""
         spins = spin_to_occupancy(sample).reshape(shape)
         amp, top_envs = _forward_with_cache(tensors, spins, shape, strategy)
-        residuals = (tensors, spins, top_envs)
-        return amp, residuals
+        return amp, (tensors, spins, top_envs)
 
     def amplitude_bwd(residuals: tuple, g: jax.Array) -> tuple:
         """Backward pass computing gradients via environment contraction."""
         tensors, spins, top_envs = residuals
         n_rows, n_cols = shape
+        env_grads = _compute_all_gradients(tensors, spins, shape, strategy, top_envs)
 
-        # Compute all environment-based gradients
-        env_grads = _compute_all_gradients(
-            tensors, spins, shape, strategy, top_envs
-        )
-
-        # Build gradients matching the pytree structure of `tensors`.
-        grad_leaves: list[jax.Array] = []
+        grad_leaves = []
         for r in range(n_rows):
             for c in range(n_cols):
-                full_tensor = jnp.asarray(tensors[r][c])
-                grad_full = jnp.zeros_like(full_tensor)
-                phys_idx = spins[r, c]
-                grad_full = grad_full.at[phys_idx].set(g * env_grads[r][c])
-                grad_leaves.append(grad_full)
+                grad_full = jnp.zeros_like(jnp.asarray(tensors[r][c]))
+                grad_leaves.append(grad_full.at[spins[r, c]].set(g * env_grads[r][c]))
 
-        treedef = jax.tree_util.tree_structure(tensors)
-        grad_tensors = jax.tree_util.tree_unflatten(treedef, grad_leaves)
-
-        # Return gradients: (grad_tensors, None for sample)
-        return (grad_tensors, None)
+        return (
+            jax.tree_util.tree_unflatten(
+                jax.tree_util.tree_structure(tensors), grad_leaves
+            ),
+            None,
+        )
 
     amplitude_fn.defvjp(amplitude_fwd, amplitude_bwd)
     return amplitude_fn
@@ -586,20 +563,21 @@ class PEPS(nnx.Module):
             )
         self.strategy = contraction_strategy
 
-        rows = []
         n_rows, n_cols = self.shape
-        for r in range(n_rows):
-            row = []
-            for c in range(n_cols):
-                up = 1 if r == 0 else self.bond_dim
-                down = 1 if r == n_rows - 1 else self.bond_dim
-                left = 1 if c == 0 else self.bond_dim
-                right = 1 if c == n_cols - 1 else self.bond_dim
-                tensor_shape = (self.phys_dim, up, down, left, right)
-                tensor_val = random_tensor(rngs, tensor_shape, self.dtype)
-                row.append(nnx.Param(tensor_val, dtype=self.dtype))
-            rows.append(row)
-        self.tensors = rows
+        self.tensors = [
+            [
+                nnx.Param(
+                    random_tensor(
+                        rngs,
+                        (self.phys_dim, *peps_site_dims(r, c, n_rows, n_cols, self.bond_dim)),
+                        self.dtype,
+                    ),
+                    dtype=self.dtype,
+                )
+                for c in range(n_cols)
+            ]
+            for r in range(n_rows)
+        ]
 
     @staticmethod
     @functools.partial(jax.jit, static_argnames=("shape", "strategy"))

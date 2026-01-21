@@ -75,6 +75,10 @@ def jacobian_mean(jac: SlicedJacobian) -> jax.Array:
     return _sliced_mean(jac.ordering, jac.o, jac.p, jac.phys_dim)
 
 
+# TODO: possible break: this produces a vector of length n_sites * phys_dim *
+# params_per_site, but the SR centering formula from Wu 2025 Eq. 5 expects the
+# mean to be applied before reconstructing the full parameter space. Verify that
+# mean subtraction aligns parameters correctly when using SiteOrdering.
 @dispatch
 def _sliced_mean(
     ordering: SiteOrdering,

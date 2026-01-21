@@ -1,42 +1,46 @@
-## VMC inventory
+# VMC Design Overview
 
-### Configuration
-- `VMC/config.py`: JAX x64 setup and logging config (VMC_LOG_LEVEL).
+## Package Layout (src)
+- `src/vmc/config.py`: JAX x64 setup and logging config (`VMC_LOG_LEVEL`).
+- `src/vmc/core/eval.py`: Unified eval API (`_value`, `_grad`, `_value_and_grad`) with plum dispatch.
+- `src/vmc/models/mps.py`: `MPS` open-boundary model; `MPS.site_dims` for boundary bond sizes.
+- `src/vmc/models/peps.py`: `PEPS` open-boundary model; `PEPS.site_dims`, contraction strategies, VJP.
+- `src/vmc/samplers/sequential.py`: Sequential Metropolis samplers for MPS/PEPS.
+- `src/vmc/qgt/*`: QGT, Jacobians, solvers, NetKet compatibility.
+- `src/vmc/preconditioners/preconditioners.py`: SR/QGT preconditioners and solvers.
+- `src/vmc/drivers/custom_driver.py`: time evolution drivers and integrators.
+- `src/vmc/utils/vmc_utils.py`: Jacobian helpers, batching, local energy.
+- `src/vmc/utils/smallo.py`: `params_per_site` (uses model static site dims).
 
-### Models
-- `VMC/models/mps.py`: `MPS` open-boundary MPS log-amplitude model.
-- `VMC/models/peps.py`: `PEPS` open-boundary PEPS with boundary-MPS contraction.
+## Core Eval API
+- `_value(model, sample)`: amplitude; auto-vmaps for 2D samples.
+- `_grad(model, sample)`: gradient; wraps `_value_and_grad`.
+- `_value_and_grad(model, sample)`: amplitude + gradient; base entrypoint.
 
-### Contraction + Amplitudes (PEPS)
-- `VMC/models/peps.py`: `ContractionStrategy` ABC with `NoTruncation`, `ZipUp`, `DensityMatrix`.
-- `VMC/models/peps.py`: Custom-VJP amplitude pipeline and environment-gradient helpers.
+## Models
+- `MPS`: site tensors `(phys_dim, D_left, D_right)` with open boundaries.
+- `PEPS`: site tensors `(phys_dim, up, down, left, right)` with open boundaries.
+- `MPS.site_dims` / `PEPS.site_dims`: boundary-aware bond sizes used by eval/sampling.
 
-### Drivers
-- `VMC/drivers/custom_driver.py`: `Integrator` ABC (`Euler`, `RK4`), `TimeUnit` ABC (`RealTimeUnit`, `ImaginaryTimeUnit`).
-- `VMC/drivers/custom_driver.py`: `DynamicsDriver` (single model-based driver).
+## PEPS Contraction + Gradients
+- `ContractionStrategy` ABC with `NoTruncation`, `ZipUp`, `DensityMatrix`.
+- `make_peps_amplitude`: custom-VJP amplitude with cached environments.
+- `_compute_all_gradients`: environment-based row gradients.
 
-### Samplers
-- `VMC/samplers/sequential.py`: Sequential Metropolis sampler for MPS/PEPS; one recorded sample per sweep; environment reuse during sweeps; gradient recording reuses cached environments.
-- `VMC/samplers/sequential.py`: `peps_sequential_sweep` for a single PEPS sweep.
+## Sampling
+- `sequential_sample`: sequential Metropolis for MPS/PEPS.
+- `sequential_sample_with_gradients`: sampling + gradient collection.
+- `peps_sequential_sweep`: single PEPS sweep utility.
+- Stateful sampling threads `(final_configurations, key)` for reproducible chains.
 
-### QGT Module
-- `VMC/qgt/jacobian.py`: `Jacobian`, `SlicedJacobian`, `PhysicalOrdering`, `SiteOrdering`.
-- `VMC/qgt/qgt.py`: `QGT`, `DiagonalQGT`, `ParameterSpace`, `SampleSpace` with lazy matvec via plum dispatch.
-- `VMC/qgt/solvers.py`: `solve_cg`, `solve_cholesky`, `solve_svd`.
-- `VMC/qgt/netket_compat.py`: `QGTOperator`, `DenseSR` (NetKet LinearOperator adapter).
+## QGT
+- `Jacobian` / `SlicedJacobian` with `PhysicalOrdering` / `SiteOrdering`.
+- `QGT`: lazy matvec in parameter or sample space.
+- `QGTOperator` / `DenseSR`: NetKet compatibility wrappers.
 
-### Preconditioners
-- `VMC/preconditioners/preconditioners.py`: `DirectSolve`, `QRSolve`, `DiagonalSolve`, `SRPreconditioner` (model/samples-based apply).
+## Class Diagrams
 
-### Gauge
-- `VMC/gauge/gauge.py`: `GaugeConfig`, `compute_gauge_projection` for MPS.
-
-### Utilities
-- `VMC/utils/vmc_utils.py`: `flatten_samples`, `get_apply_fun`, `build_dense_jac`, `local_estimate`.
-- `VMC/utils/independent_set_sampling.py`: `IndependentSetSampler`, `DiscardBlockedSampler` for independent-set MCMC (`n_steps` controls MH steps).
-
-## QGT Class Diagram
-
+### QGT
 ```mermaid
 classDiagram
     class Jacobian {
@@ -63,14 +67,6 @@ classDiagram
         to_dense() Array
     }
 
-    class DiagonalQGT {
-        jac: Jacobian | SlicedJacobian
-        space: ParameterSpace | SampleSpace
-        params_per_site: tuple | None
-        __matmul__(v) Array
-        to_dense() Array
-    }
-
     class QGTOperator {
         _qgt: QGT
         diag_shift: float
@@ -89,16 +85,12 @@ classDiagram
     QGT --> SlicedJacobian
     QGT --> ParameterSpace
     QGT --> SampleSpace
-    DiagonalQGT --> Jacobian
-    DiagonalQGT --> SlicedJacobian
-    DiagonalQGT --> ParameterSpace
     QGTOperator --> QGT : wraps
     DenseSR --> QGTOperator : creates
     QGTOperator --|> LinearOperator
 ```
 
-## Preconditioner Class Diagram
-
+### Preconditioners
 ```mermaid
 classDiagram
     class DirectSolve {
@@ -108,14 +100,10 @@ classDiagram
         rcond: float | None
         min_norm: bool
     }
-    class DiagonalSolve {
-        solver: LinearSolver
-        params_per_site: tuple | None
-    }
 
     class SRPreconditioner {
         space: ParameterSpace | SampleSpace
-        strategy: DirectSolve | QRSolve | DiagonalSolve
+        strategy: DirectSolve | QRSolve
         diag_shift: float
         gauge_config: GaugeConfig | None
         ordering: PhysicalOrdering | SiteOrdering
@@ -124,13 +112,11 @@ classDiagram
 
     SRPreconditioner --> DirectSolve
     SRPreconditioner --> QRSolve
-    SRPreconditioner --> DiagonalSolve
     SRPreconditioner --> ParameterSpace
     SRPreconditioner --> SampleSpace
 ```
 
-## Driver Class Diagram
-
+### Drivers
 ```mermaid
 classDiagram
     class TimeUnit {
@@ -157,6 +143,7 @@ classDiagram
         integrator
         dt: float
         t: float
+        _sampler_configuration
         step()
         run(T)
     }
@@ -170,7 +157,6 @@ classDiagram
 ```
 
 ## Flowchart
-
 ```mermaid
 flowchart TD
     subgraph Models
@@ -180,7 +166,7 @@ flowchart TD
 
     subgraph QGT["QGT Module"]
         Jac["Jacobian<br/>SlicedJacobian"]
-        QGTCore["QGT<br/>DiagonalQGT"]
+        QGTCore["QGT"]
         Space["ParameterSpace<br/>SampleSpace"]
         Solvers["solve_cg<br/>solve_cholesky<br/>solve_svd"]
         NetKet["QGTOperator<br/>DenseSR"]
@@ -188,7 +174,7 @@ flowchart TD
 
     subgraph Preconditioners
         SRP["SRPreconditioner"]
-        Strategy["DirectSolve<br/>QRSolve<br/>DiagonalSolve"]
+        Strategy["DirectSolve<br/>QRSolve"]
     end
 
     subgraph Drivers

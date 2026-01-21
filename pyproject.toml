@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vmc"
+version = "0.0.0"
+description = "Tensor network VMC package"
+requires-python = ">=3.10"
+dependencies = [
+  "jax>=0.4.35",
+  "jaxlib>=0.4.35",
+  "flax>=0.10.2",
+  "netket>=3.15.1",
+  "numpy>=2.0.2",
+  "scipy>=1.14.1",
+  "plum-dispatch>=2.5.4",
+  "tqdm>=4.67.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "pytest-cov>=7.0.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["vmc*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/test_sequential_sampling.py"]

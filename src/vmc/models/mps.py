@@ -1,0 +1,112 @@
+"""Matrix Product State (MPS) model for variational wavefunctions.
+
+This module provides a lightweight MPS implementation compatible with
+NetKet's variational state interface.
+"""
+from __future__ import annotations
+
+from vmc import config  # noqa: F401 - JAX config must be imported first
+
+from typing import TYPE_CHECKING
+
+import jax
+import jax.numpy as jnp
+from flax import nnx
+
+from vmc.utils.utils import random_tensor, spin_to_occupancy
+
+if TYPE_CHECKING:
+    from jax.typing import DTypeLike
+
+__all__ = ["MPS"]
+
+
+class MPS(nnx.Module):
+    """Lightweight open-boundary MPS producing log-psi values.
+
+    tensors: list of site tensors with shape (phys_dim, D_left, D_right).
+    The boundary bond dimensions are fixed to 1 on the first/last site.
+
+    Attributes:
+        n_sites: Number of lattice sites.
+        bond_dim: Virtual bond dimension.
+        phys_dim: Physical dimension (default 2 for spins).
+        dtype: Data type for tensors (default complex128).
+    """
+
+    tensors: list[nnx.Param] = nnx.data()
+
+    @staticmethod
+    def site_dims(site: int, n_sites: int, bond_dim: int) -> tuple[int, int]:
+        """Return (left_dim, right_dim) for an MPS site."""
+        left = 1 if site == 0 else bond_dim
+        right = 1 if site == n_sites - 1 else bond_dim
+        return left, right
+
+    def __init__(
+        self,
+        *,
+        rngs: nnx.Rngs,
+        n_sites: int,
+        bond_dim: int,
+        phys_dim: int = 2,
+        dtype: "DTypeLike" = jnp.complex128,
+    ):
+        """Initialize MPS with random tensors.
+
+        Args:
+            rngs: Flax NNX random key generator.
+            n_sites: Number of lattice sites.
+            bond_dim: Virtual bond dimension.
+            phys_dim: Physical dimension (default 2 for spins).
+            dtype: Data type for tensors (default: complex128).
+        """
+        self.n_sites = n_sites
+        self.bond_dim = int(bond_dim)
+        self.phys_dim = int(phys_dim)
+        self.dtype = jnp.dtype(dtype)
+
+        tensors = []
+        for site in range(n_sites):
+            left_dim, right_dim = self.site_dims(site, n_sites, self.bond_dim)
+            shape = (self.phys_dim, left_dim, right_dim)
+            tensor_val = random_tensor(rngs, shape, self.dtype)
+            tensors.append(nnx.Param(tensor_val, dtype=self.dtype))
+        self.tensors = tensors
+
+    @staticmethod
+    def _batch_amplitudes(tensors, samples: jax.Array) -> jax.Array:
+        """Compute MPS amplitudes for a batch of spin configurations.
+
+        Note: Uses Python loop because boundary tensors have different shapes
+        (bond_dim=1 at edges), preventing use of jax.lax.scan with stacked tensors.
+
+        Args:
+            tensors: List of MPS site tensors.
+            samples: Spin configurations with shape (batch, n_sites).
+
+        Returns:
+            Complex amplitudes with shape (batch,).
+        """
+        indices = spin_to_occupancy(samples)  # Map spins {-1, 1} -> {0, 1}
+        state = jnp.ones((indices.shape[0], 1), dtype=tensors[0].dtype)
+        for site, tensor in enumerate(tensors):
+            mats = tensor[indices[:, site]]  # (batch, D_left, D_right)
+            state = jnp.einsum("bi,bij->bj", state, mats)
+        return state.squeeze(-1)
+
+    @nnx.jit
+    def __call__(self, x: jax.Array) -> jax.Array:
+        """Compute log-amplitudes for input spin configurations.
+
+        Args:
+            x: Spin configuration(s). Shape (n_sites,) for single sample,
+               or (batch, n_sites) for batch.
+
+        Returns:
+            Log-amplitude(s). Scalar for single sample, shape (batch,) for batch.
+        """
+        samples = x if x.ndim == 2 else x[None, :]
+        amps = self._batch_amplitudes(self.tensors, samples)
+        log_amps = jnp.log(amps)
+        return log_amps if x.ndim == 2 else log_amps[0]

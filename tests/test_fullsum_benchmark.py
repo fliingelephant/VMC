@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import unittest
 
-from VMC import config  # noqa: F401
+from vmc import config  # noqa: F401
 
 import jax
 import jax.numpy as jnp
@@ -11,10 +11,10 @@ import netket as nk
 from flax import nnx
 from netket import stats as nkstats
 
-from VMC.models.mps import MPS
-from VMC.models.peps import PEPS
-from VMC.samplers.sequential import sequential_sample
-from VMC.utils.vmc_utils import local_estimate
+from vmc.models.mps import MPS
+from vmc.models.peps import PEPS
+from vmc.samplers.sequential import sequential_sample
+from vmc.utils.vmc_utils import local_estimate
 
 
 class FullSumBenchmarkTest(unittest.TestCase):
@@ -22,8 +22,8 @@ class FullSumBenchmarkTest(unittest.TestCase):
     N_CHAINS = 8
     BURN_IN = 10
     ENERGY_SIGMA_MULT = 5.0
-    N_SAMPLES_MPS = 40960
-    N_SAMPLES_PEPS = 8192
+    N_SAMPLES_MPS = 65536
+    N_SAMPLES_PEPS = 16384
 
     def _assert_close(self, approx, exact, *, label: str):
         err = float(approx.error_of_mean) + float(exact.error_of_mean)
@@ -35,8 +35,8 @@ class FullSumBenchmarkTest(unittest.TestCase):
         )
 
     def test_mps_fullsum_matches(self):
-        n_sites = 12
-        bond_dim = 2
+        n_sites = 14
+        bond_dim = 4
         hi = nk.hilbert.Spin(s=1 / 2, N=n_sites)
         hamiltonian = nk.operator.Heisenberg(
             hi, nk.graph.Chain(length=n_sites), dtype=jnp.complex128
@@ -92,8 +92,8 @@ class FullSumBenchmarkTest(unittest.TestCase):
         self._assert_close(mc_stats, fs_stats, label="mps netket")
 
     def test_peps_fullsum_matches(self):
-        shape = (3, 3)
-        bond_dim = 2
+        shape = (3, 4)
+        bond_dim = 3
         n_sites = shape[0] * shape[1]
         hi = nk.hilbert.Spin(s=1 / 2, N=n_sites)
         graph = nk.graph.Grid(extent=shape, pbc=False)

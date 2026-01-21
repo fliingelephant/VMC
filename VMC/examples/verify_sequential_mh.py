@@ -31,6 +31,7 @@ from flax import nnx
 from VMC.examples.real_time import build_heisenberg_square
 from VMC.models.mps import MPS
 from VMC.models.peps import ContractionStrategy, PEPS, ZipUp
+from VMC.utils.utils import occupancy_to_spin, spin_to_occupancy
 from VMC.utils.vmc_utils import get_apply_fun
 
 logger = logging.getLogger(__name__)
@@ -154,7 +155,7 @@ def _sequential_mps_with_progress(
         )
         total_accept += int(n_accept)
         total_proposals += n_sites
-        spins = 2 * indices - 1
+        spins = occupancy_to_spin(indices)
         all_samples.append(spins)
         _log_progress(sample_idx + 1, n_samples)
 
@@ -293,7 +294,7 @@ def _sequential_peps_with_progress(
         _log_progress(sample_idx + 1, n_samples)
 
     samples = jnp.stack(all_samples, axis=0)
-    samples = 2 * samples - 1
+    samples = occupancy_to_spin(samples)
     acceptance_ratio = total_accept / total_proposals if total_proposals > 0 else 0.0
     return samples.astype(jnp.int32), acceptance_ratio
 
@@ -310,12 +311,11 @@ def _fullsum_energy(hi, hamiltonian, model) -> complex:
 def _compute_exact_distribution(model, n_sites: int) -> np.ndarray:
     """Compute exact probability distribution for small systems."""
     n_states = 2 ** n_sites
-    all_configs = []
-    for i in range(n_states):
-        bits = [(i >> (n_sites - 1 - k)) & 1 for k in range(n_sites)]
-        spins = [2 * b - 1 for b in bits]
-        all_configs.append(spins)
-    all_configs = jnp.array(all_configs, dtype=jnp.int32)
+    bits = [
+        [(i >> (n_sites - 1 - k)) & 1 for k in range(n_sites)]
+        for i in range(n_states)
+    ]
+    all_configs = occupancy_to_spin(jnp.array(bits, dtype=jnp.int32))
 
     log_amps = model(all_configs)
     log_probs = 2.0 * jnp.real(log_amps)
@@ -330,7 +330,7 @@ def _empirical_distribution(samples: jax.Array, n_sites: int) -> np.ndarray:
     samples_np = np.asarray(samples)
     counts = np.zeros(n_states, dtype=np.int32)
     for sample in samples_np:
-        bits = (sample + 1) // 2
+        bits = spin_to_occupancy(sample)
         idx = 0
         for bit in bits:
             idx = (idx << 1) | int(bit)

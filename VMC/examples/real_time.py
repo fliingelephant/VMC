@@ -16,6 +16,7 @@ from VMC.models.mps import MPS
 from VMC.models.peps import PEPS
 from VMC.preconditioners import SRPreconditioner
 from VMC.samplers.sequential import sequential_sample_with_gradients
+from VMC.utils.utils import occupancy_to_spin, spin_to_occupancy
 from VMC.utils.vmc_utils import model_params
 
 logger = logging.getLogger(__name__)
@@ -66,9 +67,8 @@ def dense_exact_dynamics(psi0, hi, H, dt, n_steps):
 
 
 def random_bitstring(key, n_sites: int):
-    bits = jax.random.bernoulli(key, p=0.5, shape=(n_sites,)).astype(jnp.int32)
-    spins = 2 * bits - 1
-    return spins
+    bits = jax.random.bernoulli(key, p=0.5, shape=(n_sites,))
+    return occupancy_to_spin(bits)
 
 
 def reset_product_state_mps(model: MPS, spins: jnp.ndarray):
@@ -105,7 +105,7 @@ def align_phase(reference: jax.Array, target: jax.Array):
 
 
 def _bits_from_state(state_row: jax.Array) -> str:
-    bits = ((state_row + 1) // 2).astype(int)
+    bits = spin_to_occupancy(state_row)
     return "".join(str(int(b)) for b in bits)
 
 

@@ -11,7 +11,7 @@ from flax import nnx
 
 from VMC.core import _value_and_grad
 from VMC.models.peps import NoTruncation, PEPS, make_peps_amplitude
-from VMC.utils.utils import spin_to_occupancy
+from VMC.utils.utils import occupancy_to_spin, spin_to_occupancy
 
 
 class PEPSEvalTest(unittest.TestCase):
@@ -29,7 +29,7 @@ class PEPSEvalTest(unittest.TestCase):
         configs = jnp.arange(2 ** n_sites, dtype=jnp.int32)
         site_ids = jnp.arange(n_sites, dtype=jnp.int32)
         bits = (configs[:, None] >> site_ids) & 1
-        samples = (2 * bits - 1).astype(jnp.int32)
+        samples = occupancy_to_spin(bits)
 
         amps, grads_sliced, _ = _value_and_grad(
             model, samples, full_gradient=False

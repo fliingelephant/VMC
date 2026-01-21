@@ -19,6 +19,7 @@ from VMC.models.mps import MPS
 from VMC.models.peps import PEPS
 from VMC.preconditioners import SRPreconditioner
 from VMC.samplers.sequential import sequential_sample_with_gradients
+from VMC.utils.utils import occupancy_to_spin
 from VMC.utils.vmc_utils import flatten_samples, model_params
 
 logger = logging.getLogger(__name__)
@@ -98,7 +99,7 @@ def random_flip_sample(
     if init_samples is None:
         key, subkey = jax.random.split(key)
         bits = jax.random.bernoulli(subkey, p=0.5, shape=(n_samples, n_sites))
-        samples = 2 * bits.astype(jnp.int32) - 1
+        samples = occupancy_to_spin(bits)
     else:
         samples = init_samples
 

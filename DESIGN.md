@@ -35,12 +35,12 @@
 
 ### QGT Module
 - `VMC/qgt/jacobian.py`: `Jacobian`, `SlicedJacobian`, `PhysicalOrdering`, `SiteOrdering`.
-- `VMC/qgt/qgt.py`: `QGT`, `DiagonalQGT`, `ParameterSpace`, `SampleSpace` with lazy matvec via plum dispatch.
+- `VMC/qgt/qgt.py`: `QGT`, `ParameterSpace`, `SampleSpace` with lazy matvec via plum dispatch.
 - `VMC/qgt/solvers.py`: `solve_cg`, `solve_cholesky`, `solve_svd`.
 - `VMC/qgt/netket_compat.py`: `QGTOperator`, `DenseSR` (NetKet LinearOperator adapter).
 
 ### Preconditioners
-- `VMC/preconditioners/preconditioners.py`: `DirectSolve`, `QRSolve`, `DiagonalSolve`, `SRPreconditioner` (model/samples-based apply).
+- `VMC/preconditioners/preconditioners.py`: `DirectSolve`, `QRSolve`, `SRPreconditioner` (model/samples-based apply).
 
 ### Gauge
 - `VMC/gauge/gauge.py`: `GaugeConfig`, `compute_gauge_projection` for MPS.
@@ -77,14 +77,6 @@ classDiagram
         to_dense() Array
     }
 
-    class DiagonalQGT {
-        jac: Jacobian | SlicedJacobian
-        space: ParameterSpace | SampleSpace
-        params_per_site: tuple | None
-        __matmul__(v) Array
-        to_dense() Array
-    }
-
     class QGTOperator {
         _qgt: QGT
         diag_shift: float
@@ -103,9 +95,6 @@ classDiagram
     QGT --> SlicedJacobian
     QGT --> ParameterSpace
     QGT --> SampleSpace
-    DiagonalQGT --> Jacobian
-    DiagonalQGT --> SlicedJacobian
-    DiagonalQGT --> ParameterSpace
     QGTOperator --> QGT : wraps
     DenseSR --> QGTOperator : creates
     QGTOperator --|> LinearOperator
@@ -122,14 +111,10 @@ classDiagram
         rcond: float | None
         min_norm: bool
     }
-    class DiagonalSolve {
-        solver: LinearSolver
-        params_per_site: tuple | None
-    }
 
     class SRPreconditioner {
         space: ParameterSpace | SampleSpace
-        strategy: DirectSolve | QRSolve | DiagonalSolve
+        strategy: DirectSolve | QRSolve
         diag_shift: float
         gauge_config: GaugeConfig | None
         ordering: PhysicalOrdering | SiteOrdering
@@ -138,7 +123,6 @@ classDiagram
 
     SRPreconditioner --> DirectSolve
     SRPreconditioner --> QRSolve
-    SRPreconditioner --> DiagonalSolve
     SRPreconditioner --> ParameterSpace
     SRPreconditioner --> SampleSpace
 ```
@@ -195,7 +179,7 @@ flowchart TD
 
     subgraph QGT["QGT Module"]
         Jac["Jacobian<br/>SlicedJacobian"]
-        QGTCore["QGT<br/>DiagonalQGT"]
+        QGTCore["QGT"]
         Space["ParameterSpace<br/>SampleSpace"]
         Solvers["solve_cg<br/>solve_cholesky<br/>solve_svd"]
         NetKet["QGTOperator<br/>DenseSR"]
@@ -203,7 +187,7 @@ flowchart TD
 
     subgraph Preconditioners
         SRP["SRPreconditioner"]
-        Strategy["DirectSolve<br/>QRSolve<br/>DiagonalSolve"]
+        Strategy["DirectSolve<br/>QRSolve"]
     end
 
     subgraph Drivers

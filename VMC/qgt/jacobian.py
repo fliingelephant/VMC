@@ -52,7 +52,6 @@ class SlicedJacobian:
     def from_samples(cls, model, samples: jax.Array, ordering=None):
         """Construct from model and samples."""
         from VMC.core import _value_and_grad
-        from VMC.utils.smallo import params_per_site
         from VMC.utils.vmc_utils import flatten_samples
 
         samples = flatten_samples(samples)

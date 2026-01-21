@@ -14,10 +14,11 @@ from flax import nnx
 from VMC.samplers.sequential import sequential_sample
 from VMC.models.mps import MPS
 from VMC.models.peps import PEPS
+from VMC.utils.utils import occupancy_to_spin, spin_to_occupancy
 
 
 def _spins_to_index(spins: np.ndarray) -> int:
-    bits = (spins + 1) // 2
+    bits = spin_to_occupancy(spins)
     idx = 0
     for bit in bits:
         idx = (idx << 1) | int(bit)
@@ -44,7 +45,7 @@ class SequentialSamplingTest(unittest.TestCase):
             [[(i >> (n_sites - 1 - k)) & 1 for k in range(n_sites)] for i in range(2**n_sites)],
             dtype=np.int32,
         )
-        spins_basis = 2 * basis_bits - 1
+        spins_basis = occupancy_to_spin(basis_bits)
         amps = model._batch_amplitudes(
             [jnp.asarray(t) for t in model.tensors],
             jnp.asarray(spins_basis),
@@ -75,7 +76,7 @@ class SequentialSamplingTest(unittest.TestCase):
             [[(i >> (n_sites - 1 - k)) & 1 for k in range(n_sites)] for i in range(2**n_sites)],
             dtype=np.int32,
         )
-        spins_basis = 2 * basis_bits - 1
+        spins_basis = occupancy_to_spin(basis_bits)
         tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
         amps = []
         for sample in spins_basis:

@@ -25,7 +25,7 @@ from VMC.models.peps import (
     _contract_right_partial,
 )
 from VMC.utils.smallo import mps_site_dims, peps_site_dims
-from VMC.utils.utils import occupancy_to_spin
+from VMC.utils.utils import occupancy_to_spin, spin_to_occupancy
 
 __all__ = [
     "sequential_sample",
@@ -361,7 +361,7 @@ def sequential_sample_with_gradients(
 
     key, chain_key = jax.random.split(key)
     if initial_configuration is not None:
-        indices = ((initial_configuration + 1) // 2).astype(jnp.int32)
+        indices = spin_to_occupancy(initial_configuration)
     else:
         key, init_key = jax.random.split(key)
         init_keys = jax.random.split(init_key, num_chains)
@@ -536,7 +536,7 @@ def sequential_sample_with_gradients(
 
     key, chain_key = jax.random.split(key)
     if initial_configuration is not None:
-        spins = ((initial_configuration + 1) // 2).astype(jnp.int32)
+        spins = spin_to_occupancy(initial_configuration)
     else:
         key, init_key = jax.random.split(key)
         init_keys = jax.random.split(init_key, num_chains)

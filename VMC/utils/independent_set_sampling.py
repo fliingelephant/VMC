@@ -155,6 +155,8 @@ def _prepare_samples(
     init_samples: jax.Array | None,
     n_samples: int,
     num_sites: int,
+    neighbors: jax.Array,
+    mask: jax.Array,
 ) -> jax.Array:
     """Initialize samples."""
     if init_samples is None:
@@ -163,6 +165,8 @@ def _prepare_samples(
         samples = jnp.asarray(init_samples, dtype=jnp.int32)
         if samples.ndim == 1:
             samples = jnp.tile(samples[None, :], (n_samples, 1))
+        if bool(jnp.any(independent_set_violations(samples, neighbors, mask))):
+            raise ValueError("init_samples must contain only independent sets.")
     return samples
 
 
@@ -196,6 +200,7 @@ class IndependentSetSampler:
             n_steps: Number of Metropolis steps to run.
             key: JAX PRNG key.
             init_samples: Optional initial samples with shape (n_samples, num_sites).
+                Must contain only independent sets.
             log_prob_is_batched: If False, log_prob_fn is vmapped over samples.
 
         Returns:
@@ -211,7 +216,7 @@ class IndependentSetSampler:
             log_prob_fn = jax.vmap(log_prob_fn)
 
         samples = _prepare_samples(
-            init_samples, n_samples, self._num_sites
+            init_samples, n_samples, self._num_sites, self._neighbors, self._mask
         )
         log_prob = jnp.real(jnp.asarray(log_prob_fn(samples), dtype=jnp.float64))
 
@@ -289,12 +294,13 @@ class DiscardBlockedSampler:
             n_steps: Number of Metropolis steps to run.
             key: JAX PRNG key.
             init_samples: Optional initial samples with shape (n_samples, num_sites).
+                Must contain only independent sets.
 
         Returns:
             Tuple of (samples, log_prob, key, acceptance).
         """
         samples = _prepare_samples(
-            init_samples, n_samples, self._num_sites
+            init_samples, n_samples, self._num_sites, self._neighbors, self._mask
         )
         log_prob = jnp.real(jnp.asarray(log_prob_fn(samples), dtype=jnp.float64))
 

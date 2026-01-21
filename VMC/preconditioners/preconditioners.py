@@ -14,7 +14,7 @@ from jax.flatten_util import ravel_pytree
 from netket.jax import tree_cast
 from plum import dispatch
 
-from VMC.qgt import DiagonalQGT, QGT, Jacobian, ParameterSpace, SampleSpace, SlicedJacobian
+from VMC.qgt import QGT, Jacobian, ParameterSpace, SampleSpace, SlicedJacobian
 from VMC.qgt.jacobian import PhysicalOrdering, SiteOrdering, jacobian_mean
 from VMC.qgt.qgt import _params_per_site
 from VMC.qgt.solvers import solve_cg, solve_cholesky, solve_svd
@@ -32,7 +32,6 @@ __all__ = [
     "solve_svd",
     "DirectSolve",
     "QRSolve",
-    "DiagonalSolve",
     "SRPreconditioner",
 ]
 
@@ -52,14 +51,6 @@ class QRSolve:
 
     rcond: float | None = None
     min_norm: bool = True
-
-
-@dataclass(frozen=True)
-class DiagonalSolve:
-    """Block-diagonal solve strategy (ParameterSpace only)."""
-
-    solver: LinearSolver = solve_cholesky
-    params_per_site: tuple[int, ...] | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -239,41 +230,6 @@ def _solve_sr(
     raise NotImplementedError("QRSolve not supported for SampleSpace")
 
 
-@dispatch
-def _solve_sr(
-    strategy: DiagonalSolve,
-    space: ParameterSpace,
-    jac: Jacobian | SlicedJacobian,
-    dv: jax.Array,
-    diag_shift: float,
-) -> tuple[jax.Array, dict]:
-    qgt = DiagonalQGT(jac, space=ParameterSpace(), params_per_site=strategy.params_per_site)
-    S = qgt.to_dense()
-    rhs = _adjoint_matvec(jac, dv)
-    mat = S + diag_shift * jnp.eye(S.shape[0], dtype=S.dtype)
-    x = jnp.zeros_like(rhs)
-    i = 0
-    for n in strategy.params_per_site:
-        block = mat[i : i + n, i : i + n]
-        x = x.at[i : i + n].set(strategy.solver(block, rhs[i : i + n]))
-        i += n
-    metrics = {
-        "residual_error": jnp.linalg.norm(S @ x - rhs) ** 2 / jnp.linalg.norm(rhs) ** 2,
-    }
-    return x, metrics
-
-
-@dispatch
-def _solve_sr(
-    strategy: DiagonalSolve,
-    space: SampleSpace,
-    jac: Jacobian | SlicedJacobian,
-    dv: jax.Array,
-    diag_shift: float,
-) -> tuple[jax.Array, dict]:
-    raise NotImplementedError("DiagonalSolve not supported for SampleSpace")
-
-
 # --------------------------------------------------------------------------- #
 # SRPreconditioner
 # --------------------------------------------------------------------------- #
@@ -285,7 +241,7 @@ class SRPreconditioner:
     def __init__(
         self,
         space: ParameterSpace | SampleSpace = ParameterSpace(),
-        strategy: DirectSolve | QRSolve | DiagonalSolve = DirectSolve(),
+        strategy: DirectSolve | QRSolve = DirectSolve(),
         diag_shift: float = 1e-2,
         gauge_config: "GaugeConfig | None" = None,
         ordering: PhysicalOrdering | SiteOrdering = PhysicalOrdering(),
@@ -349,12 +305,6 @@ class SRPreconditioner:
             )
 
         strategy = self.strategy
-        if isinstance(strategy, DiagonalSolve) and strategy.params_per_site is None:
-            strategy = DiagonalSolve(
-                solver=strategy.solver,
-                params_per_site=tuple(params_per_site(model)),
-            )
-
         updates_red, self._metrics = _solve_sr(
             strategy, self.space, jac, dv, self.diag_shift
         )

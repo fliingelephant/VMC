@@ -126,13 +126,15 @@ def build_dense_jac_from_state(
     holomorphic: bool = True,
 ) -> jax.Array:
     """Compute dense Jacobian directly from a variational state."""
-    if samples is None:
-        samples = flatten_samples(state.samples)
-    else:
-        samples = flatten_samples(samples)
-
+    samples = flatten_samples(state.samples if samples is None else samples)
     apply_fun, params, model_state, _ = get_apply_fun(state)
-    return build_dense_jac(apply_fun, params, model_state, samples, holomorphic=holomorphic)
+    return build_dense_jac(
+        apply_fun,
+        params,
+        model_state,
+        samples,
+        holomorphic=holomorphic,
+    )
 
 
 def local_estimate(model, samples: jax.Array, operator) -> jax.Array:
@@ -155,9 +157,9 @@ def local_estimate(model, samples: jax.Array, operator) -> jax.Array:
         sigma_p = sigma_p.reshape(samples.shape[0], -1, samples.shape[-1])
         mels = mels.reshape(sigma_p.shape[:2])
 
-    amps_sigma = jax.vmap(lambda s: _value(model, s))(samples)
+    amps_sigma = jax.vmap(_value, in_axes=(None, 0))(model, samples)
     flat_sigma_p = sigma_p.reshape(-1, sigma_p.shape[-1])
-    amps_sigma_p = jax.vmap(lambda s: _value(model, s))(flat_sigma_p).reshape(
+    amps_sigma_p = jax.vmap(_value, in_axes=(None, 0))(model, flat_sigma_p).reshape(
         sigma_p.shape[:-1]
     )
     return jnp.sum(mels * (amps_sigma_p / amps_sigma[:, None]), axis=-1)

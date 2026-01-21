@@ -30,10 +30,13 @@ jobs:
         env:
           JAX_PLATFORM_NAME: cpu
         run: |
-          uv run pytest --cov=src/vmc --cov-report=term-missing --cov-report=xml
+          uv run pytest --cov=src/vmc --cov-branch --cov-report=term-missing --cov-report=xml
 
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
         with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: fliingelephant/VMC
           files: coverage.xml
           fail_ci_if_error: false
+  

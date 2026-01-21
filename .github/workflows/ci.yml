@@ -1,8 +1,6 @@
 name: CI
 
 on:
-  push:
-    branches: ["**"]
   pull_request:
     branches: ["**"]
 
@@ -28,8 +26,14 @@ jobs:
         run: |
           uv sync --frozen --group dev
 
-      - name: Run tests
+      - name: Run tests with coverage
         env:
           JAX_PLATFORM_NAME: cpu
         run: |
-          PYTHONPATH=. uv run pytest
+          uv run pytest --cov=src/vmc --cov-report=term-missing --cov-report=xml
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage.xml
+          fail_ci_if_error: false

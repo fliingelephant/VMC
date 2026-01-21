@@ -17,6 +17,7 @@ from VMC.models.peps import (
     _forward_with_cache,
     make_peps_amplitude,
 )
+from VMC.utils.smallo import mps_site_dims, peps_site_dims
 from VMC.utils.utils import spin_to_occupancy
 
 __all__ = [
@@ -92,8 +93,7 @@ def _value_and_grad(
             state = jnp.ones((1,), dtype=flat_params.dtype)
             offset = 0
             for site in range(n_sites):
-                left_dim = 1 if site == 0 else bond_dim
-                right_dim = 1 if site == n_sites - 1 else bond_dim
+                left_dim, right_dim = mps_site_dims(site, n_sites, bond_dim)
                 size = phys_dim * left_dim * right_dim
                 tensor = flat_params[offset : offset + size].reshape(
                     phys_dim, left_dim, right_dim
@@ -128,8 +128,7 @@ def _value_and_grad(
         right = right_envs[site + 1]
         grad_site = left[:, None] * right[None, :]
         grad_parts.append(grad_site.reshape(-1))
-        left_dim = 1 if site == 0 else bond_dim
-        right_dim = 1 if site == n_sites - 1 else bond_dim
+        left_dim, right_dim = mps_site_dims(site, n_sites, bond_dim)
         params_per_phys = left_dim * right_dim
         p_parts.append(jnp.full((params_per_phys,), indices[site], dtype=jnp.int8))
 
@@ -191,10 +190,7 @@ def _value_and_grad(
     for r in range(n_rows):
         for c in range(n_cols):
             grad_parts.append(env_grads[r][c].reshape(-1))
-            up = 1 if r == 0 else bond_dim
-            down = 1 if r == n_rows - 1 else bond_dim
-            left = 1 if c == 0 else bond_dim
-            right = 1 if c == n_cols - 1 else bond_dim
+            up, down, left, right = peps_site_dims(r, c, n_rows, n_cols, bond_dim)
             params_per_phys = up * down * left * right
             p_parts.append(jnp.full((params_per_phys,), spins[r, c], dtype=jnp.int8))
 

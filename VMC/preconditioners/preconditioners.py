@@ -92,7 +92,6 @@ def _reorder_updates(
     pps: tuple[int, ...],
     phys_dim: int,
 ) -> jax.Array:
-    _ = (ordering, pps, phys_dim)
     return updates_flat
 
 
@@ -159,18 +158,7 @@ def _direct_solve(
 @dispatch
 def _solve_sr(
     strategy: DirectSolve,
-    space: ParameterSpace,
-    jac: Jacobian | SlicedJacobian,
-    dv: jax.Array,
-    diag_shift: float,
-) -> tuple[jax.Array, dict]:
-    return _direct_solve(space, jac, dv, diag_shift, strategy.solver)
-
-
-@dispatch
-def _solve_sr(
-    strategy: DirectSolve,
-    space: SampleSpace,
+    space: ParameterSpace | SampleSpace,
     jac: Jacobian | SlicedJacobian,
     dv: jax.Array,
     diag_shift: float,
@@ -187,7 +175,7 @@ def _solve_sr(
     diag_shift: float,
 ) -> tuple[jax.Array, dict]:
     """QR solve in parameter space."""
-    _ = diag_shift
+    # TODO: diag_shift not used
     mean = jacobian_mean(jac)
     o_centered = jac.O - mean[None, :]
     q, r, piv = jax.lax.linalg.qr(
@@ -237,7 +225,6 @@ def _solve_sr(
     dv: jax.Array,
     diag_shift: float,
 ) -> tuple[jax.Array, dict]:
-    _ = (strategy, space, dv, diag_shift)
     raise NotImplementedError("QRSolve not supported for SlicedJacobian")
 
 
@@ -249,7 +236,6 @@ def _solve_sr(
     dv: jax.Array,
     diag_shift: float,
 ) -> tuple[jax.Array, dict]:
-    _ = (strategy, space, jac, dv, diag_shift)
     raise NotImplementedError("QRSolve not supported for SampleSpace")
 
 
@@ -261,8 +247,6 @@ def _solve_sr(
     dv: jax.Array,
     diag_shift: float,
 ) -> tuple[jax.Array, dict]:
-    if strategy.params_per_site is None:
-        raise ValueError("DiagonalSolve requires params_per_site")
     qgt = DiagonalQGT(jac, space=ParameterSpace(), params_per_site=strategy.params_per_site)
     S = qgt.to_dense()
     rhs = _adjoint_matvec(jac, dv)
@@ -287,38 +271,7 @@ def _solve_sr(
     dv: jax.Array,
     diag_shift: float,
 ) -> tuple[jax.Array, dict]:
-    _ = (strategy, space, jac, dv, diag_shift)
     raise NotImplementedError("DiagonalSolve not supported for SampleSpace")
-
-
-@dispatch
-def _resolve_strategy(
-    strategy: DirectSolve,
-    model: object,
-) -> DirectSolve:
-    _ = model
-    return strategy
-
-
-@dispatch
-def _resolve_strategy(
-    strategy: QRSolve,
-    model: object,
-) -> QRSolve:
-    _ = model
-    return strategy
-
-
-@dispatch
-def _resolve_strategy(
-    strategy: DiagonalSolve,
-    model: object,
-) -> DiagonalSolve:
-    if strategy.params_per_site is None:
-        return DiagonalSolve(
-            solver=strategy.solver, params_per_site=tuple(params_per_site(model))
-        )
-    return strategy
 
 
 # --------------------------------------------------------------------------- #
@@ -331,25 +284,24 @@ class SRPreconditioner:
 
     def __init__(
         self,
-        space: ParameterSpace | SampleSpace | None = None,
-        strategy: DirectSolve | QRSolve | DiagonalSolve | None = None,
+        space: ParameterSpace | SampleSpace = ParameterSpace(),
+        strategy: DirectSolve | QRSolve | DiagonalSolve = DirectSolve(),
         diag_shift: float = 1e-2,
         gauge_config: "GaugeConfig | None" = None,
-        ordering: PhysicalOrdering | SiteOrdering | None = None,
+        ordering: PhysicalOrdering | SiteOrdering = PhysicalOrdering(),
     ):
-        self.space = space if space is not None else ParameterSpace()
-        self.strategy = strategy if strategy is not None else DirectSolve()
+        self.space = space
+        self.strategy = strategy
         self.diag_shift = diag_shift
         self.gauge_config = gauge_config
-        self.ordering = ordering if ordering is not None else PhysicalOrdering()
+        self.ordering = ordering
         self.uses_local_energies = True
-        self._metrics: dict | None = None
+        self._metrics: dict = {}
 
     @property
-    def residual_error(self) -> float | None:
-        if self._metrics is None or "residual_error" not in self._metrics:
-            return None
-        return float(jax.block_until_ready(self._metrics["residual_error"]))
+    def residual_error(self) -> jax.Array | None:
+        """Return residual error from last solve."""
+        return self._metrics.get("residual_error")
 
     def apply(
         self,
@@ -359,11 +311,8 @@ class SRPreconditioner:
         p: jax.Array | None,
         local_energies: jax.Array,
         *,
-        step: int | None = None,
         grad_factor: complex = 1.0,
-        stage: int = 0,
     ) -> dict:
-        _ = (step, stage)
         from VMC.gauge import compute_gauge_projection
 
         dv = (local_energies.reshape(-1) - jnp.mean(local_energies)) / samples.shape[0]
@@ -399,7 +348,12 @@ class SRPreconditioner:
                 self.ordering,
             )
 
-        strategy = _resolve_strategy(self.strategy, model)
+        strategy = self.strategy
+        if isinstance(strategy, DiagonalSolve) and strategy.params_per_site is None:
+            strategy = DiagonalSolve(
+                solver=strategy.solver,
+                params_per_site=tuple(params_per_site(model)),
+            )
 
         updates_red, self._metrics = _solve_sr(
             strategy, self.space, jac, dv, self.diag_shift

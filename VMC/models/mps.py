@@ -13,7 +13,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from VMC.utils.utils import spin_to_occupancy
+from VMC.utils.utils import random_tensor, spin_to_occupancy
 
 if TYPE_CHECKING:
     from jax.typing import DTypeLike
@@ -55,35 +55,12 @@ class MPS(nnx.Module):
         self.phys_dim = 2
         self.dtype = jnp.dtype(dtype)
 
-        # Determine real dtype for random initialization
-        is_complex = jnp.issubdtype(self.dtype, jnp.complexfloating)
-        if is_complex:
-            real_dtype = jnp.real(jnp.zeros((), dtype=self.dtype)).dtype
-            complex_unit = jnp.array(1j, dtype=self.dtype)
-        else:
-            real_dtype = self.dtype
-            complex_unit = None
-
         tensors = []
         for site in range(n_sites):
             left_dim = 1 if site == 0 else bond_dim
             right_dim = 1 if site == n_sites - 1 else bond_dim
-            shape_t = (self.phys_dim, left_dim, right_dim)
-
-            if is_complex:
-                key_re, key_im = rngs.params(), rngs.params()
-                tensor_val = (
-                    1/2 * jax.random.uniform(key_re, shape_t, dtype=real_dtype)
-                    + 1/2 * complex_unit
-                    * jax.random.uniform(key_im, shape_t, dtype=real_dtype)
-                )
-            else:
-                tensor_val = jax.random.uniform(
-                    rngs.params(),
-                    shape_t,
-                    dtype=real_dtype,
-                )
-
+            shape = (self.phys_dim, left_dim, right_dim)
+            tensor_val = random_tensor(rngs, shape, self.dtype)
             tensors.append(nnx.Param(tensor_val, dtype=self.dtype))
         self.tensors = tensors
 

@@ -173,7 +173,7 @@ def _peps_sequential_sweep_with_accept(
     """Run one sequential Metropolis sweep over PEPS sites with acceptance count."""
     from VMC.models.peps import (
         _apply_mpo_from_below,
-        _build_row_mpo_static,
+        _build_row_mpo,
         _compute_single_gradient,
         _contract_column_transfer,
         _contract_left_partial,
@@ -191,14 +191,14 @@ def _peps_sequential_sweep_with_accept(
     bottom_env = _peps_boundary_mps(n_cols, dtype)
     for row in range(n_rows - 1, -1, -1):
         bottom_envs[row] = bottom_env
-        mpo_row = _build_row_mpo_static(tensors, spins[row], row, n_cols)
+        mpo_row = _build_row_mpo(tensors, spins[row], row, n_cols)
         bottom_env = _apply_mpo_from_below(bottom_env, mpo_row, strategy)
 
     top_env = _peps_boundary_mps(n_cols, dtype)
     total_accept = 0
     for row in range(n_rows):
         bottom_env = bottom_envs[row]
-        mpo_row = _build_row_mpo_static(tensors, spins[row], row, n_cols)
+        mpo_row = _build_row_mpo(tensors, spins[row], row, n_cols)
 
         transfers = []
         for col in range(n_cols):
@@ -252,7 +252,7 @@ def _peps_sequential_sweep_with_accept(
             transfer = _contract_column_transfer(top_env[col], mpo_sel, bottom_env[col])
             left_env = _contract_left_partial(left_env, transfer)
 
-        mpo_row = _build_row_mpo_static(tensors, spins[row], row, n_cols)
+        mpo_row = _build_row_mpo(tensors, spins[row], row, n_cols)
         top_env = strategy.apply(top_env, mpo_row)
 
     return spins, key, total_accept

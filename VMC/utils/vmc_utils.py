@@ -147,9 +147,6 @@ def local_estimate(model, samples: jax.Array, operator) -> jax.Array:
         Local energy estimates with shape (n_samples,).
     """
     samples = jnp.asarray(samples)
-    if not hasattr(operator, "get_conn_padded"):
-        raise TypeError("operator must provide get_conn_padded")
-
     sigma_p, mels = operator.get_conn_padded(samples)
     sigma_p = jnp.asarray(sigma_p)
     mels = jnp.asarray(mels)

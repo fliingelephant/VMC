@@ -16,14 +16,15 @@ from VMC.models.peps import (
     ContractionStrategy,
     PEPS,
     _apply_mpo_from_below,
-    _build_row_mpo_static,
+    _build_row_mpo,
     _compute_all_row_gradients,
     _compute_single_gradient,
+    _contract_bottom,
     _contract_column_transfer,
-    _contract_bottom_static,
     _contract_left_partial,
     _contract_right_partial,
 )
+from VMC.utils.smallo import mps_site_dims, peps_site_dims
 from VMC.utils.utils import occupancy_to_spin
 
 __all__ = [
@@ -34,9 +35,10 @@ __all__ = [
 
 
 def _progress_iter(total: int, interval: int | None, desc: str):
-    if interval is None or interval <= 0:
-        return range(total)
-    return tqdm(range(total), total=total, miniters=interval, desc=desc)
+    rng = range(total)
+    if not interval or interval <= 0:
+        return rng
+    return tqdm(rng, total=total, miniters=interval, desc=desc)
 
 
 def _run_sweeps(sweep_fn, state: jax.Array, key: jax.Array, count: int):
@@ -50,17 +52,24 @@ def _run_sweeps(sweep_fn, state: jax.Array, key: jax.Array, count: int):
 
 
 def _collect_steps(step_fn, carry, count: int, progress_interval: int | None, desc: str):
-    if progress_interval is None or progress_interval <= 0:
+    if not progress_interval or progress_interval <= 0:
         return jax.lax.scan(step_fn, carry, xs=None, length=count)
 
     outputs_list = []
     for _ in _progress_iter(count, progress_interval, desc):
         carry, output = step_fn(carry, None)
         outputs_list.append(output)
-    outputs = jax.tree_util.tree_map(
-        lambda *xs: jnp.stack(xs, axis=0), *outputs_list
-    )
+    outputs = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs, axis=0), *outputs_list)
     return carry, outputs
+
+
+def _metropolis_ratio(weight_cur: jax.Array, weight_flip: jax.Array) -> jax.Array:
+    """Compute Metropolis acceptance ratio with proper handling of zero weights."""
+    return jnp.where(
+        weight_cur > 0.0,
+        weight_flip / weight_cur,
+        jnp.where(weight_flip > 0.0, jnp.inf, 0.0),
+    )
 
 
 def _pad_mps_tensors(
@@ -128,11 +137,7 @@ def _sequential_mps_sweep_with_envs(
         amp_flip = jnp.einsum("i,ij,j->", left_env, tensor_flip, right_env)
         weight_cur = jnp.abs(amp_cur) ** 2
         weight_flip = jnp.abs(amp_flip) ** 2
-        ratio = jnp.where(
-            weight_cur > 0.0,
-            weight_flip / weight_cur,
-            jnp.where(weight_flip > 0.0, jnp.inf, 0.0),
-        )
+        ratio = _metropolis_ratio(weight_cur, weight_flip)
 
         key, subkey = jax.random.split(key)
         accept = jax.random.uniform(subkey) < jnp.minimum(1.0, ratio)
@@ -394,8 +399,7 @@ def sequential_sample_with_gradients(
     def flatten_full_gradients(indices, left_envs, right_envs):
         grad_parts = []
         for site in range(n_sites):
-            left_dim = 1 if site == 0 else bond_dim
-            right_dim = 1 if site == n_sites - 1 else bond_dim
+            left_dim, right_dim = mps_site_dims(site, n_sites, bond_dim)
             left = left_envs[site][:left_dim]
             right = right_envs[site + 1][:right_dim]
             grad_site = left[:, None] * right[None, :]
@@ -410,8 +414,7 @@ def sequential_sample_with_gradients(
         grad_parts = []
         p_parts = []
         for site in range(n_sites):
-            left_dim = 1 if site == 0 else bond_dim
-            right_dim = 1 if site == n_sites - 1 else bond_dim
+            left_dim, right_dim = mps_site_dims(site, n_sites, bond_dim)
             left = left_envs[site][:left_dim]
             right = right_envs[site + 1][:right_dim]
             grad_site = left[:, None] * right[None, :]
@@ -486,10 +489,9 @@ def sequential_sample_with_gradients(
         p = p.reshape(total_samples, -1)[:num_samples]
     final_configurations = occupancy_to_spin(final_configurations)
 
-    info = {"prob": probs} if return_prob else None
-    if info is None:
-        return samples, grads, p, key, final_configurations
-    return samples, grads, p, key, final_configurations, info
+    if return_prob:
+        return samples, grads, p, key, final_configurations, {"prob": probs}
+    return samples, grads, p, key, final_configurations
 
 
 @dispatch
@@ -576,7 +578,7 @@ def sequential_sample_with_gradients(
         env_grads = [[None] * n_cols for _ in range(n_rows)]
         for row in range(n_rows - 1, -1, -1):
             bottom_envs_next[row] = bottom_env
-            mpo_row = _build_row_mpo_static(tensors, spins[row], row, n_cols)
+            mpo_row = _build_row_mpo(tensors, spins[row], row, n_cols)
             env_grads[row] = _compute_all_row_gradients(
                 top_envs[row], bottom_env, mpo_row
             )
@@ -599,10 +601,7 @@ def sequential_sample_with_gradients(
         for row in range(n_rows):
             for col in range(n_cols):
                 grad_parts.append(env_grads[row][col].reshape(-1))
-                up = 1 if row == 0 else bond_dim
-                down = 1 if row == n_rows - 1 else bond_dim
-                left = 1 if col == 0 else bond_dim
-                right = 1 if col == n_cols - 1 else bond_dim
+                up, down, left, right = peps_site_dims(row, col, n_rows, n_cols, bond_dim)
                 params_per_phys = up * down * left * right
                 p_parts.append(
                     jnp.full((params_per_phys,), spins[row, col], dtype=jnp.int8)
@@ -615,7 +614,7 @@ def sequential_sample_with_gradients(
             spins, chain_keys, top_envs, top_env = sweep_with_envs(
                 spins, chain_keys, bottom_envs, True
             )
-            amp = jax.vmap(_contract_bottom_static)(top_env)
+            amp = jax.vmap(_contract_bottom)(top_env)
             env_grads, bottom_envs_next = jax.vmap(build_gradients)(spins, top_envs)
             grad_row = jax.vmap(flatten_full_gradients)(env_grads, spins)
             grad_row = grad_row / amp[:, None]
@@ -637,7 +636,7 @@ def sequential_sample_with_gradients(
             spins, chain_keys, top_envs, top_env = sweep_with_envs(
                 spins, chain_keys, bottom_envs, True
             )
-            amp = jax.vmap(_contract_bottom_static)(top_env)
+            amp = jax.vmap(_contract_bottom)(top_env)
             env_grads, bottom_envs_next = jax.vmap(build_gradients)(spins, top_envs)
             grad_row, p_row = jax.vmap(flatten_sliced_gradients)(env_grads, spins)
             grad_row = grad_row / amp[:, None]
@@ -667,10 +666,9 @@ def sequential_sample_with_gradients(
         p = p.reshape(total_samples, -1)[:num_samples]
     final_configurations = occupancy_to_spin(final_spins)
 
-    info = {"prob": probs} if return_prob else None
-    if info is None:
-        return samples, grads, p, key, final_configurations
-    return samples, grads, p, key, final_configurations, info
+    if return_prob:
+        return samples, grads, p, key, final_configurations, {"prob": probs}
+    return samples, grads, p, key, final_configurations
 
 
 def _peps_boundary_mps(n_cols: int, dtype: jnp.dtype) -> tuple[jax.Array, ...]:
@@ -690,7 +688,7 @@ def _peps_bottom_envs(
     bottom_env = _peps_boundary_mps(n_cols, dtype)
     for row in range(n_rows - 1, -1, -1):
         bottom_envs[row] = bottom_env
-        mpo_row = _build_row_mpo_static(tensors, spins[row], row, n_cols)
+        mpo_row = _build_row_mpo(tensors, spins[row], row, n_cols)
         bottom_env = _apply_mpo_from_below(bottom_env, mpo_row, strategy)
     return bottom_envs
 
@@ -715,7 +713,7 @@ def _peps_sequential_sweep_with_envs(
         if collect_top_envs:
             top_envs.append(top_env)
         bottom_env = bottom_envs[row]
-        mpo_row = _build_row_mpo_static(tensors, spins[row], row, n_cols)
+        mpo_row = _build_row_mpo(tensors, spins[row], row, n_cols)
 
         transfers = []
         for col in range(n_cols):
@@ -753,11 +751,7 @@ def _peps_sequential_sweep_with_envs(
             flip_idx = 1 - cur_idx
             weight_cur = weights[cur_idx]
             weight_flip = weights[flip_idx]
-            ratio = jnp.where(
-                weight_cur > 0.0,
-                weight_flip / weight_cur,
-                jnp.where(weight_flip > 0.0, jnp.inf, 0.0),
-            )
+            ratio = _metropolis_ratio(weight_cur, weight_flip)
 
             key, subkey = jax.random.split(key)
             accept = jax.random.uniform(subkey) < jnp.minimum(1.0, ratio)

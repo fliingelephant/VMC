@@ -16,7 +16,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from VMC.utils.utils import spin_to_occupancy
+from VMC.utils.utils import random_tensor, spin_to_occupancy
 
 if TYPE_CHECKING:
     from jax.typing import DTypeLike
@@ -30,6 +30,17 @@ __all__ = [
     "DensityMatrix",
     # Amplitude functions
     "make_peps_amplitude",
+    # Internal functions exposed for external use
+    "_apply_mpo_from_below",
+    "_build_row_mpo",
+    "_compute_all_gradients",
+    "_compute_all_row_gradients",
+    "_compute_single_gradient",
+    "_contract_bottom",
+    "_contract_column_transfer",
+    "_contract_left_partial",
+    "_contract_right_partial",
+    "_forward_with_cache",
 ]
 
 logger = logging.getLogger(__name__)
@@ -44,8 +55,6 @@ class ContractionStrategy(abc.ABC):
     """Abstract base class for MPO-to-MPS contraction strategies."""
 
     def __init__(self, truncate_bond_dimension: int):
-        if truncate_bond_dimension <= 0:
-            raise ValueError("truncate_bond_dimension must be positive.")
         self.truncate_bond_dimension = truncate_bond_dimension
 
     @abc.abstractmethod
@@ -207,8 +216,8 @@ def _apply_mpo_density_matrix(
     return tuple(new)
 
 
-def _build_row_mpo_common(tensors, row_indices, row, n_cols):
-    """Shared row-MPO construction for static and class helpers."""
+def _build_row_mpo(tensors, row_indices, row, n_cols):
+    """Build row-MPO for PEPS contraction."""
     mpo = []
     for col in range(n_cols):
         site = jnp.asarray(tensors[row][col])[row_indices[col]]
@@ -216,22 +225,12 @@ def _build_row_mpo_common(tensors, row_indices, row, n_cols):
     return tuple(mpo)
 
 
-def _build_row_mpo_static(tensors, row_indices, row, n_cols):
-    """Static version of _build_row_mpo for use in custom_vjp."""
-    return _build_row_mpo_common(tensors, row_indices, row, n_cols)
-
-
-def _contract_bottom_common(mps):
-    """Shared boundary contraction for static and class helpers."""
+def _contract_bottom(mps):
+    """Contract bottom boundary of MPS to get scalar amplitude."""
     state = jnp.array([1.0], dtype=mps[0].dtype)
     for site in mps:
         state = jnp.tensordot(state, site[:, 0, :], axes=[[0], [0]])
     return state.squeeze()
-
-
-def _contract_bottom_static(mps):
-    """Static version of _contract_bottom for use in custom_vjp."""
-    return _contract_bottom_common(mps)
 
 
 def _forward_with_cache(
@@ -263,12 +262,12 @@ def _forward_with_cache(
     top_envs.append(boundary)
 
     for row in range(n_rows):
-        mpo = _build_row_mpo_static(tensors, spins[row], row, n_cols)
+        mpo = _build_row_mpo(tensors, spins[row], row, n_cols)
         boundary = strategy.apply(boundary, mpo)
         top_envs.append(boundary)
 
     # Contract final boundary to get amplitude
-    amp = _contract_bottom_static(boundary)
+    amp = _contract_bottom(boundary)
     return amp, top_envs
 
 
@@ -466,7 +465,7 @@ def _compute_all_gradients(
     # Sweep from bottom to top
     for row in range(n_rows - 1, -1, -1):
         top_env = top_envs[row]
-        mpo = _build_row_mpo_static(tensors, spins[row], row, n_cols)
+        mpo = _build_row_mpo(tensors, spins[row], row, n_cols)
 
         # Compute gradients for all tensors in this row
         row_grads = _compute_all_row_gradients(top_env, bottom_env, mpo)
@@ -574,15 +573,6 @@ class PEPS(nnx.Module):
             )
         self.strategy = contraction_strategy
 
-        # Determine real dtype for random initialization
-        is_complex = jnp.issubdtype(self.dtype, jnp.complexfloating)
-        if is_complex:
-            real_dtype = jnp.real(jnp.zeros((), dtype=self.dtype)).dtype
-            complex_unit = jnp.array(1j, dtype=self.dtype)
-        else:
-            real_dtype = self.dtype
-            complex_unit = None
-
         rows = []
         n_rows, n_cols = self.shape
         for r in range(n_rows):
@@ -592,58 +582,11 @@ class PEPS(nnx.Module):
                 down = 1 if r == n_rows - 1 else self.bond_dim
                 left = 1 if c == 0 else self.bond_dim
                 right = 1 if c == n_cols - 1 else self.bond_dim
-                shape_rc = (2, up, down, left, right)
-
-                if is_complex:
-                    key_re, key_im = rngs.params(), rngs.params()
-                    tensor_val = 1/2 * (
-                        jax.random.uniform(key_re, shape_rc, dtype=real_dtype)
-                        + complex_unit
-                        * jax.random.uniform(key_im, shape_rc, dtype=real_dtype)
-                    )
-                else:
-                    tensor_val = jax.random.uniform(
-                        rngs.params(),
-                        shape_rc,
-                        dtype=real_dtype,
-                    )
-
+                tensor_shape = (2, up, down, left, right)
+                tensor_val = random_tensor(rngs, tensor_shape, self.dtype)
                 row.append(nnx.Param(tensor_val, dtype=self.dtype))
             rows.append(row)
         self.tensors = rows
-
-    @staticmethod
-    def _build_row_mpo(tensors, row_indices, row, n_cols):
-        return _build_row_mpo_common(tensors, row_indices, row, n_cols)
-
-    # Keep static methods for backwards compatibility with test code
-    _apply_mpo = staticmethod(_apply_mpo_exact)
-    _apply_mpo_zip_up = staticmethod(_apply_mpo_zip_up)
-    _apply_mpo_density_matrix = staticmethod(_apply_mpo_density_matrix)
-
-    @staticmethod
-    @functools.partial(jax.jit, static_argnums=(1,))
-    def _truncate_mps(mps, truncate_bond_dimension):
-        mps = list(mps)
-        for i in range(len(mps) - 1):
-            left, phys, right = mps[i].shape
-            mat = mps[i].reshape(left * phys, right)
-            svd_eps = jnp.array(1e-7, dtype=mat.dtype)
-            mat = mat + svd_eps * jnp.eye(mat.shape[0], mat.shape[1], dtype=mat.dtype)
-            u, s, vh = jnp.linalg.svd(mat, full_matrices=False)
-            k = min(truncate_bond_dimension, s.shape[0])
-            u = u[:, :k]
-            s = s[:k]
-            vh = vh[:k, :]
-            mps[i] = u.reshape(left, phys, k)
-            s_mat = s.astype(vh.dtype)[:, None] * vh  # keep complex dtype for grads
-            mps[i + 1] = jnp.tensordot(s_mat, mps[i + 1], axes=[[1], [0]])
-        return tuple(mps)
-
-    @staticmethod
-    @jax.jit
-    def _contract_bottom(mps):
-        return _contract_bottom_common(mps)
 
     @staticmethod
     @functools.partial(jax.jit, static_argnames=("shape", "strategy"))
@@ -670,9 +613,9 @@ class PEPS(nnx.Module):
             for _ in range(shape[1])
         )
         for row in range(shape[0]):
-            mpo = PEPS._build_row_mpo(tensors, spins[row], row, shape[1])
+            mpo = _build_row_mpo(tensors, spins[row], row, shape[1])
             boundary = strategy.apply(boundary, mpo)
-        return PEPS._contract_bottom(boundary)
+        return _contract_bottom(boundary)
 
     @nnx.jit
     def __call__(self, x: jax.Array) -> jax.Array:

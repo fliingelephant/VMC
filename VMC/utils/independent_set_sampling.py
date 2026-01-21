@@ -8,7 +8,7 @@ from typing import Callable, Iterator, Sequence
 import jax
 import jax.numpy as jnp
 
-from VMC.utils.utils import occupancy_to_spin, spin_to_occupancy  # noqa: F401
+from VMC.utils.utils import occupancy_to_spin
 
 __all__ = [
     "DiscardBlockedSampler",
@@ -20,8 +20,6 @@ __all__ = [
     "enumerate_independent_sets_grid",
     "grid_edges",
     "independent_set_violations",
-    "occupancy_to_spin",
-    "spin_to_occupancy",
 ]
 
 

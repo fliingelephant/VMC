@@ -71,7 +71,6 @@ def _diag_space_matvec(
     v: jax.Array,
     params_per_site: tuple[int, ...] | None,
 ) -> jax.Array:
-    _ = space
     return _diag_matvec(jac, v, params_per_site)
 
 
@@ -82,7 +81,6 @@ def _diag_space_matvec(
     v: jax.Array,
     params_per_site: tuple[int, ...] | None,
 ) -> jax.Array:
-    _ = (space, jac, v, params_per_site)
     raise NotImplementedError("DiagonalQGT only supports ParameterSpace")
 
 
@@ -92,7 +90,6 @@ def _diag_space_to_dense(
     jac: Jacobian | SlicedJacobian,
     params_per_site: tuple[int, ...] | None,
 ) -> jax.Array:
-    _ = space
     return _diag_to_dense(jac, params_per_site)
 
 
@@ -102,7 +99,6 @@ def _diag_space_to_dense(
     jac: Jacobian | SlicedJacobian,
     params_per_site: tuple[int, ...] | None,
 ) -> jax.Array:
-    _ = (space, jac, params_per_site)
     raise NotImplementedError("DiagonalQGT only supports ParameterSpace")
 
 
@@ -334,30 +330,6 @@ def _sliced_dense_blocks(
     return jnp.concatenate(blocks, axis=1)
 
 
-@dispatch
-def _sliced_dense(
-    ordering: PhysicalOrdering,
-    o: jax.Array,
-    p: jax.Array,
-    phys_dim: int,
-    pps: tuple[int, ...],
-) -> jax.Array:
-    _ = ordering
-    return _sliced_dense_blocks(o, p, phys_dim, pps)
-
-
-@dispatch
-def _sliced_dense(
-    ordering: SiteOrdering,
-    o: jax.Array,
-    p: jax.Array,
-    phys_dim: int,
-    pps: tuple[int, ...],
-) -> jax.Array:
-    _ = ordering
-    return _sliced_dense_blocks(o, p, phys_dim, pps)
-
-
 # --------------------------------------------------------------------------- #
 # Matvec dispatch
 # --------------------------------------------------------------------------- #
@@ -453,7 +425,7 @@ def _to_dense(jac: Jacobian, space: SampleSpace):
 def _to_dense(jac: SlicedJacobian, space: ParameterSpace):
     o, p, d = jac.o, jac.p, jac.phys_dim
     pps = _params_per_site(jac.ordering, o)
-    O = _sliced_dense(jac.ordering, o, p, d, pps)
+    O = _sliced_dense_blocks(o, p, d, pps)
     scale = 1.0 / o.shape[0]
     S = (O.conj().T @ O) * scale
     mean = jacobian_mean(jac)

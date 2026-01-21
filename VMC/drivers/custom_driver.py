@@ -166,17 +166,9 @@ class DynamicsDriver:
         self.last_p = None
         self._sampler_configuration = None
 
-        if time_unit is None:
-            time_unit = RealTimeUnit()
-        self.time_unit = time_unit
-
-        if integrator is None:
-            integrator = time_unit.default_integrator()
-        self.integrator = integrator
-
-        if sampler_key is None:
-            sampler_key = jax.random.key(0)
-        self._sampler_key = sampler_key
+        self.time_unit = time_unit or RealTimeUnit()
+        self.integrator = integrator or self.time_unit.default_integrator()
+        self._sampler_key = sampler_key if sampler_key is not None else jax.random.key(0)
 
         self.diag_shift_error: float | None = None
         self.residual_error: float | None = None
@@ -213,9 +205,7 @@ class DynamicsDriver:
             o,
             p,
             local_energies,
-            step=self.step_count,
             grad_factor=self.time_unit.grad_factor,
-            stage=stage,
         )
         if stage == 0:
             self._sync_preconditioner_metrics()
@@ -225,9 +215,7 @@ class DynamicsDriver:
     @jax.jit
     def _tree_add_scaled(base: Any, delta: Any, scale: float) -> Any:
         return jax.tree_util.tree_map(
-            lambda x, y: jax.lax.add(
-                x, jax.lax.mul(jnp.asarray(scale, dtype=y.dtype), y)
-            ),
+            lambda x, y: x + jnp.asarray(scale, dtype=y.dtype) * y,
             base,
             delta,
         )
@@ -236,8 +224,7 @@ class DynamicsDriver:
     @jax.jit
     def _tree_weighted_sum(k1: Any, k2: Any, k3: Any, k4: Any) -> Any:
         def combine(a, b, c, d):
-            weighted = a + 2.0 * b + 2.0 * c + d
-            return jax.lax.mul(weighted, jnp.asarray(1.0 / 6.0, dtype=weighted.dtype))
+            return (a + 2.0 * b + 2.0 * c + d) * jnp.asarray(1.0 / 6.0, dtype=a.dtype)
 
         return jax.tree_util.tree_map(combine, k1, k2, k3, k4)
 
@@ -249,11 +236,10 @@ class DynamicsDriver:
         if isinstance(target, (list, tuple)):
             for target_item, value_item in zip(target, values):
                 DynamicsDriver._assign_params(target_item, value_item)
-            return
-        if isinstance(target, nnx.Variable):
+        elif isinstance(target, nnx.Variable):
             target.value = values
-            return
-        target[...] = values
+        else:
+            target[...] = values
 
     def step(self, dt: float | None = None) -> None:
         dt_step = self.dt if dt is None else float(dt)
@@ -267,19 +253,12 @@ class DynamicsDriver:
         if T <= 0:
             return
         t_end = self.t + float(T)
-        total = float(T)
-        pbar = tqdm(total=total, disable=not show_progress, unit="t")
-        n_steps = int(float(jnp.ceil(total / self.dt)))
-        for _ in range(n_steps):
-            remaining = t_end - self.t
-            if remaining <= 0:
-                break
-            dt_step = self.dt if remaining > self.dt else remaining
+        pbar = tqdm(total=float(T), disable=not show_progress, unit="t")
+        while self.t < t_end:
+            dt_step = min(self.dt, t_end - self.t)
             self.step(dt_step)
-            if show_progress:
-                pbar.update(dt_step)
-        if show_progress:
-            pbar.close()
+            pbar.update(dt_step)
+        pbar.close()
 
     @property
     def energy(self) -> Any:

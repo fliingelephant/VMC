@@ -26,34 +26,20 @@ def _max_full_vs_sliced_diff(
     grads_full: jax.Array,
     grads_sliced: jax.Array,
 ) -> float:
-    samples = jnp.asarray(samples)
-    max_diff = jnp.asarray(0.0)
-    n_sites = model.n_sites
-    bond_dim = model.bond_dim
-    phys_dim = model.phys_dim
+    n_sites, bond_dim, phys_dim = model.n_sites, model.bond_dim, model.phys_dim
     indices = spin_to_occupancy(samples)
-    offset_full = 0
-    offset_sliced = 0
+    max_diff = offset_full = offset_sliced = 0
     for site in range(n_sites):
         left_dim, right_dim = mps_site_dims(site, n_sites, bond_dim)
         params_per_phys = left_dim * right_dim
         full_site = grads_full[
             :, offset_full : offset_full + phys_dim * params_per_phys
-        ]
-        full_site = full_site.reshape(
-            samples.shape[0], phys_dim, params_per_phys
-        )
+        ].reshape(samples.shape[0], phys_dim, params_per_phys)
         selected = jnp.take_along_axis(
-            full_site,
-            indices[:, site][:, None, None],
-            axis=1,
+            full_site, indices[:, site][:, None, None], axis=1
         ).squeeze(axis=1)
-        sliced_site = grads_sliced[
-            :, offset_sliced : offset_sliced + params_per_phys
-        ]
-        max_diff = jnp.maximum(
-            max_diff, jnp.max(jnp.abs(selected - sliced_site))
-        )
+        sliced_site = grads_sliced[:, offset_sliced : offset_sliced + params_per_phys]
+        max_diff = jnp.maximum(max_diff, jnp.max(jnp.abs(selected - sliced_site)))
         offset_full += phys_dim * params_per_phys
         offset_sliced += params_per_phys
     return float(max_diff)
@@ -66,39 +52,22 @@ def _max_full_vs_sliced_diff(
     grads_full: jax.Array,
     grads_sliced: jax.Array,
 ) -> float:
-    samples = jnp.asarray(samples)
-    max_diff = jnp.asarray(0.0)
     n_rows, n_cols = model.shape
-    bond_dim = model.bond_dim
-    phys_dim = model.phys_dim
-    spins = spin_to_occupancy(samples).reshape(
-        samples.shape[0], n_rows, n_cols
-    )
-    offset_full = 0
-    offset_sliced = 0
+    bond_dim, phys_dim = model.bond_dim, model.phys_dim
+    spins = spin_to_occupancy(samples).reshape(samples.shape[0], n_rows, n_cols)
+    max_diff = offset_full = offset_sliced = 0
     for row in range(n_rows):
         for col in range(n_cols):
-            up, down, left, right = peps_site_dims(
-                row, col, n_rows, n_cols, bond_dim
-            )
+            up, down, left, right = peps_site_dims(row, col, n_rows, n_cols, bond_dim)
             params_per_phys = up * down * left * right
             full_site = grads_full[
                 :, offset_full : offset_full + phys_dim * params_per_phys
-            ]
-            full_site = full_site.reshape(
-                samples.shape[0], phys_dim, params_per_phys
-            )
+            ].reshape(samples.shape[0], phys_dim, params_per_phys)
             selected = jnp.take_along_axis(
-                full_site,
-                spins[:, row, col][:, None, None],
-                axis=1,
+                full_site, spins[:, row, col][:, None, None], axis=1
             ).squeeze(axis=1)
-            sliced_site = grads_sliced[
-                :, offset_sliced : offset_sliced + params_per_phys
-            ]
-            max_diff = jnp.maximum(
-                max_diff, jnp.max(jnp.abs(selected - sliced_site))
-            )
+            sliced_site = grads_sliced[:, offset_sliced : offset_sliced + params_per_phys]
+            max_diff = jnp.maximum(max_diff, jnp.max(jnp.abs(selected - sliced_site)))
             offset_full += phys_dim * params_per_phys
             offset_sliced += params_per_phys
     return float(max_diff)
@@ -154,28 +123,22 @@ class SequentialSamplingTest(unittest.TestCase):
             ):
                 model = make_model(seed)
                 amps_basis, _, _ = _value_and_grad(
-                    model,
-                    jnp.asarray(spins_basis),
-                    full_gradient=False,
+                    model, jnp.asarray(spins_basis), full_gradient=False
                 )
                 probs = jnp.abs(amps_basis) ** 2
-                probs = probs / jnp.sum(probs)
-                key = jax.random.key(seed)
+                probs /= probs.sum()
                 samples = sequential_sample(
                     model,
                     n_samples=self.SAMPLES,
                     n_chains=n_chains,
                     burn_in=self.BURN_IN,
-                    key=key,
+                    key=jax.random.key(seed),
                 )
                 indices = jnp.sum(
-                    spin_to_occupancy(samples) * weights,
-                    axis=-1,
+                    spin_to_occupancy(samples) * weights, axis=-1
                 ).astype(jnp.int32)
-                counts = jnp.bincount(indices, length=2**self.N_SITES)
-                empirical = counts / samples.shape[0]
-                max_diff = float(jnp.max(jnp.abs(empirical - probs)))
-                self.assertLess(max_diff, self.MAX_DIFF)
+                empirical = jnp.bincount(indices, length=2**self.N_SITES) / samples.shape[0]
+                self.assertLess(float(jnp.max(jnp.abs(empirical - probs))), self.MAX_DIFF)
 
     def test_sequential_sample_with_gradients(self) -> None:
         """Validate distribution, p-indexing, and full/sliced gradient consistency."""
@@ -187,71 +150,50 @@ class SequentialSamplingTest(unittest.TestCase):
         ):
             model = make_model(seed)
             amps_basis, _, p_ref = _value_and_grad(
-                model,
-                jnp.asarray(spins_basis),
-                full_gradient=False,
+                model, jnp.asarray(spins_basis), full_gradient=False
             )
             probs = jnp.abs(amps_basis) ** 2
-            probs = probs / jnp.sum(probs)
+            probs /= probs.sum()
             key = jax.random.key(seed)
-            samples_sliced, grads_sliced, p_sliced, _, _ = (
-                sequential_sample_with_gradients(
-                    model,
-                    n_samples=self.SAMPLES,
-                    n_chains=n_chains,
-                    burn_in=self.BURN_IN,
-                    key=key,
-                    full_gradient=False,
-                    return_prob=False,
-                )
+            samples_sliced, grads_sliced, p_sliced, _, _ = sequential_sample_with_gradients(
+                model,
+                n_samples=self.SAMPLES,
+                n_chains=n_chains,
+                burn_in=self.BURN_IN,
+                key=key,
+                full_gradient=False,
             )
-            samples_full, grads_full, p_full, _, _ = (
-                sequential_sample_with_gradients(
-                    model,
-                    n_samples=self.SAMPLES,
-                    n_chains=n_chains,
-                    burn_in=self.BURN_IN,
-                    key=key,
-                    full_gradient=True,
-                    return_prob=False,
-                )
+            samples_full, grads_full, p_full, _, _ = sequential_sample_with_gradients(
+                model,
+                n_samples=self.SAMPLES,
+                n_chains=n_chains,
+                burn_in=self.BURN_IN,
+                key=key,
+                full_gradient=True,
             )
-            phys_dim = model.phys_dim
             self.assertEqual(grads_sliced.shape, p_sliced.shape)
             self.assertEqual(grads_sliced.shape[0], samples_sliced.shape[0])
             self.assertEqual(grads_full.shape[0], samples_full.shape[0])
-            self.assertEqual(
-                grads_full.shape[1],
-                grads_sliced.shape[1] * phys_dim,
-            )
+            self.assertEqual(grads_full.shape[1], grads_sliced.shape[1] * model.phys_dim)
             indices_sliced = jnp.sum(
-                spin_to_occupancy(samples_sliced) * weights,
-                axis=-1,
+                spin_to_occupancy(samples_sliced) * weights, axis=-1
             ).astype(jnp.int32)
-            counts_sliced = jnp.bincount(indices_sliced, length=2**self.N_SITES)
-            empirical_sliced = counts_sliced / samples_sliced.shape[0]
+            empirical_sliced = jnp.bincount(indices_sliced, length=2**self.N_SITES) / samples_sliced.shape[0]
             indices_full = jnp.sum(
-                spin_to_occupancy(samples_full) * weights,
-                axis=-1,
+                spin_to_occupancy(samples_full) * weights, axis=-1
             ).astype(jnp.int32)
-            counts_full = jnp.bincount(indices_full, length=2**self.N_SITES)
-            empirical_full = counts_full / samples_full.shape[0]
+            empirical_full = jnp.bincount(indices_full, length=2**self.N_SITES) / samples_full.shape[0]
             with self.subTest(
                 model=make_model.__name__,
                 n_chains=n_chains,
                 seed=seed,
                 full_gradient="align",
             ):
-                self.assertTrue(
-                    jnp.array_equal(samples_sliced, samples_full)
+                self.assertTrue(jnp.array_equal(samples_sliced, samples_full))
+                self.assertLess(
+                    _max_full_vs_sliced_diff(model, samples_sliced, grads_full, grads_sliced),
+                    self.MAX_GRAD_DIFF,
                 )
-                max_align_diff = _max_full_vs_sliced_diff(
-                    model,
-                    samples_sliced,
-                    grads_full,
-                    grads_sliced,
-                )
-                self.assertLess(max_align_diff, self.MAX_GRAD_DIFF)
 
             with self.subTest(
                 model=make_model.__name__,
@@ -259,10 +201,8 @@ class SequentialSamplingTest(unittest.TestCase):
                 seed=seed,
                 full_gradient=False,
             ):
-                max_diff = float(jnp.max(jnp.abs(empirical_sliced - probs)))
-                self.assertLess(max_diff, self.MAX_DIFF)
-                p_ref_sliced = p_ref[indices_sliced]
-                self.assertTrue(jnp.array_equal(p_sliced, p_ref_sliced))
+                self.assertLess(float(jnp.max(jnp.abs(empirical_sliced - probs))), self.MAX_DIFF)
+                self.assertTrue(jnp.array_equal(p_sliced, p_ref[indices_sliced]))
 
             with self.subTest(
                 model=make_model.__name__,
@@ -270,26 +210,18 @@ class SequentialSamplingTest(unittest.TestCase):
                 seed=seed,
                 full_gradient=True,
             ):
-                max_diff = float(jnp.max(jnp.abs(empirical_full - probs)))
-                self.assertLess(max_diff, self.MAX_DIFF)
+                self.assertLess(float(jnp.max(jnp.abs(empirical_full - probs))), self.MAX_DIFF)
                 amps, grads_ref_full, _ = _value_and_grad(
-                    model,
-                    jnp.asarray(samples_full),
-                    full_gradient=True,
+                    model, jnp.asarray(samples_full), full_gradient=True
                 )
                 grads_ref_full = grads_ref_full / amps[:, None]
-                max_grad_diff = float(
-                    jnp.max(jnp.abs(grads_full - grads_ref_full))
+                self.assertLess(
+                    float(jnp.max(jnp.abs(
+                        jnp.linalg.norm(grads_full, axis=1) - jnp.linalg.norm(grads_ref_full, axis=1)
+                    ))),
+                    self.MAX_GRAD_DIFF,
                 )
-                ok_norm = jnp.linalg.norm(grads_full, axis=1)
-                ok_norm_ref = jnp.linalg.norm(
-                    grads_ref_full, axis=1
-                )
-                max_ok_diff = float(
-                    jnp.max(jnp.abs(ok_norm - ok_norm_ref))
-                )
-                self.assertLess(max_ok_diff, self.MAX_GRAD_DIFF)
-                self.assertLess(max_grad_diff, self.MAX_GRAD_DIFF)
+                self.assertLess(float(jnp.max(jnp.abs(grads_full - grads_ref_full))), self.MAX_GRAD_DIFF)
                 self.assertIsNone(p_full)
 
 

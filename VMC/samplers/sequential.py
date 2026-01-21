@@ -145,10 +145,8 @@ def _pad_mps_tensors(
     """Pad MPS tensors to a uniform bond dimension for JAX scans."""
     padded = []
     for tensor in tensors:
-        left_dim = tensor.shape[1]
-        right_dim = tensor.shape[2]
         block = jnp.zeros((2, bond_dim, bond_dim), dtype=tensor.dtype)
-        block = block.at[:, :left_dim, :right_dim].set(tensor)
+        block = block.at[:, :tensor.shape[1], :tensor.shape[2]].set(tensor)
         padded.append(block)
     return jnp.stack(padded, axis=0)
 
@@ -161,20 +159,18 @@ def _mps_right_envs(
     n_sites: int,
 ):
     bond_dim = tensors.shape[-1]
-    right_end = jnp.zeros((bond_dim,), dtype=tensors.dtype)
-    right_end = right_end.at[0].set(1.0)
-
-    site_ids_rev = jnp.arange(n_sites - 1, -1, -1)
+    right_end = jnp.zeros((bond_dim,), dtype=tensors.dtype).at[0].set(1.0)
 
     def right_step(carry, site):
         tensor = tensors[site, indices[site]]
         right_env = jnp.einsum("ij,j->i", tensor, carry)
         return right_env, right_env
 
-    _, right_envs_rev = jax.lax.scan(right_step, right_end, site_ids_rev)
+    _, right_envs_rev = jax.lax.scan(
+        right_step, right_end, jnp.arange(n_sites - 1, -1, -1)
+    )
     right_envs = jnp.flip(right_envs_rev, axis=0)
-    right_envs = jnp.concatenate([right_envs, right_end[None, :]], axis=0)
-    return right_envs
+    return jnp.concatenate([right_envs, right_end[None, :]], axis=0)
 
 
 @functools.partial(jax.jit, static_argnames=("n_sites", "collect_left_envs"))
@@ -458,13 +454,11 @@ def sequential_sample_with_gradients(
             p_parts.append(jnp.full((params_per_phys,), indices[site], dtype=jnp.int8))
         return jnp.concatenate(grad_parts), jnp.concatenate(p_parts)
 
-    empty_p = jnp.zeros((0,), dtype=jnp.int8)
     if full_gradient:
         def flatten_fn(indices, left_envs, right_envs):
-            return flatten_full_gradients(indices, left_envs, right_envs), empty_p
+            return flatten_full_gradients(indices, left_envs, right_envs), jnp.zeros((0,), dtype=jnp.int8)
     else:
-        def flatten_fn(indices, left_envs, right_envs):
-            return flatten_sliced_gradients(indices, left_envs, right_envs)
+        flatten_fn = flatten_sliced_gradients
 
     def sample_step(carry, _):
         indices, chain_keys, right_envs = carry
@@ -479,13 +473,11 @@ def sequential_sample_with_gradients(
             indices, left_envs, right_envs_next
         )
         grad_row = grad_row / amp[:, None]
-        sample = indices
-        prob = jnp.abs(amp) ** 2
         return (indices, chain_keys, right_envs_next), (
-            sample,
+            indices,
             grad_row,
             p_row,
-            prob,
+            jnp.abs(amp) ** 2,
         )
 
     (final_configurations, _, _), (samples, grads, p, probs) = _collect_steps(
@@ -607,13 +599,11 @@ def sequential_sample_with_gradients(
                 )
         return jnp.concatenate(grad_parts), jnp.concatenate(p_parts)
 
-    empty_p = jnp.zeros((0,), dtype=jnp.int8)
     if full_gradient:
         def flatten_fn(env_grads, spins):
-            return flatten_full_gradients(env_grads, spins), empty_p
+            return flatten_full_gradients(env_grads, spins), jnp.zeros((0,), dtype=jnp.int8)
     else:
-        def flatten_fn(env_grads, spins):
-            return flatten_sliced_gradients(env_grads, spins)
+        flatten_fn = flatten_sliced_gradients
 
     def sample_step(carry, _):
         spins, chain_keys, bottom_envs, steps_left = carry
@@ -654,13 +644,11 @@ def sequential_sample_with_gradients(
         )
         grad_row, p_row = jax.vmap(flatten_fn)(env_grads, spins)
         grad_row = grad_row / amp[:, None]
-        sample = spins.reshape(num_chains, n_sites)
-        prob = jnp.abs(amp) ** 2
         return (spins, chain_keys, bottom_envs_next, steps_left - 1), (
-            sample,
+            spins.reshape(num_chains, n_sites),
             grad_row,
             p_row,
-            prob,
+            jnp.abs(amp) ** 2,
         )
 
     steps_left = jnp.asarray(chain_length)
@@ -688,10 +676,6 @@ def sequential_sample_with_gradients(
     return samples, grads, p, key, final_configurations
 
 
-def _peps_boundary_mps(n_cols: int, dtype: jnp.dtype) -> tuple[jax.Array, ...]:
-    return tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
-
-
 @functools.partial(jax.jit, static_argnames=("shape", "strategy"))
 def _peps_bottom_envs(
     tensors: list[list[jax.Array]],
@@ -702,7 +686,7 @@ def _peps_bottom_envs(
     n_rows, n_cols = shape
     dtype = tensors[0][0].dtype
     bottom_envs = [None] * n_rows
-    bottom_env = _peps_boundary_mps(n_cols, dtype)
+    bottom_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
     for row in range(n_rows - 1, -1, -1):
         bottom_envs[row] = bottom_env
         # TODO: Reuse the most-bottom MPO/boundary across sweeps to avoid rebuilding
@@ -727,7 +711,7 @@ def _peps_sequential_sweep_with_envs(
     dtype = tensors[0][0].dtype
 
     top_envs = [] if collect_top_envs else None
-    top_env = _peps_boundary_mps(n_cols, dtype)
+    top_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
     for row in range(n_rows):
         if collect_top_envs:
             top_envs.append(top_env)
@@ -744,8 +728,7 @@ def _peps_sequential_sweep_with_envs(
             transfers.append(transfer)
 
         right_envs = [None] * n_cols
-        right_envs[n_cols - 1] = jnp.ones((1, 1, 1), dtype=dtype)
-        env = right_envs[n_cols - 1]
+        right_envs[n_cols - 1] = env = jnp.ones((1, 1, 1), dtype=dtype)
         for col in range(n_cols - 2, -1, -1):
             env = _contract_right_partial(transfers[col + 1], env)
             right_envs[col] = env
@@ -789,8 +772,7 @@ def _peps_sequential_sweep_with_envs(
         # Update top boundary with the updated row (reuse environments in sweep).
         top_env = strategy.apply(top_env, tuple(updated_row))
 
-    top_envs_out = top_envs if collect_top_envs else ()
-    return spins, key, top_envs_out, top_env
+    return spins, key, top_envs if collect_top_envs else (), top_env
 
 
 def peps_sequential_sweep(

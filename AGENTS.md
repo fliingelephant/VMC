@@ -12,6 +12,7 @@ Use a **hybrid approach**: ABCs for type hierarchies + plum `@dispatch` for mult
 - **Multi-type dispatch** → `@dispatch` functions (when behavior depends on multiple argument types).
 - **Extending library functions** → `@library.func.dispatch`.
 - **NO strings for dispatching.** Use typed objects.
+- **Minimize helper functions.** Inline short logic; only extract when reused 3+ times or significantly improves readability.
 
 ## Design Decisions
 
@@ -23,6 +24,9 @@ Use a **hybrid approach**: ABCs for type hierarchies + plum `@dispatch` for mult
 - **Sampling gradients.** When a sampler records gradients, compute value+Jacobian for each proposal together and keep gradients only for accepted proposals.
 - **Uncertain correctness.** Implementation might be totally incorrect; for uncertain behavior, refer to notes or ask the user.
 - **Think twice.** For complicated or important algorithms, think twice before implementing.
+- **Julia-style defaults.** Put defaults in function signature, not body. Use `def foo(x, y=10):` not `def foo(x, y=None): y = y or 10`.
+- **No unnecessary intermediate variables.** Return directly: `return expr` not `result = expr; return result`.
+- **No unused imports/variables.** Remove any defined but unreferenced code.
 
 ## JAX Patterns
 

@@ -545,6 +545,8 @@ class PEPS(nnx.Module):
     The default strategy is ZipUp(truncate_bond_dimension=bond_dim**2).
     """
 
+    tensors: list[list[nnx.Param]] = nnx.data()
+
     def __init__(
         self,
         *,

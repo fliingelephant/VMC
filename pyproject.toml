@@ -18,9 +18,10 @@ dependencies = [
   "tqdm>=4.67.1",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
-  "pytest",
+    "pytest>=9.0.2",
+    "pytest-cov>=7.0.0",
 ]
 
 [tool.setuptools.packages.find]

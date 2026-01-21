@@ -34,6 +34,8 @@ class MPS(nnx.Module):
         dtype: Data type for tensors (default complex128).
     """
 
+    tensors: list[nnx.Param] = nnx.data()
+
     def __init__(
         self,
         *,

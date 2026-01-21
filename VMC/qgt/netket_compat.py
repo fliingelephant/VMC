@@ -68,7 +68,6 @@ class DenseSR(AbstractLinearPreconditioner):
         O = build_dense_jac(
             apply_fun, params, model_state, samples, holomorphic=self.holomorphic
         )
-        O = O * jnp.sqrt(samples.shape[0])
         params_struct = jax.tree_util.tree_map(
             lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype), params
         )

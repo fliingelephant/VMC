@@ -42,6 +42,7 @@ class MPS(nnx.Module):
         rngs: nnx.Rngs,
         n_sites: int,
         bond_dim: int,
+        phys_dim: int = 2,
         dtype: "DTypeLike" = jnp.complex128,
     ):
         """Initialize MPS with random tensors.
@@ -50,17 +51,18 @@ class MPS(nnx.Module):
             rngs: Flax NNX random key generator.
             n_sites: Number of lattice sites.
             bond_dim: Virtual bond dimension.
+            phys_dim: Physical dimension (default 2 for spins).
             dtype: Data type for tensors (default: complex128).
         """
         self.n_sites = n_sites
-        self.bond_dim = bond_dim
-        self.phys_dim = 2
+        self.bond_dim = int(bond_dim)
+        self.phys_dim = int(phys_dim)
         self.dtype = jnp.dtype(dtype)
 
         tensors = []
         for site in range(n_sites):
-            left_dim = 1 if site == 0 else bond_dim
-            right_dim = 1 if site == n_sites - 1 else bond_dim
+            left_dim = 1 if site == 0 else self.bond_dim
+            right_dim = 1 if site == n_sites - 1 else self.bond_dim
             shape = (self.phys_dim, left_dim, right_dim)
             tensor_val = random_tensor(rngs, shape, self.dtype)
             tensors.append(nnx.Param(tensor_val, dtype=self.dtype))

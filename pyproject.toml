@@ -18,12 +18,6 @@ dependencies = [
   "tqdm>=4.67.1",
 ]
 
-[project.optional-dependencies]
-dev = [
-  "pytest",
-  "pytest-cov"
-]
-
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",
@@ -34,3 +28,6 @@ dev = [
 where = ["."]
 include = ["VMC*"]
 exclude = ["notes*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/test_sequential_sampling.py"]

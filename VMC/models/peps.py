@@ -440,7 +440,9 @@ def _compute_all_gradients(
     shape: tuple[int, int],
     strategy: ContractionStrategy,
     top_envs: list[tuple],
-) -> list[list[jax.Array]]:
+    *,
+    cache_bottom_envs: bool = False,
+) -> list[list[jax.Array]] | tuple[list[list[jax.Array]], list[tuple]]:
     """Compute gradients for all PEPS tensors using cached top environments.
 
     Args:
@@ -452,12 +454,16 @@ def _compute_all_gradients(
 
     Returns:
         Nested list of gradient tensors matching the structure of tensors.
+        If ``cache_bottom_envs`` is True, also returns the bottom environments
+        for each row (before updating with that row's MPO).
     """
     n_rows, n_cols = shape
     dtype = jnp.asarray(tensors[0][0]).dtype
 
     # Initialize gradient storage
     grads = [[None for _ in range(n_cols)] for _ in range(n_rows)]
+    # Optional cache for callers that reuse bottom environments (e.g. samplers).
+    bottom_envs_cached = [None] * n_rows if cache_bottom_envs else None
 
     # Initialize bottom environment (trivial for below the last row)
     bottom_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
@@ -465,6 +471,8 @@ def _compute_all_gradients(
     # Sweep from bottom to top
     for row in range(n_rows - 1, -1, -1):
         top_env = top_envs[row]
+        if cache_bottom_envs:
+            bottom_envs_cached[row] = bottom_env
         mpo = _build_row_mpo(tensors, spins[row], row, n_cols)
 
         # Compute gradients for all tensors in this row
@@ -474,7 +482,7 @@ def _compute_all_gradients(
         # Update bottom_env by contracting this row from below
         bottom_env = _apply_mpo_from_below(bottom_env, mpo, strategy)
 
-    return grads
+    return (grads, bottom_envs_cached) if cache_bottom_envs else grads
 
 
 def make_peps_amplitude(
@@ -553,6 +561,7 @@ class PEPS(nnx.Module):
         rngs: nnx.Rngs,
         shape: tuple[int, int],
         bond_dim: int,
+        phys_dim: int = 2,
         contraction_strategy: ContractionStrategy | None = None,
         dtype: "DTypeLike" = jnp.complex128,
     ):
@@ -562,12 +571,14 @@ class PEPS(nnx.Module):
             rngs: Flax NNX random key generator.
             shape: Grid shape (n_rows, n_cols).
             bond_dim: Virtual bond dimension.
+            phys_dim: Physical dimension (default 2 for spins).
             contraction_strategy: Contraction strategy instance (default: ZipUp
                 with truncate_bond_dimension=bond_dim**2).
             dtype: Data type for tensors (default: complex128).
         """
         self.shape = (int(shape[0]), int(shape[1]))
         self.bond_dim = int(bond_dim)
+        self.phys_dim = int(phys_dim)
         self.dtype = jnp.dtype(dtype)
         if contraction_strategy is None:
             contraction_strategy = ZipUp(
@@ -584,7 +595,7 @@ class PEPS(nnx.Module):
                 down = 1 if r == n_rows - 1 else self.bond_dim
                 left = 1 if c == 0 else self.bond_dim
                 right = 1 if c == n_cols - 1 else self.bond_dim
-                tensor_shape = (2, up, down, left, right)
+                tensor_shape = (self.phys_dim, up, down, left, right)
                 tensor_val = random_tensor(rngs, tensor_shape, self.dtype)
                 row.append(nnx.Param(tensor_val, dtype=self.dtype))
             rows.append(row)

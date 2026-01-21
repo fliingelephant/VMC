@@ -63,7 +63,6 @@ class NetKetCompatTest(unittest.TestCase):
         O = build_dense_jac(
             apply_fun, params_ref, model_state, samples, holomorphic=True
         )
-        O = O * jnp.sqrt(samples.shape[0])
         S_expected = QGT(Jacobian(O), space=ParameterSpace()).to_dense()
         S_expected = S_expected + diag_shift * jnp.eye(
             S_expected.shape[0], dtype=S_expected.dtype

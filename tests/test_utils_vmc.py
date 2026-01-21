@@ -52,8 +52,7 @@ class VMCUtilsTest(unittest.TestCase):
         )
         jac_tree = jax.vmap(jac_fun, in_axes=(None, 0))(params, samples)
         jac_tree = jax.tree_util.tree_map(
-            lambda x: (x - jnp.mean(x, axis=0, keepdims=True))
-            / jnp.sqrt(samples.shape[0]),
+            lambda x: x - jnp.mean(x, axis=0, keepdims=True),
             jac_tree,
         )
         leaves = [

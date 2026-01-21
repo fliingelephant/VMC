@@ -79,31 +79,6 @@ def model_params(model) -> dict[str, Any]:
 
 
 @functools.partial(jax.jit, static_argnames=("apply_fun", "holomorphic"))
-def _build_dense_jac_apply(
-    apply_fun,
-    params: dict,
-    model_state: dict,
-    samples: jax.Array,
-    *,
-    holomorphic: bool = True,
-) -> jax.Array:
-    """Compute dense, centered Jacobian flattened over parameter leaves."""
-    jac_fun = jax.jacrev(
-        lambda p, x: apply_fun({"params": p, **model_state}, x),
-        holomorphic=holomorphic,
-    )
-    jac_tree = jax.vmap(jac_fun, in_axes=(None, 0))(params, samples)
-    jac_tree = jax.tree_util.tree_map(
-        lambda x: (x - jnp.mean(x, axis=0, keepdims=True)) / jnp.sqrt(samples.shape[0]),
-        jac_tree,
-    )
-    leaves = [
-        leaf.reshape(samples.shape[0], -1)
-        for leaf in jax.tree_util.tree_leaves(jac_tree)
-    ]
-    return jnp.concatenate(leaves, axis=1)
-
-
 def build_dense_jac(
     apply_fun: Callable,
     params: dict,
@@ -112,10 +87,24 @@ def build_dense_jac(
     *,
     holomorphic: bool = True,
 ) -> jax.Array:
-    """Compute dense, centered Jacobian for NetKet-compatible apply_funs."""
-    return _build_dense_jac_apply(
-        apply_fun, params, model_state, samples, holomorphic=holomorphic,
+    """Compute dense, centered Jacobian for NetKet-compatible apply_funs.
+
+    The Jacobian is not rescaled by ``1 / sqrt(n_samples)``.
+    """
+    jac_fun = jax.jacrev(
+        lambda p, x: apply_fun({"params": p, **model_state}, x),
+        holomorphic=holomorphic,
     )
+    jac_tree = jax.vmap(jac_fun, in_axes=(None, 0))(params, samples)
+    jac_tree = jax.tree_util.tree_map(
+        lambda x: x - jnp.mean(x, axis=0, keepdims=True),
+        jac_tree,
+    )
+    leaves = [
+        leaf.reshape(samples.shape[0], -1)
+        for leaf in jax.tree_util.tree_leaves(jac_tree)
+    ]
+    return jnp.concatenate(leaves, axis=1)
 
 
 def local_estimate(model, samples: jax.Array, operator) -> jax.Array:

@@ -93,8 +93,8 @@ def reset_product_state_peps(model: PEPS, spins: jnp.ndarray):
             idx += 1
             t.value = arr
             new_row.append(t)
-        new_rows.append(nnx.List(new_row))
-    model.tensors = nnx.List(new_rows)
+        new_rows.append(new_row)
+    model.tensors = new_rows
 
 
 def align_phase(reference: jax.Array, target: jax.Array):

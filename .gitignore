@@ -13,6 +13,9 @@ ENV/
 env/
 .env
 
+# Build metadata
+*.egg-info/
+
 # Test / coverage / tooling caches
 .pytest_cache/
 .mypy_cache/
@@ -34,6 +37,7 @@ jax_cache/
 xla_cache/
 .tpu_cache/
 tpu_cache/
+.uv-cache/
 
 # Logs
 *.log

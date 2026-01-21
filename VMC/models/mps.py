@@ -85,7 +85,7 @@ class MPS(nnx.Module):
                 )
 
             tensors.append(nnx.Param(tensor_val, dtype=self.dtype))
-        self.tensors = nnx.List(tensors)
+        self.tensors = tensors
 
     @staticmethod
     def _batch_amplitudes(tensors, samples: jax.Array) -> jax.Array:

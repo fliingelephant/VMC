@@ -26,9 +26,9 @@ def _spins_to_index(spins: np.ndarray) -> int:
 
 class SequentialSamplingTest(unittest.TestCase):
     def test_mps_distribution_small(self) -> None:
-        n_sites = 4
-        n_samples = 256
-        model = MPS(rngs=nnx.Rngs(0), n_sites=n_sites, bond_dim=2)
+        n_sites = 8
+        n_samples = 4096
+        model = MPS(rngs=nnx.Rngs(0), n_sites=n_sites, bond_dim=4)
         key = jax.random.key(0)
         samples = sequential_sample(
             model, n_samples=n_samples, key=key
@@ -56,10 +56,10 @@ class SequentialSamplingTest(unittest.TestCase):
         self.assertLess(max_diff, 0.1)
 
     def test_peps_distribution_small(self) -> None:
-        shape = (2, 2)
+        shape = (2, 3)
         n_sites = shape[0] * shape[1]
-        n_samples = 256
-        model = PEPS(rngs=nnx.Rngs(1), shape=shape, bond_dim=2)
+        n_samples = 4096
+        model = PEPS(rngs=nnx.Rngs(1), shape=shape, bond_dim=3)
         key = jax.random.key(1)
         samples = sequential_sample(
             model, n_samples=n_samples, key=key

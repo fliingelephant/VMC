@@ -609,8 +609,8 @@ class PEPS(nnx.Module):
                     )
 
                 row.append(nnx.Param(tensor_val, dtype=self.dtype))
-            rows.append(nnx.List(row))
-        self.tensors = nnx.List(rows)
+            rows.append(row)
+        self.tensors = rows
 
     @staticmethod
     def _build_row_mpo(tensors, row_indices, row, n_cols):

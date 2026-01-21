@@ -246,12 +246,12 @@ class DynamicsDriver:
 
     @staticmethod
     def _assign_params(target: Any, values: Any) -> None:
-        if isinstance(target, (list, tuple, nnx.List)):
+        if isinstance(target, (list, tuple)):
             for target_item, value_item in zip(target, values):
                 DynamicsDriver._assign_params(target_item, value_item)
             return
         if isinstance(target, nnx.Variable):
-            target.copy_from(values)
+            target.value = values
             return
         target[...] = values
 

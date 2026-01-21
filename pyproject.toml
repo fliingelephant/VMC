@@ -18,6 +18,11 @@ dependencies = [
   "tqdm>=4.67.1",
 ]
 
+[project.optional-dependencies]
+dev = [
+  "pytest",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",

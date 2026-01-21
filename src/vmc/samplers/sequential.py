@@ -24,7 +24,6 @@ from vmc.models.peps import (
     _contract_left_partial,
     _contract_right_partial,
 )
-from vmc.utils.smallo import mps_site_dims, peps_site_dims
 from vmc.utils.utils import occupancy_to_spin, spin_to_occupancy
 
 __all__ = [
@@ -430,7 +429,7 @@ def sequential_sample_with_gradients(
     def flatten_full_gradients(indices, left_envs, right_envs):
         grad_parts = []
         for site in range(n_sites):
-            left_dim, right_dim = mps_site_dims(site, n_sites, bond_dim)
+            left_dim, right_dim = MPS.site_dims(site, n_sites, bond_dim)
             left = left_envs[site][:left_dim]
             right = right_envs[site + 1][:right_dim]
             grad_site = left[:, None] * right[None, :]
@@ -445,7 +444,7 @@ def sequential_sample_with_gradients(
         grad_parts = []
         p_parts = []
         for site in range(n_sites):
-            left_dim, right_dim = mps_site_dims(site, n_sites, bond_dim)
+            left_dim, right_dim = MPS.site_dims(site, n_sites, bond_dim)
             left = left_envs[site][:left_dim]
             right = right_envs[site + 1][:right_dim]
             grad_site = left[:, None] * right[None, :]
@@ -592,7 +591,9 @@ def sequential_sample_with_gradients(
         for row in range(n_rows):
             for col in range(n_cols):
                 grad_parts.append(env_grads[row][col].reshape(-1))
-                up, down, left, right = peps_site_dims(row, col, n_rows, n_cols, bond_dim)
+                up, down, left, right = PEPS.site_dims(
+                    row, col, n_rows, n_cols, bond_dim
+                )
                 params_per_phys = up * down * left * right
                 p_parts.append(
                     jnp.full((params_per_phys,), spins[row, col], dtype=jnp.int8)

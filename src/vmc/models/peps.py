@@ -16,7 +16,6 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from vmc.utils.smallo import peps_site_dims
 from vmc.utils.utils import random_tensor, spin_to_occupancy
 
 if TYPE_CHECKING:
@@ -532,6 +531,17 @@ class PEPS(nnx.Module):
 
     tensors: list[list[nnx.Param]] = nnx.data()
 
+    @staticmethod
+    def site_dims(
+        row: int, col: int, n_rows: int, n_cols: int, bond_dim: int
+    ) -> tuple[int, int, int, int]:
+        """Return (up, down, left, right) dimensions for a PEPS site."""
+        up = 1 if row == 0 else bond_dim
+        down = 1 if row == n_rows - 1 else bond_dim
+        left = 1 if col == 0 else bond_dim
+        right = 1 if col == n_cols - 1 else bond_dim
+        return up, down, left, right
+
     def __init__(
         self,
         *,
@@ -569,7 +579,10 @@ class PEPS(nnx.Module):
                 nnx.Param(
                     random_tensor(
                         rngs,
-                        (self.phys_dim, *peps_site_dims(r, c, n_rows, n_cols, self.bond_dim)),
+                        (
+                            self.phys_dim,
+                            *self.site_dims(r, c, n_rows, n_cols, self.bond_dim),
+                        ),
                         self.dtype,
                     ),
                     dtype=self.dtype,

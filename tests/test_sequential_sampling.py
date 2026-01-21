@@ -15,7 +15,6 @@ from vmc.core import _value_and_grad
 from vmc.samplers.sequential import sequential_sample, sequential_sample_with_gradients
 from vmc.models.mps import MPS
 from vmc.models.peps import NoTruncation, PEPS
-from vmc.utils.smallo import mps_site_dims, peps_site_dims
 from vmc.utils.utils import occupancy_to_spin, spin_to_occupancy
 
 
@@ -30,7 +29,7 @@ def _max_full_vs_sliced_diff(
     indices = spin_to_occupancy(samples)
     max_diff = offset_full = offset_sliced = 0
     for site in range(n_sites):
-        left_dim, right_dim = mps_site_dims(site, n_sites, bond_dim)
+        left_dim, right_dim = MPS.site_dims(site, n_sites, bond_dim)
         params_per_phys = left_dim * right_dim
         full_site = grads_full[
             :, offset_full : offset_full + phys_dim * params_per_phys
@@ -58,7 +57,9 @@ def _max_full_vs_sliced_diff(
     max_diff = offset_full = offset_sliced = 0
     for row in range(n_rows):
         for col in range(n_cols):
-            up, down, left, right = peps_site_dims(row, col, n_rows, n_cols, bond_dim)
+            up, down, left, right = PEPS.site_dims(
+                row, col, n_rows, n_cols, bond_dim
+            )
             params_per_phys = up * down * left * right
             full_site = grads_full[
                 :, offset_full : offset_full + phys_dim * params_per_phys

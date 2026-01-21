@@ -36,6 +36,13 @@ class MPS(nnx.Module):
 
     tensors: list[nnx.Param] = nnx.data()
 
+    @staticmethod
+    def site_dims(site: int, n_sites: int, bond_dim: int) -> tuple[int, int]:
+        """Return (left_dim, right_dim) for an MPS site."""
+        left = 1 if site == 0 else bond_dim
+        right = 1 if site == n_sites - 1 else bond_dim
+        return left, right
+
     def __init__(
         self,
         *,
@@ -61,8 +68,7 @@ class MPS(nnx.Module):
 
         tensors = []
         for site in range(n_sites):
-            left_dim = 1 if site == 0 else self.bond_dim
-            right_dim = 1 if site == n_sites - 1 else self.bond_dim
+            left_dim, right_dim = self.site_dims(site, n_sites, self.bond_dim)
             shape = (self.phys_dim, left_dim, right_dim)
             tensor_val = random_tensor(rngs, shape, self.dtype)
             tensors.append(nnx.Param(tensor_val, dtype=self.dtype))

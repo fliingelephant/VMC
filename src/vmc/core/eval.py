@@ -17,7 +17,6 @@ from vmc.models.peps import (
     _forward_with_cache,
     make_peps_amplitude,
 )
-from vmc.utils.smallo import mps_site_dims, peps_site_dims
 from vmc.utils.utils import spin_to_occupancy
 
 __all__ = [
@@ -105,7 +104,7 @@ def _value_and_grad(
             state = jnp.ones((1,), dtype=flat_params.dtype)
             offset = 0
             for site in range(n_sites):
-                left_dim, right_dim = mps_site_dims(site, n_sites, bond_dim)
+                left_dim, right_dim = MPS.site_dims(site, n_sites, bond_dim)
                 size = phys_dim * left_dim * right_dim
                 tensor = flat_params[offset : offset + size].reshape(
                     phys_dim, left_dim, right_dim
@@ -140,7 +139,7 @@ def _value_and_grad(
         right = right_envs[site + 1]
         grad_site = left[:, None] * right[None, :]
         grad_parts.append(grad_site.reshape(-1))
-        left_dim, right_dim = mps_site_dims(site, n_sites, bond_dim)
+        left_dim, right_dim = MPS.site_dims(site, n_sites, bond_dim)
         params_per_phys = left_dim * right_dim
         p_parts.append(jnp.full((params_per_phys,), indices[site], dtype=jnp.int8))
 
@@ -207,7 +206,9 @@ def _value_and_grad(
     for r in range(n_rows):
         for c in range(n_cols):
             grad_parts.append(env_grads[r][c].reshape(-1))
-            up, down, left, right = peps_site_dims(r, c, n_rows, n_cols, bond_dim)
+            up, down, left, right = PEPS.site_dims(
+                r, c, n_rows, n_cols, bond_dim
+            )
             params_per_phys = up * down * left * right
             p_parts.append(jnp.full((params_per_phys,), spins[r, c], dtype=jnp.int8))
 

@@ -49,7 +49,12 @@ class SlicedJacobian:
     ordering: PhysicalOrdering | SiteOrdering = PhysicalOrdering()
 
     @classmethod
-    def from_samples(cls, model, samples: jax.Array, ordering=None):
+    def from_samples(
+        cls,
+        model,
+        samples: jax.Array,
+        ordering: PhysicalOrdering | SiteOrdering = PhysicalOrdering(),
+    ):
         """Construct from model and samples."""
         from VMC.core import _value_and_grad
         from VMC.utils.vmc_utils import flatten_samples
@@ -57,8 +62,6 @@ class SlicedJacobian:
         samples = flatten_samples(samples)
         amps, grads, p = _value_and_grad(model, samples, full_gradient=False)
         o = grads / amps[:, None]
-        if ordering is None:
-            ordering = PhysicalOrdering()
         return cls(o, p, model.phys_dim, ordering)
 
 

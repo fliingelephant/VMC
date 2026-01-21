@@ -149,9 +149,9 @@ class DynamicsDriver:
         preconditioner: SRPreconditioner,
         dt: float,
         t0: float = 0.0,
-        time_unit: TimeUnit | None = None,
+        time_unit: TimeUnit = RealTimeUnit(),
         integrator: Integrator | None = None,
-        sampler_key: jax.Array | None = None,
+        sampler_key: jax.Array = jax.random.key(0),
     ):
         self.model = model
         self.operator = operator
@@ -166,9 +166,9 @@ class DynamicsDriver:
         self.last_p = None
         self._sampler_configuration = None
 
-        self.time_unit = time_unit or RealTimeUnit()
+        self.time_unit = time_unit
         self.integrator = integrator or self.time_unit.default_integrator()
-        self._sampler_key = sampler_key if sampler_key is not None else jax.random.key(0)
+        self._sampler_key = sampler_key
 
         self.diag_shift_error: float | None = None
         self.residual_error: float | None = None

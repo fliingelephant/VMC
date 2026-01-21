@@ -23,7 +23,6 @@ __all__ = [
     "flatten_samples",
     "batched_eval",
     "build_dense_jac",
-    "build_dense_jac_from_state",
     "get_apply_fun",
     "local_estimate",
     "model_params",
@@ -116,24 +115,6 @@ def build_dense_jac(
     """Compute dense, centered Jacobian for NetKet-compatible apply_funs."""
     return _build_dense_jac_apply(
         apply_fun, params, model_state, samples, holomorphic=holomorphic,
-    )
-
-
-def build_dense_jac_from_state(
-    state: "MCState",
-    samples: jax.Array | None = None,
-    *,
-    holomorphic: bool = True,
-) -> jax.Array:
-    """Compute dense Jacobian directly from a variational state."""
-    samples = flatten_samples(state.samples if samples is None else samples)
-    apply_fun, params, model_state, _ = get_apply_fun(state)
-    return build_dense_jac(
-        apply_fun,
-        params,
-        model_state,
-        samples,
-        holomorphic=holomorphic,
     )
 
 

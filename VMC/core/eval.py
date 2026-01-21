@@ -32,7 +32,10 @@ def _value(
     model: MPS,
     sample: jax.Array,
 ) -> jax.Array:
-    """Compute amplitude for MPS sample(s). Auto-vmaps if sample.ndim == 2."""
+    """Compute amplitude for MPS sample(s). Auto-vmaps if sample.ndim == 2.
+
+    Samples are flattened: shape (n_sites,) or (batch, n_sites).
+    """
     sample = jnp.asarray(sample)
     tensors = [jnp.asarray(t) for t in model.tensors]
     if sample.ndim == 2:
@@ -45,7 +48,10 @@ def _value(
     model: PEPS,
     sample: jax.Array,
 ) -> jax.Array:
-    """Compute amplitude for PEPS sample(s). Auto-vmaps if sample.ndim == 2."""
+    """Compute amplitude for PEPS sample(s). Auto-vmaps if sample.ndim == 2.
+
+    Samples are flattened: shape (n_sites,) or (batch, n_sites).
+    """
     sample = jnp.asarray(sample)
     tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
     if sample.ndim == 2:
@@ -61,7 +67,10 @@ def _grad(
     *,
     full_gradient: bool = False,
 ) -> tuple[jax.Array, jax.Array | None]:
-    """Compute amplitude gradient for sample(s). Auto-vmaps if sample.ndim == 2."""
+    """Compute amplitude gradient for sample(s). Auto-vmaps if sample.ndim == 2.
+
+    Samples are flattened: shape (n_sites,) or (batch, n_sites).
+    """
     _, grad_row, p_row = _value_and_grad(
         model, sample, full_gradient=full_gradient
     )
@@ -75,7 +84,10 @@ def _value_and_grad(
     *,
     full_gradient: bool = False,
 ) -> tuple[jax.Array, jax.Array, jax.Array | None]:
-    """Compute amplitude and gradient for MPS sample(s). Auto-vmaps if sample.ndim == 2."""
+    """Compute amplitude and gradient for MPS sample(s). Auto-vmaps if sample.ndim == 2.
+
+    Samples are flattened: shape (n_sites,) or (batch, n_sites).
+    """
     sample = jnp.asarray(sample)
     if sample.ndim == 2:
         return jax.vmap(lambda s: _value_and_grad(model, s, full_gradient=full_gradient))(sample)
@@ -142,10 +154,15 @@ def _value_and_grad(
     *,
     full_gradient: bool = False,
 ) -> tuple[jax.Array, jax.Array, jax.Array | None]:
-    """Compute amplitude and gradient for PEPS sample(s). Auto-vmaps if sample.ndim == 2."""
+    """Compute amplitude and gradient for PEPS sample(s). Auto-vmaps if sample.ndim == 2.
+
+    Samples are flattened: shape (n_sites,) or (batch, n_sites).
+    """
     sample = jnp.asarray(sample)
     if sample.ndim == 2:
-        return jax.vmap(lambda s: _value_and_grad(model, s, full_gradient=full_gradient))(sample)
+        return jax.vmap(
+            lambda s: _value_and_grad(model, s, full_gradient=full_gradient)
+        )(sample)
 
     tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
     shape = model.shape

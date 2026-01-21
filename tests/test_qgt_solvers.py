@@ -3,12 +3,12 @@ from __future__ import annotations
 
 import unittest
 
-from VMC import config  # noqa: F401 - JAX config must be imported first
+from vmc import config  # noqa: F401 - JAX config must be imported first
 
 import jax
 import jax.numpy as jnp
 
-from VMC.qgt.solvers import solve_cg, solve_cholesky, solve_svd
+from vmc.qgt.solvers import solve_cg, solve_cholesky, solve_svd
 
 
 class QGTSolverTest(unittest.TestCase):

@@ -3,14 +3,14 @@ from __future__ import annotations
 
 import unittest
 
-from VMC import config  # noqa: F401 - JAX config must be imported first
+from vmc import config  # noqa: F401 - JAX config must be imported first
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from VMC.models.mps import MPS
-from VMC.utils.vmc_utils import batched_eval, build_dense_jac, model_params
+from vmc.models.mps import MPS
+from vmc.utils.vmc_utils import batched_eval, build_dense_jac, model_params
 
 
 def _mps_apply_fun(variables, x, **kwargs):

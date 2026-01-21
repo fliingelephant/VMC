@@ -6,7 +6,7 @@ import logging
 import os
 import unittest
 
-from VMC import config  # noqa: F401
+from vmc import config  # noqa: F401
 
 os.environ.setdefault("NETKET_EXPERIMENTAL_FFT_AUTOCORRELATION", "1")
 
@@ -18,21 +18,21 @@ import netket.experimental.dynamics as nkx_dynamics
 from netket import stats as nkstats
 from flax import nnx
 
-from VMC.drivers import DynamicsDriver, ImaginaryTimeUnit, RealTimeUnit
-from VMC.models.mps import MPS
-from VMC.models.peps import PEPS, ZipUp
-from VMC.preconditioners import SRPreconditioner
-from VMC.samplers.sequential import sequential_sample, sequential_sample_with_gradients
-from VMC.core.eval import _value_and_grad
-from VMC.utils.utils import spin_to_occupancy
-from VMC.utils.vmc_utils import local_estimate, model_params
+from vmc.drivers import DynamicsDriver, ImaginaryTimeUnit, RealTimeUnit
+from vmc.models.mps import MPS
+from vmc.models.peps import PEPS, ZipUp
+from vmc.preconditioners import SRPreconditioner
+from vmc.samplers.sequential import sequential_sample, sequential_sample_with_gradients
+from vmc.core.eval import _value_and_grad
+from vmc.utils.utils import spin_to_occupancy
+from vmc.utils.vmc_utils import local_estimate, model_params
 
 logger = logging.getLogger(__name__)
 
 
 def _make_apply_fun(model):
     """Create a NetKet-compatible apply function from a model."""
-    from VMC.core import _value
+    from vmc.core import _value
     def apply_fun(variables, x, **kwargs):
         del kwargs
         # Temporarily swap in NetKet's params

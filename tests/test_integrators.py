@@ -3,12 +3,12 @@ from __future__ import annotations
 
 import unittest
 
-from VMC import config  # noqa: F401 - JAX config must be imported first
+from vmc import config  # noqa: F401 - JAX config must be imported first
 
 import jax
 import jax.numpy as jnp
 
-from VMC.drivers import DynamicsDriver, Euler, RK4
+from vmc.drivers import DynamicsDriver, Euler, RK4
 
 
 class _LinearDriver:

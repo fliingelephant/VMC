@@ -4,19 +4,19 @@ from __future__ import annotations
 import itertools
 import unittest
 
-from VMC import config  # noqa: F401 - JAX config must be imported first
+from vmc import config  # noqa: F401 - JAX config must be imported first
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
 from plum import dispatch
 
-from VMC.core import _value_and_grad
-from VMC.samplers.sequential import sequential_sample, sequential_sample_with_gradients
-from VMC.models.mps import MPS
-from VMC.models.peps import NoTruncation, PEPS
-from VMC.utils.smallo import mps_site_dims, peps_site_dims
-from VMC.utils.utils import occupancy_to_spin, spin_to_occupancy
+from vmc.core import _value_and_grad
+from vmc.samplers.sequential import sequential_sample, sequential_sample_with_gradients
+from vmc.models.mps import MPS
+from vmc.models.peps import NoTruncation, PEPS
+from vmc.utils.smallo import mps_site_dims, peps_site_dims
+from vmc.utils.utils import occupancy_to_spin, spin_to_occupancy
 
 
 @dispatch

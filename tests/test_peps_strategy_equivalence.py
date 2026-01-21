@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import unittest
 
-from VMC import config  # noqa: F401 - JAX config must be imported first
+from vmc import config  # noqa: F401 - JAX config must be imported first
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from VMC.models.peps import DensityMatrix, NoTruncation, PEPS, ZipUp
+from vmc.models.peps import DensityMatrix, NoTruncation, PEPS, ZipUp
 
 
 class PEPSStrategyEquivalenceTest(unittest.TestCase):

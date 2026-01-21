@@ -25,9 +25,8 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["VMC*"]
-exclude = ["notes*"]
+where = ["src"]
+include = ["vmc*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests/test_sequential_sampling.py"]

@@ -4,19 +4,19 @@ from __future__ import annotations
 import functools
 import unittest
 
-from VMC import config  # noqa: F401 - JAX config must be imported first
+from vmc import config  # noqa: F401 - JAX config must be imported first
 
 import jax
 import jax.numpy as jnp
 import netket as nk
 from flax import nnx
 
-from VMC.core import _value_and_grad
-from VMC.models.mps import MPS
-from VMC.models.peps import NoTruncation, PEPS
-from VMC.qgt import ParameterSpace, QGT, SlicedJacobian, SiteOrdering
-from VMC.utils.smallo import params_per_site
-from VMC.utils.vmc_utils import flatten_samples, model_params
+from vmc.core import _value_and_grad
+from vmc.models.mps import MPS
+from vmc.models.peps import NoTruncation, PEPS
+from vmc.qgt import ParameterSpace, QGT, SlicedJacobian, SiteOrdering
+from vmc.utils.smallo import params_per_site
+from vmc.utils.vmc_utils import flatten_samples, model_params
 
 
 def _mps_apply_fun(variables, x, **kwargs):

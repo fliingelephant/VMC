@@ -4,18 +4,18 @@ from __future__ import annotations
 import logging
 import unittest
 
-from VMC import config  # noqa: F401 - JAX config must be imported first
+from vmc import config  # noqa: F401 - JAX config must be imported first
 
 import jax
 import jax.numpy as jnp
 import netket as nk
 from flax import nnx
 
-from VMC.core import _value_and_grad
-from VMC.models.mps import MPS
-from VMC.models.peps import NoTruncation, PEPS
-from VMC.samplers.sequential import sequential_sample
-from VMC.utils.vmc_utils import local_estimate
+from vmc.core import _value_and_grad
+from vmc.models.mps import MPS
+from vmc.models.peps import NoTruncation, PEPS
+from vmc.samplers.sequential import sequential_sample
+from vmc.utils.vmc_utils import local_estimate
 
 logger = logging.getLogger(__name__)
 

@@ -3,19 +3,19 @@ from __future__ import annotations
 
 import unittest
 
-from VMC import config  # noqa: F401 - JAX config must be imported first
+from vmc import config  # noqa: F401 - JAX config must be imported first
 
 import jax
 import jax.numpy as jnp
 import netket as nk
 from flax import nnx
 
-from VMC.gauge import GaugeConfig, compute_gauge_projection
-from VMC.gauge.gauge import _flatten_tensor_list, _null_vectors_for_bond
-from VMC.core import _value_and_grad
-from VMC.models.mps import MPS
-from VMC.models.peps import PEPS
-from VMC.qgt import Jacobian, ParameterSpace, QGT
+from vmc.gauge import GaugeConfig, compute_gauge_projection
+from vmc.gauge.gauge import _flatten_tensor_list, _null_vectors_for_bond
+from vmc.core import _value_and_grad
+from vmc.models.mps import MPS
+from vmc.models.peps import PEPS
+from vmc.qgt import Jacobian, ParameterSpace, QGT
 
 
 class GaugeProjectionTest(unittest.TestCase):

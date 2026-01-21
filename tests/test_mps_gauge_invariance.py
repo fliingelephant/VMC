@@ -5,13 +5,13 @@ import unittest
 
 import numpy as np
 
-from VMC import config  # noqa: F401 - JAX config must be imported first
+from vmc import config  # noqa: F401 - JAX config must be imported first
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from VMC.models.mps import MPS
+from vmc.models.mps import MPS
 
 
 class MPSGaugeInvarianceTest(unittest.TestCase):

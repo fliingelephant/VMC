@@ -3,18 +3,18 @@ from __future__ import annotations
 
 import unittest
 
-from VMC import config  # noqa: F401
+from vmc import config  # noqa: F401
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from VMC.models.mps import MPS
-from VMC.core import _value_and_grad
-from VMC.qgt import QGT, Jacobian, SlicedJacobian, PhysicalOrdering, SiteOrdering, ParameterSpace, SampleSpace, solve_cholesky
-from VMC.utils.smallo import params_per_site
-from VMC.utils.vmc_utils import flatten_samples
-from VMC.samplers.sequential import sequential_sample
+from vmc.models.mps import MPS
+from vmc.core import _value_and_grad
+from vmc.qgt import QGT, Jacobian, SlicedJacobian, PhysicalOrdering, SiteOrdering, ParameterSpace, SampleSpace, solve_cholesky
+from vmc.utils.smallo import params_per_site
+from vmc.utils.vmc_utils import flatten_samples
+from vmc.samplers.sequential import sequential_sample
 
 
 class QGTTest(unittest.TestCase):

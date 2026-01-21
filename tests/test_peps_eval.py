@@ -3,15 +3,15 @@ from __future__ import annotations
 
 import unittest
 
-from VMC import config  # noqa: F401
+from vmc import config  # noqa: F401
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from VMC.core import _value_and_grad
-from VMC.models.peps import NoTruncation, PEPS, make_peps_amplitude
-from VMC.utils.utils import occupancy_to_spin, spin_to_occupancy
+from vmc.core import _value_and_grad
+from vmc.models.peps import NoTruncation, PEPS, make_peps_amplitude
+from vmc.utils.utils import occupancy_to_spin, spin_to_occupancy
 
 
 class PEPSEvalTest(unittest.TestCase):

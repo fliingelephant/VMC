@@ -3,17 +3,17 @@ from __future__ import annotations
 
 import unittest
 
-from VMC import config  # noqa: F401 - JAX config must be imported first
+from vmc import config  # noqa: F401 - JAX config must be imported first
 
 import jax
 import jax.numpy as jnp
 import netket as nk
 from flax import nnx
 
-from VMC.models.mps import MPS
-from VMC.qgt import Jacobian, ParameterSpace, QGT
-from VMC.qgt.netket_compat import DenseSR
-from VMC.utils.vmc_utils import build_dense_jac, flatten_samples, get_apply_fun, model_params
+from vmc.models.mps import MPS
+from vmc.qgt import Jacobian, ParameterSpace, QGT
+from vmc.qgt.netket_compat import DenseSR
+from vmc.utils.vmc_utils import build_dense_jac, flatten_samples, get_apply_fun, model_params
 
 
 def _mps_apply_fun(variables, x, **kwargs):

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import unittest
 
-from VMC import config  # noqa: F401
+from vmc import config  # noqa: F401
 
 import jax
 import jax.numpy as jnp
@@ -11,10 +11,10 @@ import netket as nk
 from flax import nnx
 from netket import stats as nkstats
 
-from VMC.models.mps import MPS
-from VMC.models.peps import PEPS
-from VMC.samplers.sequential import sequential_sample
-from VMC.utils.vmc_utils import local_estimate
+from vmc.models.mps import MPS
+from vmc.models.peps import PEPS
+from vmc.samplers.sequential import sequential_sample
+from vmc.utils.vmc_utils import local_estimate
 
 
 class FullSumBenchmarkTest(unittest.TestCase):

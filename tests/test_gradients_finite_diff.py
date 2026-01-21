@@ -5,15 +5,15 @@ import unittest
 
 import numpy as np
 
-from VMC import config  # noqa: F401 - JAX config must be imported first
+from vmc import config  # noqa: F401 - JAX config must be imported first
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from VMC.core import _value_and_grad
-from VMC.models.mps import MPS
-from VMC.models.peps import NoTruncation, PEPS
+from vmc.core import _value_and_grad
+from vmc.models.mps import MPS
+from vmc.models.peps import NoTruncation, PEPS
 
 
 def _central_diff_grad(func, x: np.ndarray, eps: float) -> np.ndarray:

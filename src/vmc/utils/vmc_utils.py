@@ -13,6 +13,7 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
+from flax import nnx
 
 from vmc.core.eval import _value
 
@@ -60,8 +61,8 @@ def batched_eval(
 
 def model_params(model) -> dict[str, Any]:
     """Extract model parameters as plain arrays."""
-    tensors = jax.tree_util.tree_map(jnp.asarray, model.tensors)
-    return {"tensors": tensors}
+    _, params, _ = nnx.split(model, nnx.Param, ...)
+    return params.to_pure_dict()
 
 
 @functools.partial(jax.jit, static_argnames=("apply_fun", "holomorphic"))

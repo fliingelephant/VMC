@@ -33,7 +33,7 @@ class DynamicsDriverTest(unittest.TestCase):
     N_SITES = 12
     BOND_DIM = 2
     N_SAMPLES_REAL = 16384
-    N_SAMPLES_IMAG = 4096s
+    N_SAMPLES_IMAG = 4096
     N_STEPS_REAL = 100
     N_STEPS_IMAG = 100
     DT_REAL = 0.01

@@ -71,30 +71,38 @@ def random_bitstring(key, n_sites: int):
     return occupancy_to_spin(bits)
 
 
-def reset_product_state_mps(model: MPS, spins: jnp.ndarray):
+def reset_product_state_mps(model: MPS, spins: jnp.ndarray) -> MPS:
     eps = 1e-3
-    for site, t in enumerate(model.tensors):
+    graphdef, params, model_state = nnx.split(model, nnx.Param, ...)
+    params = params.to_pure_dict()
+    tensors = params["tensors"]
+    tensor_keys = sorted(tensors.keys())
+    for site, key in enumerate(tensor_keys):
         phys_idx = 1 if spins[site] == 1 else 0
-        arr = jnp.ones_like(t[...]) * eps
-        arr = arr.at[phys_idx, 0, 0].set(1.0)
-        t.value = arr
+        arr = jnp.ones_like(tensors[key]) * eps
+        tensors[key] = arr.at[phys_idx, 0, 0].set(1.0)
+    params["tensors"] = tensors
+    return nnx.merge(graphdef, params, model_state.to_pure_dict())
 
 
-def reset_product_state_peps(model: PEPS, spins: jnp.ndarray):
-    new_rows = []
+def reset_product_state_peps(model: PEPS, spins: jnp.ndarray) -> PEPS:
     idx = 0
-    for row in model.tensors:
-        new_row = []
-        for t in row:
-            eps = 1e-3
-            arr = jnp.ones_like(t[...]) * eps
+    eps = 1e-3
+    graphdef, params, model_state = nnx.split(model, nnx.Param, ...)
+    params = params.to_pure_dict()
+    tensors = params["tensors"]
+    row_keys = sorted(tensors.keys())
+    for r_key in row_keys:
+        row = tensors[r_key]
+        col_keys = sorted(row.keys())
+        for c_key in col_keys:
             phys_idx = 1 if spins[idx] == 1 else 0
-            arr = arr.at[phys_idx, 0, 0, 0, 0].set(1.0)
+            arr = jnp.ones_like(row[c_key]) * eps
+            row[c_key] = arr.at[phys_idx, 0, 0, 0, 0].set(1.0)
             idx += 1
-            t.value = arr
-            new_row.append(t)
-        new_rows.append(new_row)
-    model.tensors = new_rows
+        tensors[r_key] = row
+    params["tensors"] = tensors
+    return nnx.merge(graphdef, params, model_state.to_pure_dict())
 
 
 def align_phase(reference: jax.Array, target: jax.Array):
@@ -153,9 +161,9 @@ def run_case(
     if spins is None:
         spins = random_bitstring(jax.random.key(0), hi.size)
     if isinstance(model, MPS):
-        reset_product_state_mps(model, spins)
+        model = reset_product_state_mps(model, spins)
     elif isinstance(model, PEPS):
-        reset_product_state_peps(model, spins)
+        model = reset_product_state_peps(model, spins)
 
     basis = jnp.asarray(hi.all_states(), dtype=jnp.int32)
     psi0 = normalized_wavefunction(model, basis, baseline_eps=0.0)
@@ -207,6 +215,7 @@ def run_case(
     logger.info("TN Energy at t=0 (dense): %s", complex(energy_t0_dense))
 
     driver.run(T, show_progress=True)
+    model = driver.model
     stats = driver.energy
     energy_t_final = stats.mean if stats is not None else jnp.nan
 

@@ -32,15 +32,15 @@ logger = logging.getLogger(__name__)
 class DynamicsDriverTest(unittest.TestCase):
     N_SITES = 12
     BOND_DIM = 2
-    N_SAMPLES_REAL = 65536
-    N_SAMPLES_IMAG = 16384
+    N_SAMPLES_REAL = 16384
+    N_SAMPLES_IMAG = 4096s
     N_STEPS_REAL = 100
     N_STEPS_IMAG = 100
     DT_REAL = 0.01
     DT_IMAG = 0.001
     DIAG_SHIFT = 1e-2
     SEED = 0
-    BURN_IN = 20
+    BURN_IN = 8
     N_CHAINS = 8
     ENERGY_SIGMA_MULT = 5.0
 

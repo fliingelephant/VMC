@@ -165,6 +165,9 @@ class DynamicsDriver:
         self.last_o = None
         self.last_p = None
         self._sampler_configuration = None
+        self._graphdef, params, model_state = nnx.split(self.model, nnx.Param, ...)
+        self._params = params.to_pure_dict()
+        self._model_state = model_state.to_pure_dict()
 
         self.time_unit = time_unit
         self.integrator = integrator or self.time_unit.default_integrator()
@@ -185,7 +188,7 @@ class DynamicsDriver:
         return self.operator
 
     def _time_derivative(self, params: Any, t: float, *, stage: int) -> Any:
-        self._assign_params(self.model.tensors, params)
+        self.model = nnx.merge(self._graphdef, params, self._model_state)
         samples, o, p, self._sampler_key, self._sampler_configuration = self.sampler(
             self.model,
             key=self._sampler_key,
@@ -201,6 +204,7 @@ class DynamicsDriver:
 
         updates = self.preconditioner.apply(
             self.model,
+            params,
             samples,
             o,
             p,
@@ -229,23 +233,14 @@ class DynamicsDriver:
         )
 
     def _get_model_params(self) -> Any:
-        return jax.tree_util.tree_map(jnp.asarray, self.model.tensors)
-
-    @staticmethod
-    def _assign_params(target: Any, values: Any) -> None:
-        if isinstance(target, (list, tuple)):
-            for target_item, value_item in zip(target, values):
-                DynamicsDriver._assign_params(target_item, value_item)
-        elif isinstance(target, nnx.Variable):
-            target.value = values
-        else:
-            target[...] = values
+        return self._params
 
     def step(self, dt: float | None = None) -> None:
         dt_step = self.dt if dt is None else float(dt)
         params = self._get_model_params()
         params_new = self.integrator.step(self, params, self.t, dt_step)
-        self._assign_params(self.model.tensors, params_new)
+        self._params = params_new
+        self.model = nnx.merge(self._graphdef, self._params, self._model_state)
         self.t += dt_step
         self.step_count += 1
 

@@ -5,7 +5,7 @@ from vmc import config  # noqa: F401
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import jax
 import jax.numpy as jnp
@@ -258,6 +258,7 @@ class SRPreconditioner:
     def apply(
         self,
         model,
+        params: Any,
         samples: jax.Array,
         o: jax.Array,
         p: jax.Array | None,
@@ -270,13 +271,12 @@ class SRPreconditioner:
         dv = (local_energies.reshape(-1) - jnp.mean(local_energies)) / samples.shape[0]
         dv = grad_factor * dv
 
-        params = jax.tree_util.tree_map(jnp.asarray, model.tensors)
+        params = jax.tree_util.tree_map(jnp.asarray, params)
         pps = tuple(params_per_site(model)) if p is not None else None
         Q = None
         if self.gauge_config is not None:
-            params_dict = {"tensors": params}
             Q, _ = compute_gauge_projection(
-                self.gauge_config, model, params_dict, return_info=True
+                self.gauge_config, model, params, return_info=True
             )
             if p is None:
                 o_eff = o @ Q

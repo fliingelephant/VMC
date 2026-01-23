@@ -56,24 +56,18 @@ def _collect_steps(step_fn, carry, count: int, progress_interval: int | None, de
 
 
 def _sample_counts(n_samples: int, n_chains: int, burn_in: int) -> tuple[int, int, int, int, int]:
-    num_samples = int(n_samples)
-    num_chains = int(n_chains)
-    num_burn_in = int(burn_in)
-    chain_length = int(math.ceil(num_samples / num_chains))
-    total_samples = chain_length * num_chains
-    return num_samples, num_chains, num_burn_in, chain_length, total_samples
+    chain_length = math.ceil(n_samples / n_chains)
+    return n_samples, n_chains, burn_in, chain_length, chain_length * n_chains
 
 
 def _random_occupancy(key: jax.Array, n_chains: int, shape: tuple[int, ...]) -> jax.Array:
-    init_keys = jax.random.split(key, n_chains)
-    return jax.vmap(
-        lambda k: jax.random.bernoulli(k, 0.5, shape=shape).astype(jnp.int32)
-    )(init_keys)
+    return jax.vmap(lambda k: jax.random.bernoulli(k, 0.5, shape=shape).astype(jnp.int32))(
+        jax.random.split(key, n_chains)
+    )
 
 
 def _trim_samples(samples: jax.Array, total_samples: int, num_samples: int) -> jax.Array:
-    reshaped = samples.reshape((total_samples,) + samples.shape[2:])
-    return reshaped[:num_samples]
+    return samples.reshape((total_samples,) + samples.shape[2:])[:num_samples]
 
 
 def _collect_samples(
@@ -137,17 +131,12 @@ def _metropolis_ratio(weight_cur: jax.Array, weight_flip: jax.Array) -> jax.Arra
     )
 
 
-def _pad_mps_tensors(
-    tensors: list[jax.Array],
-    bond_dim: int,
-) -> jax.Array:
+def _pad_mps_tensors(tensors: list[jax.Array], bond_dim: int) -> jax.Array:
     """Pad MPS tensors to a uniform bond dimension for JAX scans."""
-    padded = []
-    for tensor in tensors:
+    def pad_tensor(tensor):
         block = jnp.zeros((2, bond_dim, bond_dim), dtype=tensor.dtype)
-        block = block.at[:, :tensor.shape[1], :tensor.shape[2]].set(tensor)
-        padded.append(block)
-    return jnp.stack(padded, axis=0)
+        return block.at[:, :tensor.shape[1], :tensor.shape[2]].set(tensor)
+    return jnp.stack([pad_tensor(t) for t in tensors], axis=0)
 
 
 @functools.partial(jax.jit, static_argnames=("n_sites",))

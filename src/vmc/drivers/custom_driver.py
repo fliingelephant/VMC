@@ -175,9 +175,9 @@ class DynamicsDriver:
         self.solve_time: float | None = None
 
     def _sync_preconditioner_metrics(self) -> None:
-        for name in ("diag_shift_error", "residual_error", "solve_time"):
-            if hasattr(self.preconditioner, name):
-                setattr(self, name, getattr(self.preconditioner, name))
+        self.diag_shift_error = getattr(self.preconditioner, "diag_shift_error", None)
+        self.residual_error = getattr(self.preconditioner, "residual_error", None)
+        self.solve_time = getattr(self.preconditioner, "solve_time", None)
 
     def _operator_at(self, t: float):
         if callable(self.operator) and not hasattr(self.operator, "get_conn_padded"):
@@ -223,10 +223,10 @@ class DynamicsDriver:
     @staticmethod
     @jax.jit
     def _tree_weighted_sum(k1: Any, k2: Any, k3: Any, k4: Any) -> Any:
-        def combine(a, b, c, d):
-            return (a + 2.0 * b + 2.0 * c + d) * jnp.asarray(1.0 / 6.0, dtype=a.dtype)
-
-        return jax.tree_util.tree_map(combine, k1, k2, k3, k4)
+        return jax.tree_util.tree_map(
+            lambda a, b, c, d: (a + 2.0 * b + 2.0 * c + d) / jnp.asarray(6.0, dtype=a.dtype),
+            k1, k2, k3, k4,
+        )
 
     def _get_model_params(self) -> Any:
         return jax.tree_util.tree_map(jnp.asarray, self.model.tensors)

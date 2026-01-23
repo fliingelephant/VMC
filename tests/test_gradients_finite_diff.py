@@ -116,10 +116,9 @@ class FiniteDiffGradientTest(unittest.TestCase):
             )
             return np.asarray(amp)
 
-        _, grad_nested, _ = _value_and_grad(model, sample, full_gradient=True)
-        grad = np.concatenate([np.ravel(t) for row in grad_nested for t in row])
+        _, grad, _ = _value_and_grad(model, sample, full_gradient=True)
         grad_fd = _central_diff_grad(amp_from_flat, flat, eps=1e-6)
-        max_diff = np.max(np.abs(grad - grad_fd))
+        max_diff = np.max(np.abs(np.asarray(grad) - grad_fd))
         self.assertLess(max_diff, 1e-5)
 
 

@@ -8,6 +8,7 @@ from vmc import config  # noqa: F401 - JAX config must be imported first
 
 import jax
 import jax.numpy as jnp
+from jax.flatten_util import ravel_pytree
 from plum import dispatch
 
 from vmc.models.mps import MPS
@@ -171,7 +172,8 @@ def _value_and_grad(
         amp, grad = jax.value_and_grad(PEPS.apply, holomorphic=True)(
             tensors, sample, shape, model.strategy
         )
-        return amp, grad, None
+        grad_flat, _ = ravel_pytree(grad)
+        return amp, grad_flat, None
 
     spins = spin_to_occupancy(sample).reshape(shape)
     amp, top_envs = _forward_with_cache(tensors, spins, shape, model.strategy)

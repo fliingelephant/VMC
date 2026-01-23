@@ -94,15 +94,11 @@ def _adjoint_matvec(jac: Jacobian, v: jax.Array) -> jax.Array:
 
 @dispatch
 def _adjoint_matvec(jac: SlicedJacobian, v: jax.Array) -> jax.Array:
+    from vmc.qgt.qgt import _iter_sliced_blocks
+
     o, p, d = jac.o, jac.p, jac.phys_dim
     pps = _params_per_site(jac.ordering, o)
-    parts = []
-    i = 0
-    for n in pps:
-        for k in range(d):
-            ok = jnp.where(p[:, i : i + n] == k, o[:, i : i + n], 0)
-            parts.append(ok.conj().T @ v)
-        i += n
+    parts = [ok.conj().T @ v for ok, _ in _iter_sliced_blocks(o, p, d, pps)]
     result = jnp.concatenate(parts, axis=0)
     mean = jacobian_mean(jac)
     return result - mean.conj() * jnp.sum(v)
@@ -285,13 +281,9 @@ class SRPreconditioner:
             if p is None:
                 o_eff = o @ Q
             else:
-                blocks = []
-                i = 0
-                for n in pps:
-                    for k in range(model.phys_dim):
-                        ok = jnp.where(p[:, i : i + n] == k, o[:, i : i + n], 0)
-                        blocks.append(ok)
-                    i += n
+                from vmc.qgt.qgt import _iter_sliced_blocks
+
+                blocks = [ok for ok, _ in _iter_sliced_blocks(o, p, model.phys_dim, pps)]
                 o_eff = jnp.concatenate(blocks, axis=1) @ Q
             jac = Jacobian(o_eff)
         elif p is None:

@@ -7,19 +7,11 @@ from vmc import config  # noqa: F401 - JAX config must be imported first
 
 import jax
 import jax.numpy as jnp
+import netket as nk
 from flax import nnx
 
 from vmc.models.mps import MPS
-from vmc.utils.vmc_utils import batched_eval, build_dense_jac, model_params
-
-
-def _mps_apply_fun(variables, x, **kwargs):
-    del kwargs
-    tensors = variables["params"]["tensors"]
-    samples = x if x.ndim == 2 else x[None, :]
-    amps = MPS._batch_amplitudes(tensors, samples)
-    log_amps = jnp.log(amps)
-    return log_amps if x.ndim == 2 else log_amps[0]
+from vmc.utils.vmc_utils import batched_eval, build_dense_jac
 
 
 class VMCUtilsTest(unittest.TestCase):
@@ -36,29 +28,21 @@ class VMCUtilsTest(unittest.TestCase):
         self.assertLess(diff, 1e-12)
 
     def test_build_dense_jac_matches_manual(self) -> None:
-        model = MPS(rngs=nnx.Rngs(0), n_sites=8, bond_dim=3)
-        params = model_params(model)
-        samples = jnp.asarray(
-            jax.random.bernoulli(jax.random.key(1), 0.5, (32, 8)) * 2 - 1,
-            dtype=jnp.int32,
-        )
-        jac_auto = build_dense_jac(
-            _mps_apply_fun, params, {}, samples, holomorphic=True
-        )
+        n_sites = 8
+        model = MPS(rngs=nnx.Rngs(0), n_sites=n_sites, bond_dim=3)
+        hi = nk.hilbert.Spin(s=1 / 2, N=n_sites)
+        sampler = nk.sampler.MetropolisLocal(hi, n_chains=1, sweep_size=n_sites)
+        vstate = nk.vqs.MCState(sampler, model, n_samples=32, seed=0)
+
+        samples = jnp.asarray(jax.random.bernoulli(jax.random.key(1), 0.5, (32, n_sites)) * 2 - 1, dtype=jnp.int32)
+        jac_auto = build_dense_jac(vstate._apply_fun, vstate.parameters, vstate.model_state, samples, holomorphic=True)
 
         jac_fun = jax.jacrev(
-            lambda p, x: _mps_apply_fun({"params": p}, x),
-            holomorphic=True,
+            lambda p, x: vstate._apply_fun({"params": p, **vstate.model_state}, x), holomorphic=True,
         )
-        jac_tree = jax.vmap(jac_fun, in_axes=(None, 0))(params, samples)
-        jac_tree = jax.tree_util.tree_map(
-            lambda x: x - jnp.mean(x, axis=0, keepdims=True),
-            jac_tree,
-        )
-        leaves = [
-            leaf.reshape(samples.shape[0], -1)
-            for leaf in jax.tree_util.tree_leaves(jac_tree)
-        ]
+        jac_tree = jax.vmap(jac_fun, in_axes=(None, 0))(vstate.parameters, samples)
+        jac_tree = jax.tree_util.tree_map(lambda x: x - jnp.mean(x, axis=0, keepdims=True), jac_tree)
+        leaves = [leaf.reshape(samples.shape[0], -1) for leaf in jax.tree_util.tree_leaves(jac_tree)]
         jac_manual = jnp.concatenate(leaves, axis=1)
 
         diff = float(jnp.max(jnp.abs(jac_auto - jac_manual)))

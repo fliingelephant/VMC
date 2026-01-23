@@ -10,7 +10,7 @@ import jax.numpy as jnp
 from flax import nnx
 
 from vmc.core import _value_and_grad
-from vmc.models.peps import NoTruncation, PEPS, make_peps_amplitude
+from vmc.models.peps import NoTruncation, PEPS
 from vmc.utils.utils import occupancy_to_spin, spin_to_occupancy
 
 
@@ -59,7 +59,7 @@ class PEPSEvalTest(unittest.TestCase):
         grads_full = jax.vmap(expand_sliced)(samples, grads_sliced)
 
         def amp_fn(tensors, sample):
-            return PEPS._single_amplitude(tensors, sample, shape, model.strategy)
+            return PEPS.apply(tensors, sample, shape, model.strategy)
 
         amps_ref = jax.vmap(amp_fn, in_axes=(None, 0))(tensors, samples)
 
@@ -71,23 +71,10 @@ class PEPSEvalTest(unittest.TestCase):
         ]
         jac = jnp.concatenate(jac_leaves, axis=1)
 
-        amp_custom = make_peps_amplitude(shape, model.strategy)
-        jac_custom_fun = jax.jacrev(amp_custom, holomorphic=True)
-        jac_custom_tree = jax.vmap(jac_custom_fun, in_axes=(None, 0))(
-            tensors, samples
-        )
-        jac_custom_leaves = [
-            leaf.reshape(samples.shape[0], -1)
-            for leaf in jax.tree_util.tree_leaves(jac_custom_tree)
-        ]
-        jac_custom = jnp.concatenate(jac_custom_leaves, axis=1)
-
         max_amp_diff = jnp.max(jnp.abs(amps - amps_ref))
         max_grad_diff = jnp.max(jnp.abs(grads_full - jac))
-        max_custom_diff = jnp.max(jnp.abs(jac_custom - jac))
         self.assertLess(max_amp_diff, 1e-12)
         self.assertLess(max_grad_diff, 1e-12)
-        self.assertLess(max_custom_diff, 1e-12)
 
 
 if __name__ == "__main__":

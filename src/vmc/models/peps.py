@@ -28,8 +28,6 @@ __all__ = [
     "NoTruncation",
     "ZipUp",
     "DensityMatrix",
-    # Amplitude functions
-    "make_peps_amplitude",
     # Internal functions exposed for external use
     "_apply_mpo_from_below",
     "_build_row_mpo",
@@ -469,55 +467,47 @@ def _compute_all_gradients(
     return (grads, bottom_envs_cached) if cache_bottom_envs else grads
 
 
-def make_peps_amplitude(
+@functools.partial(jax.custom_vjp, nondiff_argnums=(2, 3))
+def _peps_apply(
+    tensors: Any,
+    sample: jax.Array,
     shape: tuple[int, int],
     strategy: ContractionStrategy,
-):
-    """Create a PEPS amplitude function with custom VJP for the given configuration.
+) -> jax.Array:
+    """Compute PEPS amplitude with custom VJP for efficient gradients."""
+    spins = spin_to_occupancy(sample).reshape(shape)
+    boundary = tuple(
+        jnp.ones((1, 1, 1), dtype=jnp.asarray(tensors[0][0]).dtype)
+        for _ in range(shape[1])
+    )
+    for row in range(shape[0]):
+        mpo = _build_row_mpo(tensors, spins[row], row, shape[1])
+        boundary = strategy.apply(boundary, mpo)
+    return _contract_bottom(boundary)
 
-    The returned function has signature `(tensors, sample) -> amplitude` and
-    implements a custom VJP computing gradients via environment contraction.
 
-    Args:
-        shape: Grid shape (n_rows, n_cols).
-        strategy: Contraction strategy instance.
+def _peps_apply_fwd(tensors, sample, shape, strategy):
+    spins = spin_to_occupancy(sample).reshape(shape)
+    amp, top_envs = _forward_with_cache(tensors, spins, shape, strategy)
+    return amp, (tensors, spins, top_envs)
 
-    Returns:
-        A function `(tensors, sample) -> amplitude` with a custom VJP.
-    """
 
-    @jax.custom_vjp
-    def amplitude_fn(tensors: Any, sample: jax.Array) -> jax.Array:
-        """Compute PEPS amplitude with custom VJP."""
-        return PEPS._single_amplitude(tensors, sample, shape, strategy)
+def _peps_apply_bwd(shape, strategy, residuals, g):
+    tensors, spins, top_envs = residuals
+    n_rows, n_cols = shape
+    env_grads = _compute_all_gradients(tensors, spins, shape, strategy, top_envs)
+    grad_leaves = []
+    for r in range(n_rows):
+        for c in range(n_cols):
+            grad_full = jnp.zeros_like(jnp.asarray(tensors[r][c]))
+            grad_leaves.append(grad_full.at[spins[r, c]].set(g * env_grads[r][c]))
+    return (
+        jax.tree_util.tree_unflatten(jax.tree_util.tree_structure(tensors), grad_leaves),
+        None,
+    )
 
-    def amplitude_fwd(tensors: Any, sample: jax.Array) -> tuple[jax.Array, tuple]:
-        """Forward pass returning residuals."""
-        spins = spin_to_occupancy(sample).reshape(shape)
-        amp, top_envs = _forward_with_cache(tensors, spins, shape, strategy)
-        return amp, (tensors, spins, top_envs)
 
-    def amplitude_bwd(residuals: tuple, g: jax.Array) -> tuple:
-        """Backward pass computing gradients via environment contraction."""
-        tensors, spins, top_envs = residuals
-        n_rows, n_cols = shape
-        env_grads = _compute_all_gradients(tensors, spins, shape, strategy, top_envs)
-
-        grad_leaves = []
-        for r in range(n_rows):
-            for c in range(n_cols):
-                grad_full = jnp.zeros_like(jnp.asarray(tensors[r][c]))
-                grad_leaves.append(grad_full.at[spins[r, c]].set(g * env_grads[r][c]))
-
-        return (
-            jax.tree_util.tree_unflatten(
-                jax.tree_util.tree_structure(tensors), grad_leaves
-            ),
-            None,
-        )
-
-    amplitude_fn.defvjp(amplitude_fwd, amplitude_bwd)
-    return amplitude_fn
+_peps_apply.defvjp(_peps_apply_fwd, _peps_apply_bwd)
 
 
 class PEPS(nnx.Module):
@@ -592,34 +582,7 @@ class PEPS(nnx.Module):
             for r in range(n_rows)
         ]
 
-    @staticmethod
-    @functools.partial(jax.jit, static_argnames=("shape", "strategy"))
-    def _single_amplitude(
-        tensors,
-        sample: jax.Array,
-        shape: tuple[int, int],
-        strategy: ContractionStrategy,
-    ) -> jax.Array:
-        """Compute a single PEPS amplitude for a spin configuration.
-
-        Args:
-            tensors: Nested list of PEPS site tensors.
-            sample: Spin configuration with shape (n_sites,).
-            shape: Grid shape (rows, cols).
-            strategy: Contraction strategy instance.
-
-        Returns:
-            Complex amplitude scalar.
-        """
-        spins = spin_to_occupancy(sample).reshape(shape)
-        boundary = tuple(
-            jnp.ones((1, 1, 1), dtype=jnp.asarray(tensors[0][0]).dtype)
-            for _ in range(shape[1])
-        )
-        for row in range(shape[0]):
-            mpo = _build_row_mpo(tensors, spins[row], row, shape[1])
-            boundary = strategy.apply(boundary, mpo)
-        return _contract_bottom(boundary)
+    apply = staticmethod(_peps_apply)
 
     @nnx.jit
     def __call__(self, x: jax.Array) -> jax.Array:
@@ -632,7 +595,7 @@ class PEPS(nnx.Module):
             Log-amplitudes with shape (batch,).
         """
         amps = jax.vmap(
-            lambda s: self._single_amplitude(
+            lambda s: self.apply(
                 self.tensors, s, self.shape, self.strategy
             )
         )(x)

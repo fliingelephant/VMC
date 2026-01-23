@@ -28,63 +28,26 @@ class FullSumBenchmarkTest(unittest.TestCase):
     def _assert_close(self, approx, exact, *, label: str):
         err = float(approx.error_of_mean) + float(exact.error_of_mean)
         diff = abs(complex(approx.mean) - complex(exact.mean))
-        self.assertLess(
-            diff,
-            self.ENERGY_SIGMA_MULT * (err + 1e-12),
-            msg=f"{label} diff={diff} err={err}",
-        )
+        self.assertLess(diff, self.ENERGY_SIGMA_MULT * (err + 1e-12), msg=f"{label} diff={diff} err={err}")
 
     def test_mps_fullsum_matches(self):
         n_sites = 14
         bond_dim = 4
         hi = nk.hilbert.Spin(s=1 / 2, N=n_sites)
-        hamiltonian = nk.operator.Heisenberg(
-            hi, nk.graph.Chain(length=n_sites), dtype=jnp.complex128
-        )
+        hamiltonian = nk.operator.Heisenberg(hi, nk.graph.Chain(length=n_sites), dtype=jnp.complex128)
         model = MPS(rngs=nnx.Rngs(self.SEED), n_sites=hi.size, bond_dim=bond_dim)
-        params = {"tensors": [jnp.asarray(t) for t in model.tensors]}
 
-        def apply_fun(variables, x, **kwargs):
-            del kwargs
-            tensors = variables["params"]["tensors"]
-            samples = x if x.ndim == 2 else x[None, :]
-            amps = MPS._batch_amplitudes(tensors, samples)
-            log_amps = jnp.log(amps)
-            return log_amps if x.ndim == 2 else log_amps[0]
-
-        sampler = nk.sampler.MetropolisLocal(
-            hi,
-            n_chains=self.N_CHAINS,
-            sweep_size=int(hi.size),
-            reset_chains=False,
-        )
+        sampler = nk.sampler.MetropolisLocal(hi, n_chains=self.N_CHAINS, sweep_size=int(hi.size), reset_chains=False)
         mc_state = nk.vqs.MCState(
-            sampler,
-            model=None,
-            n_samples=self.N_SAMPLES_MPS,
-            n_discard_per_chain=self.BURN_IN,
-            variables={"params": params},
-            apply_fun=apply_fun,
-            sampler_seed=self.SEED,
+            sampler, model, n_samples=self.N_SAMPLES_MPS,
+            n_discard_per_chain=self.BURN_IN, seed=self.SEED,
         )
-        fs_state = nk.vqs.FullSumState(
-            hi,
-            variables={"params": params},
-            apply_fun=apply_fun,
-        )
+        fs_state = nk.vqs.FullSumState(hi, model)
 
-        key = jax.random.key(self.SEED)
-        samples = sequential_sample(
-            model,
-            n_samples=self.N_SAMPLES_MPS,
-            n_chains=self.N_CHAINS,
-            burn_in=self.BURN_IN,
-            key=key,
-        )
+        samples = sequential_sample(model, n_samples=self.N_SAMPLES_MPS, n_chains=self.N_CHAINS, burn_in=self.BURN_IN, key=jax.random.key(self.SEED))
         local_energies = local_estimate(model, samples, hamiltonian)
         chain_length = self.N_SAMPLES_MPS // self.N_CHAINS
-        local_energies = local_energies.reshape(chain_length, self.N_CHAINS).T
-        ours_stats = nkstats.statistics(local_energies)
+        ours_stats = nkstats.statistics(local_energies.reshape(chain_length, self.N_CHAINS).T)
         mc_stats = mc_state.expect(hamiltonian)
         fs_stats = fs_state.expect(hamiltonian)
 
@@ -96,58 +59,20 @@ class FullSumBenchmarkTest(unittest.TestCase):
         bond_dim = 3
         n_sites = shape[0] * shape[1]
         hi = nk.hilbert.Spin(s=1 / 2, N=n_sites)
-        graph = nk.graph.Grid(extent=shape, pbc=False)
-        hamiltonian = nk.operator.Heisenberg(
-            hi, graph, dtype=jnp.complex128
-        )
+        hamiltonian = nk.operator.Heisenberg(hi, nk.graph.Grid(extent=shape, pbc=False), dtype=jnp.complex128)
         model = PEPS(rngs=nnx.Rngs(self.SEED), shape=shape, bond_dim=bond_dim)
-        params = {"tensors": [[jnp.asarray(t) for t in row] for row in model.tensors]}
 
-        def apply_fun(variables, x, **kwargs):
-            del kwargs
-            tensors = variables["params"]["tensors"]
-            samples = x if x.ndim == 2 else x[None, :]
-            amps = jax.vmap(
-                lambda s: PEPS._single_amplitude(
-                    tensors, s, shape, model.strategy
-                )
-            )(samples)
-            log_amps = jnp.log(amps)
-            return log_amps if x.ndim == 2 else log_amps[0]
-
-        sampler = nk.sampler.MetropolisLocal(
-            hi,
-            n_chains=self.N_CHAINS,
-            sweep_size=int(hi.size),
-            reset_chains=False,
-        )
+        sampler = nk.sampler.MetropolisLocal(hi, n_chains=self.N_CHAINS, sweep_size=int(hi.size), reset_chains=False)
         mc_state = nk.vqs.MCState(
-            sampler,
-            model=None,
-            n_samples=self.N_SAMPLES_PEPS,
-            n_discard_per_chain=self.BURN_IN,
-            variables={"params": params},
-            apply_fun=apply_fun,
-            sampler_seed=self.SEED,
+            sampler, model, n_samples=self.N_SAMPLES_PEPS,
+            n_discard_per_chain=self.BURN_IN, seed=self.SEED,
         )
-        fs_state = nk.vqs.FullSumState(
-            hi,
-            variables={"params": params},
-            apply_fun=apply_fun,
-        )
+        fs_state = nk.vqs.FullSumState(hi, model)
 
-        key = jax.random.key(self.SEED)
-        samples = sequential_sample(
-            model,
-            n_samples=self.N_SAMPLES_PEPS,
-            n_chains=self.N_CHAINS,
-            burn_in=self.BURN_IN,
-            key=key,
-        )
+        samples = sequential_sample(model, n_samples=self.N_SAMPLES_PEPS, n_chains=self.N_CHAINS, burn_in=self.BURN_IN, key=jax.random.key(self.SEED))
         local_energies = local_estimate(model, samples, hamiltonian)
         chain_length = self.N_SAMPLES_PEPS // self.N_CHAINS
-        local_energies = local_energies.reshape(chain_length, self.N_CHAINS).T
-        ours_stats = nkstats.statistics(local_energies)
+        ours_stats = nkstats.statistics(local_energies.reshape(chain_length, self.N_CHAINS).T)
         mc_stats = mc_state.expect(hamiltonian)
         fs_stats = fs_state.expect(hamiltonian)
 

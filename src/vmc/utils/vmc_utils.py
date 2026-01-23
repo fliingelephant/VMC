@@ -9,21 +9,17 @@ from vmc import config  # noqa: F401 - JAX config must be imported first
 
 import functools
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import jax
 import jax.numpy as jnp
 
 from vmc.core.eval import _value
 
-if TYPE_CHECKING:
-    from netket.vqs import MCState
-
 __all__ = [
     "flatten_samples",
     "batched_eval",
     "build_dense_jac",
-    "get_apply_fun",
     "local_estimate",
     "model_params",
 ]
@@ -60,16 +56,6 @@ def batched_eval(
         output_shape[0] * output_shape[1], *output_shape[2:]
     )[:n_samples]
     return outputs
-
-
-def get_apply_fun(state: "MCState") -> tuple[Any, dict, dict, dict]:
-    """Extract apply function and related data from a variational state."""
-    return (
-        state._apply_fun,
-        state.parameters,
-        state.model_state,
-        getattr(state, "training_kwargs", {}),
-    )
 
 
 def model_params(model) -> dict[str, Any]:

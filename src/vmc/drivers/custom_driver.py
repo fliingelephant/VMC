@@ -8,7 +8,9 @@ from __future__ import annotations
 from vmc import config  # noqa: F401 - JAX config must be imported first
 
 import abc
+import logging
 import os
+import time
 from typing import TYPE_CHECKING, Any
 
 import jax
@@ -22,6 +24,8 @@ from vmc.utils.vmc_utils import local_estimate
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "DynamicsDriver",
@@ -189,16 +193,34 @@ class DynamicsDriver:
 
     def _time_derivative(self, params: Any, t: float, *, stage: int) -> Any:
         self.model = nnx.merge(self._graphdef, params, self._model_state)
-        samples, o, p, self._sampler_key, self._sampler_configuration = self.sampler(
+        log_timing = logger.isEnabledFor(logging.INFO)
+        if log_timing:
+            t0 = time.perf_counter()
+        (
+            samples,
+            o,
+            p,
+            self._sampler_key,
+            self._sampler_configuration,
+        ) = self.sampler(
             self.model,
             key=self._sampler_key,
             initial_configuration=self._sampler_configuration,
         )
+        if log_timing:
+            jax.block_until_ready(samples)
+            jax.block_until_ready(o)
+            if p is not None:
+                jax.block_until_ready(p)
+            t1 = time.perf_counter()
         self.last_samples = samples
         self.last_o = o
         self.last_p = p
         op_t = self._operator_at(t)
         local_energies = local_estimate(self.model, samples, op_t)
+        if log_timing:
+            jax.block_until_ready(local_energies)
+            t2 = time.perf_counter()
         if stage == 0:
             self._loss_stats = nkstats.statistics(local_energies)
 
@@ -211,6 +233,17 @@ class DynamicsDriver:
             local_energies,
             grad_factor=self.time_unit.grad_factor,
         )
+        if log_timing:
+            jax.block_until_ready(updates)
+            t3 = time.perf_counter()
+            logger.info(
+                "Step %d stage %d | sampling %.3fs | local_energy %.3fs | sr_solve %.3fs",
+                self.step_count,
+                stage,
+                t1 - t0,
+                t2 - t1,
+                t3 - t2,
+            )
         if stage == 0:
             self._sync_preconditioner_metrics()
         return updates

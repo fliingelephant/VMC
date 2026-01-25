@@ -112,9 +112,9 @@ def _direct_solve(
     diag_shift: float,
     solver: LinearSolver,
 ) -> tuple[jax.Array, dict]:
+    rhs = _adjoint_matvec(jac, dv)
     qgt = QGT(jac, space=ParameterSpace())
     S = qgt.to_dense()
-    rhs = _adjoint_matvec(jac, dv)
     mat = S + diag_shift * jnp.eye(S.shape[0], dtype=S.dtype)
     x = solver(mat, rhs)
     metrics = {

@@ -25,7 +25,9 @@ from flax import nnx
 from vmc.drivers import DynamicsDriver, ImaginaryTimeUnit
 from vmc.models.mps import MPS
 from vmc.models.peps import PEPS, ZipUp
-from vmc.preconditioners import SRPreconditioner
+from vmc.preconditioners import SRPreconditioner, DirectSolve
+from vmc.qgt import SampleSpace
+from vmc.qgt.solvers import solve_cg
 from vmc.samplers.sequential import sequential_sample_with_gradients
 
 logger = logging.getLogger(__name__)
@@ -42,7 +44,7 @@ def build_ising_1d(
     return hi, nk.operator.Ising(hi, graph=graph, h=h, J=J, dtype=jnp.complex128)
 
 
-def run_optimization(model, H, exact_e, n_samples=1008, n_steps=300, dt=0.01, diag_shift=0.1, seed=42, log_interval=20):
+def run_optimization(model, H, exact_e, n_samples=2048, n_steps=120, dt=0.05, diag_shift=0.01, seed=42, log_interval=10):
     """Run ground state optimization loop."""
     sampler = functools.partial(
         sequential_sample_with_gradients,
@@ -54,7 +56,11 @@ def run_optimization(model, H, exact_e, n_samples=1008, n_steps=300, dt=0.01, di
         model,
         H,
         sampler=sampler,
-        preconditioner=SRPreconditioner(diag_shift=diag_shift),
+        preconditioner=SRPreconditioner(
+            space=SampleSpace(),
+            strategy=DirectSolve(solver=solve_cg),
+            diag_shift=diag_shift
+        ),
         dt=dt,
         time_unit=ImaginaryTimeUnit(),
         sampler_key=jax.random.key(seed),
@@ -85,12 +91,14 @@ def main(n_sites: int = 20, h: float = -1.0, J: float = -1.0):
     exact_e = nk.exact.lanczos_ed(H, k=1)[0].real
     logger.info("Exact ground state energy: %.6f (%.6f per site)", exact_e, exact_e / n_sites)
 
+    """
     # MPS (natural for 1D chains)
     logger.info("=" * 60)
     logger.info("MPS with bond_dim=16")
     logger.info("=" * 60)
     mps = MPS(rngs=nnx.Rngs(42), n_sites=n_sites, bond_dim=16)
     run_optimization(mps, H, exact_e)
+    """
 
     # PEPS (for comparison)
     logger.info("=" * 60)

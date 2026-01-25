@@ -8,7 +8,6 @@ from vmc.models.peps import (
     NoTruncation,
     PEPS,
     ZipUp,
-    make_peps_amplitude,
 )
 
 __all__ = [
@@ -18,5 +17,4 @@ __all__ = [
     "NoTruncation",
     "PEPS",
     "ZipUp",
-    "make_peps_amplitude",
 ]

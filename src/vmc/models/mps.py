@@ -75,7 +75,7 @@ class MPS(nnx.Module):
         self.tensors = tensors
 
     @staticmethod
-    def _batch_amplitudes(tensors, samples: jax.Array) -> jax.Array:
+    def apply(tensors, samples: jax.Array) -> jax.Array:
         """Compute MPS amplitudes for a batch of spin configurations.
 
         Note: Uses Python loop because boundary tensors have different shapes
@@ -107,6 +107,6 @@ class MPS(nnx.Module):
             Log-amplitude(s). Scalar for single sample, shape (batch,) for batch.
         """
         samples = x if x.ndim == 2 else x[None, :]
-        amps = self._batch_amplitudes(self.tensors, samples)
+        amps = self.apply(self.tensors, samples)
         log_amps = jnp.log(amps)
         return log_amps if x.ndim == 2 else log_amps[0]

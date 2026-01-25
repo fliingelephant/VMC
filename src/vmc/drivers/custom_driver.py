@@ -8,7 +8,9 @@ from __future__ import annotations
 from vmc import config  # noqa: F401 - JAX config must be imported first
 
 import abc
+import logging
 import os
+import time
 from typing import TYPE_CHECKING, Any
 
 import jax
@@ -18,10 +20,11 @@ from flax import nnx
 from tqdm.auto import tqdm
 
 from vmc.preconditioners import SRPreconditioner
-from vmc.utils.vmc_utils import local_estimate
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "DynamicsDriver",
@@ -161,10 +164,10 @@ class DynamicsDriver:
         self.t = float(t0)
         self.step_count = 0
         self._loss_stats = None
-        self.last_samples = None
-        self.last_o = None
-        self.last_p = None
         self._sampler_configuration = None
+        self._graphdef, params, model_state = nnx.split(self.model, nnx.Param, ...)
+        self._params = params.to_pure_dict()
+        self._model_state = model_state.to_pure_dict()
 
         self.time_unit = time_unit
         self.integrator = integrator or self.time_unit.default_integrator()
@@ -175,9 +178,9 @@ class DynamicsDriver:
         self.solve_time: float | None = None
 
     def _sync_preconditioner_metrics(self) -> None:
-        for name in ("diag_shift_error", "residual_error", "solve_time"):
-            if hasattr(self.preconditioner, name):
-                setattr(self, name, getattr(self.preconditioner, name))
+        self.diag_shift_error = getattr(self.preconditioner, "diag_shift_error", None)
+        self.residual_error = getattr(self.preconditioner, "residual_error", None)
+        self.solve_time = getattr(self.preconditioner, "solve_time", None)
 
     def _operator_at(self, t: float):
         if callable(self.operator) and not hasattr(self.operator, "get_conn_padded"):
@@ -185,30 +188,48 @@ class DynamicsDriver:
         return self.operator
 
     def _time_derivative(self, params: Any, t: float, *, stage: int) -> Any:
-        self._assign_params(self.model.tensors, params)
-        samples, o, p, self._sampler_key, self._sampler_configuration = self.sampler(
+        self.model = nnx.merge(self._graphdef, params, self._model_state)
+        log_timing = logger.isEnabledFor(logging.INFO)
+        t0 = time.perf_counter() if log_timing else 0.0
+
+        samples, o, p, self._sampler_key, self._sampler_configuration, amp, local_energies = self.sampler(
             self.model,
+            self._operator_at(t),
             key=self._sampler_key,
             initial_configuration=self._sampler_configuration,
         )
-        self.last_samples = samples
-        self.last_o = o
-        self.last_p = p
-        op_t = self._operator_at(t)
-        local_energies = local_estimate(self.model, samples, op_t)
+
+        if log_timing:
+            for arr in (samples, o, p, amp, local_energies):
+                if arr is not None:
+                    jax.block_until_ready(arr)
+            t1 = time.perf_counter()
+            logger.info("Step %d stage %d | sampling %.3fs", self.step_count, stage, t1 - t0)
+
         if stage == 0:
             self._loss_stats = nkstats.statistics(local_energies)
+            if log_timing:
+                e = self._loss_stats
+                logger.info(
+                    "Step %d | E = %.6f +/- %.4f [var=%.4f]",
+                    self.step_count,
+                    e.mean.real,
+                    e.error_of_mean.real,
+                    e.variance.real,
+                )
 
         updates = self.preconditioner.apply(
-            self.model,
-            samples,
-            o,
-            p,
-            local_energies,
+            self.model, params, samples, o, p, local_energies,
             grad_factor=self.time_unit.grad_factor,
         )
+
+        if log_timing:
+            jax.block_until_ready(updates)
+            logger.info("Step %d stage %d | sr_solve %.3fs", self.step_count, stage, time.perf_counter() - t1)
+
         if stage == 0:
             self._sync_preconditioner_metrics()
+
         return updates
 
     @staticmethod
@@ -223,29 +244,20 @@ class DynamicsDriver:
     @staticmethod
     @jax.jit
     def _tree_weighted_sum(k1: Any, k2: Any, k3: Any, k4: Any) -> Any:
-        def combine(a, b, c, d):
-            return (a + 2.0 * b + 2.0 * c + d) * jnp.asarray(1.0 / 6.0, dtype=a.dtype)
-
-        return jax.tree_util.tree_map(combine, k1, k2, k3, k4)
+        return jax.tree_util.tree_map(
+            lambda a, b, c, d: (a + 2.0 * b + 2.0 * c + d) / jnp.asarray(6.0, dtype=a.dtype),
+            k1, k2, k3, k4,
+        )
 
     def _get_model_params(self) -> Any:
-        return jax.tree_util.tree_map(jnp.asarray, self.model.tensors)
-
-    @staticmethod
-    def _assign_params(target: Any, values: Any) -> None:
-        if isinstance(target, (list, tuple)):
-            for target_item, value_item in zip(target, values):
-                DynamicsDriver._assign_params(target_item, value_item)
-        elif isinstance(target, nnx.Variable):
-            target.value = values
-        else:
-            target[...] = values
+        return self._params
 
     def step(self, dt: float | None = None) -> None:
         dt_step = self.dt if dt is None else float(dt)
         params = self._get_model_params()
         params_new = self.integrator.step(self, params, self.t, dt_step)
-        self._assign_params(self.model.tensors, params_new)
+        self._params = params_new
+        self.model = nnx.merge(self._graphdef, self._params, self._model_state)
         self.t += dt_step
         self.step_count += 1
 

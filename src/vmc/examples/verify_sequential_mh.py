@@ -32,7 +32,6 @@ from vmc.examples.real_time import build_heisenberg_square
 from vmc.models.mps import MPS
 from vmc.models.peps import ContractionStrategy, PEPS, ZipUp
 from vmc.utils.utils import occupancy_to_spin, spin_to_occupancy
-from vmc.utils.vmc_utils import get_apply_fun
 
 logger = logging.getLogger(__name__)
 
@@ -222,7 +221,6 @@ def _peps_sequential_sweep_with_accept(
                 right_envs[col],
                 top_env[col],
                 bottom_env[col],
-                mpo_row[col].shape,
             )
             site_tensor = tensors[row][col]
 
@@ -354,10 +352,9 @@ def _energy_from_samples(
     chain_length = int(samples.shape[0] // n_chains)
     vstate._samples = samples.reshape(n_chains, chain_length, n_sites)
 
-    apply_fun, params, model_state, kwargs = get_apply_fun(vstate)
     flat = vstate._samples.reshape(-1, n_sites)
     logpsi = jax.vmap(
-        lambda s: apply_fun({"params": params, **model_state}, s, **kwargs)
+        lambda s: vstate._apply_fun({"params": vstate.parameters, **vstate.model_state}, s)
     )(flat)
     vstate._logpsi = logpsi.reshape(n_chains, chain_length)
 

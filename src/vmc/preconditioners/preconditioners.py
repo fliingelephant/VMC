@@ -5,7 +5,7 @@ from vmc import config  # noqa: F401
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import jax
 import jax.numpy as jnp
@@ -94,15 +94,11 @@ def _adjoint_matvec(jac: Jacobian, v: jax.Array) -> jax.Array:
 
 @dispatch
 def _adjoint_matvec(jac: SlicedJacobian, v: jax.Array) -> jax.Array:
+    from vmc.qgt.qgt import _iter_sliced_blocks
+
     o, p, d = jac.o, jac.p, jac.phys_dim
     pps = _params_per_site(jac.ordering, o)
-    parts = []
-    i = 0
-    for n in pps:
-        for k in range(d):
-            ok = jnp.where(p[:, i : i + n] == k, o[:, i : i + n], 0)
-            parts.append(ok.conj().T @ v)
-        i += n
+    parts = [ok.conj().T @ v for ok, _ in _iter_sliced_blocks(o, p, d, pps)]
     result = jnp.concatenate(parts, axis=0)
     mean = jacobian_mean(jac)
     return result - mean.conj() * jnp.sum(v)
@@ -116,9 +112,9 @@ def _direct_solve(
     diag_shift: float,
     solver: LinearSolver,
 ) -> tuple[jax.Array, dict]:
+    rhs = _adjoint_matvec(jac, dv)
     qgt = QGT(jac, space=ParameterSpace())
     S = qgt.to_dense()
-    rhs = _adjoint_matvec(jac, dv)
     mat = S + diag_shift * jnp.eye(S.shape[0], dtype=S.dtype)
     x = solver(mat, rhs)
     metrics = {
@@ -262,6 +258,7 @@ class SRPreconditioner:
     def apply(
         self,
         model,
+        params: Any,
         samples: jax.Array,
         o: jax.Array,
         p: jax.Array | None,
@@ -274,24 +271,19 @@ class SRPreconditioner:
         dv = (local_energies.reshape(-1) - jnp.mean(local_energies)) / samples.shape[0]
         dv = grad_factor * dv
 
-        params = jax.tree_util.tree_map(jnp.asarray, model.tensors)
+        params = jax.tree_util.tree_map(jnp.asarray, params)
         pps = tuple(params_per_site(model)) if p is not None else None
         Q = None
         if self.gauge_config is not None:
-            params_dict = {"tensors": params}
             Q, _ = compute_gauge_projection(
-                self.gauge_config, model, params_dict, return_info=True
+                self.gauge_config, model, params, return_info=True
             )
             if p is None:
                 o_eff = o @ Q
             else:
-                blocks = []
-                i = 0
-                for n in pps:
-                    for k in range(model.phys_dim):
-                        ok = jnp.where(p[:, i : i + n] == k, o[:, i : i + n], 0)
-                        blocks.append(ok)
-                    i += n
+                from vmc.qgt.qgt import _iter_sliced_blocks
+
+                blocks = [ok for ok, _ in _iter_sliced_blocks(o, p, model.phys_dim, pps)]
                 o_eff = jnp.concatenate(blocks, axis=1) @ Q
             jac = Jacobian(o_eff)
         elif p is None:

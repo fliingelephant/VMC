@@ -13,7 +13,7 @@ from netket.utils.types import PyTree
 from vmc import config  # noqa: F401
 from vmc.qgt.jacobian import Jacobian
 from vmc.qgt.qgt import QGT, ParameterSpace
-from vmc.utils.vmc_utils import build_dense_jac, flatten_samples, get_apply_fun
+from vmc.utils.vmc_utils import build_dense_jac, flatten_samples
 
 __all__ = ["QGTOperator", "DenseSR"]
 
@@ -64,12 +64,11 @@ class DenseSR(AbstractLinearPreconditioner):
         self, vstate: nk.vqs.VariationalState, step=None
     ) -> QGTOperator:
         samples = flatten_samples(vstate.samples)
-        apply_fun, params, model_state, _ = get_apply_fun(vstate)
         O = build_dense_jac(
-            apply_fun, params, model_state, samples, holomorphic=self.holomorphic
+            vstate._apply_fun, vstate.parameters, vstate.model_state, samples, holomorphic=self.holomorphic
         )
         params_struct = jax.tree_util.tree_map(
-            lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype), params
+            lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype), vstate.parameters
         )
         qgt = QGT(Jacobian(O), space=ParameterSpace())
         return QGTOperator(

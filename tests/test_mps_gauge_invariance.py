@@ -38,10 +38,10 @@ class MPSGaugeInvarianceTest(unittest.TestCase):
         samples = jax.random.bernoulli(key, 0.5, (128, n_sites))
         samples = jnp.where(samples, 1, -1).astype(jnp.int32)
 
-        amps_ref = MPS._batch_amplitudes(
+        amps_ref = MPS.apply(
             [jnp.asarray(t) for t in tensors], samples
         )
-        amps_gauge = MPS._batch_amplitudes(
+        amps_gauge = MPS.apply(
             [jnp.asarray(t) for t in tensors_gauge], samples
         )
         max_diff = float(jnp.max(jnp.abs(amps_ref - amps_gauge)))

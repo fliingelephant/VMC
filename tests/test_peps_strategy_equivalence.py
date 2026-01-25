@@ -31,7 +31,7 @@ class PEPSStrategyEquivalenceTest(unittest.TestCase):
 
         def amps_for(strategy):
             return jax.vmap(
-                lambda s: PEPS._single_amplitude(tensors, s, shape, strategy)
+                lambda s: PEPS.apply(tensors, s, shape, strategy)
             )(samples)
 
         amps_ref = amps_for(NoTruncation())

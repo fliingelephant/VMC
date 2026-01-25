@@ -65,7 +65,7 @@ class FiniteDiffGradientTest(unittest.TestCase):
 
         def amp_from_flat(flat_params: np.ndarray) -> np.ndarray:
             tensors_local = _unflatten_tensors(flat_params, shapes)
-            amps = MPS._batch_amplitudes(
+            amps = MPS.apply(
                 [jnp.asarray(t) for t in tensors_local], sample[None, :]
             )
             return np.asarray(amps[0])
@@ -111,7 +111,7 @@ class FiniteDiffGradientTest(unittest.TestCase):
 
         def amp_from_flat(flat_params: np.ndarray) -> np.ndarray:
             tensors_local = unflatten_peps(flat_params)
-            amp = PEPS._single_amplitude(
+            amp = PEPS.apply(
                 tensors_local, sample, shape, model.strategy
             )
             return np.asarray(amp)

@@ -24,7 +24,7 @@
 
 ## PEPS Contraction + Gradients
 - `ContractionStrategy` ABC with `NoTruncation`, `ZipUp`, `DensityMatrix`.
-- `make_peps_amplitude`: custom-VJP amplitude with cached environments.
+- `PEPS.apply`: static method with custom-VJP using cached environments.
 - `_compute_all_gradients`: environment-based row gradients.
 
 ## Sampling

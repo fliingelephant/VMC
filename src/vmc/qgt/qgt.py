@@ -145,12 +145,8 @@ def _matvec(jac: SlicedJacobian, space: SampleSpace, v):
     o, p, d = jac.o, jac.p, jac.phys_dim
     pps = _params_per_site(jac.ordering, o)
     result = jnp.zeros_like(v, dtype=o.dtype)
-    i = 0
-    for n in pps:
-        for k in range(d):
-            ok = jnp.where(p[:, i : i + n] == k, o[:, i : i + n], 0)
-            result = result + ok @ (ok.conj().T @ v)
-        i += n
+    for ok, _ in _iter_sliced_blocks(o, p, d, pps):
+        result = result + ok @ (ok.conj().T @ v)
     scale = 1.0 / o.shape[0]
     result = result * scale
     mean = jacobian_mean(jac)
@@ -209,12 +205,8 @@ def _to_dense(jac: SlicedJacobian, space: SampleSpace):
     o, p, d = jac.o, jac.p, jac.phys_dim
     pps = _params_per_site(jac.ordering, o)
     G = jnp.zeros((o.shape[0], o.shape[0]), dtype=o.dtype)
-    i = 0
-    for n in pps:
-        for k in range(d):
-            ok = jnp.where(p[:, i : i + n] == k, o[:, i : i + n], 0)
-            G = G + ok @ ok.conj().T
-        i += n
+    for ok, _ in _iter_sliced_blocks(o, p, d, pps):
+        G = G + ok @ ok.conj().T
     scale = 1.0 / o.shape[0]
     G = G * scale
     mean = jacobian_mean(jac)

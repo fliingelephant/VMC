@@ -29,4 +29,4 @@ where = ["src"]
 include = ["vmc*"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests/test_sequential_sampling.py"]
+testpaths = ["tests"]

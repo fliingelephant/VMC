@@ -44,7 +44,7 @@ class SRPreconditionerDenseTest(unittest.TestCase):
             model, samples, full_gradient=True
         )
 
-        local_energies = local_estimate(model, samples, hamiltonian)
+        local_energies = local_estimate(model, samples, hamiltonian, amps)
 
         preconditioner = SRPreconditioner(diag_shift=1e-3)
         updates = preconditioner.apply(

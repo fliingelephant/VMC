@@ -28,18 +28,20 @@ __all__ = [
     "NoTruncation",
     "ZipUp",
     "DensityMatrix",
-    # Amplitude functions
-    "make_peps_amplitude",
     # Internal functions exposed for external use
     "_apply_mpo_from_below",
     "_build_row_mpo",
     "_compute_all_gradients",
     "_compute_all_row_gradients",
+    "_compute_all_env_grads_and_energy",
+    "_compute_right_envs",
+    "_compute_2site_horizontal_env",
     "_compute_single_gradient",
     "_contract_bottom",
     "_contract_column_transfer",
     "_contract_left_partial",
     "_contract_right_partial",
+    "_compute_row_pair_vertical_amps",
     "_forward_with_cache",
 ]
 
@@ -100,72 +102,58 @@ class DensityMatrix(ContractionStrategy):
         return _apply_mpo_density_matrix(mps, mpo, self.truncate_bond_dimension)
 
 
+def _contract_theta(m: jax.Array, w: jax.Array, carry: jax.Array | None) -> tuple:
+    """Contract MPS tensor with MPO tensor and optional carry from previous site.
+
+    Returns (theta, left_dim, phys_dim, Dr, wr) where theta has shape
+    (left_dim, phys_dim, Dr, wr).
+    """
+    theta = jnp.tensordot(m, w, axes=[[1], [2]])  # (Dl, Dr, wl, wr, down)
+    theta = jnp.transpose(theta, (0, 2, 4, 1, 3))  # (Dl, wl, down, Dr, wr)
+    if carry is not None:
+        theta = jnp.tensordot(carry, theta, axes=[[1, 2], [0, 1]])
+    if theta.ndim == 5:
+        Dl, wl, down, Dr, wr = theta.shape
+        theta = theta.reshape(Dl * wl, down, Dr, wr)
+    left_dim, phys_dim, Dr, wr = theta.shape
+    return theta, left_dim, phys_dim, Dr, wr
+
+
 @jax.jit
 def _apply_mpo_exact(mps: tuple, mpo: tuple) -> tuple:
     """Exact MPO application without truncation."""
-    new = []
-    for m, w in zip(mps, mpo):
-        contracted = jnp.tensordot(m, w, axes=[[1], [2]])
-        contracted = jnp.transpose(contracted, (0, 2, 4, 1, 3))
-        left, wl, phys, right, wr = contracted.shape
-        new.append(contracted.reshape(left * wl, phys, right * wr))
-    return tuple(new)
+    return tuple(
+        (lambda c: c.reshape(c.shape[0] * c.shape[1], c.shape[2], c.shape[3] * c.shape[4]))(
+            jnp.transpose(jnp.tensordot(m, w, axes=[[1], [2]]), (0, 2, 4, 1, 3))
+        )
+        for m, w in zip(mps, mpo)
+    )
 
 
 @functools.partial(jax.jit, static_argnums=(2,))
 def _apply_mpo_zip_up(
     mps: tuple, mpo: tuple, truncate_bond_dimension: int
 ) -> tuple:
-    """Apply MPO with on-the-fly SVD truncation (zip-up).
-
-    This avoids the large intermediate bond growth of the two-stage
-    apply-then-truncate approach and keeps the right bond of each
-    intermediate MPS bounded by `truncate_bond_dimension`.
-    """
+    """Apply MPO with on-the-fly SVD truncation (zip-up)."""
     new = []
-    carry = None  # shape (bond, Dr_prev, wr_prev) propagated to the right
+    carry = None
 
     for i, (m, w) in enumerate(zip(mps, mpo)):
-        # Contract physical/up legs.
-        theta = jnp.tensordot(m, w, axes=[[1], [2]])  # (Dl, Dr, wl, wr, down)
-        theta = jnp.transpose(theta, (0, 2, 4, 1, 3))  # (Dl, wl, down, Dr, wr)
-
-        if carry is not None:
-            # Merge previous transfer matrix into the left legs (Dr_prev, wr_prev).
-            theta = jnp.tensordot(carry, theta, axes=[[1, 2], [0, 1]])
-            # theta shape -> (bond_prev, down, Dr, wr)
-
-        if theta.ndim == 5:
-            Dl, wl, down, Dr, wr = theta.shape
-            theta = theta.reshape(Dl * wl, down, Dr, wr)
-        # theta now has shape (left_dim, phys_dim=down, Dr, wr)
-        left_dim, phys_dim, Dr, wr = theta.shape
+        theta, left_dim, phys_dim, Dr, wr = _contract_theta(m, w, carry)
 
         if i == len(mps) - 1:
-            # Last site: no further truncation needed; keep right leg explicit.
             new.append(theta.reshape(left_dim, phys_dim, Dr * wr))
-            carry = None
             break
 
-        # SVD-based truncation on reshaped matrix (left*phys, right).
         mat = theta.reshape(left_dim * phys_dim, Dr * wr)
-        # Jitter avoids exact rank-deficiency that can blow up SVD derivatives.
         svd_eps = jnp.array(1e-7, dtype=mat.dtype)
         mat = mat + svd_eps * jnp.eye(mat.shape[0], mat.shape[1], dtype=mat.dtype)
         U, S, Vh = jnp.linalg.svd(mat, full_matrices=False)
         k = min(truncate_bond_dimension, S.shape[0])
-        U = U[:, :k]
-        S = S[:k]
-        Vh = Vh[:k, :]
 
-        site = U.reshape(left_dim, phys_dim, k)
-        new.append(site)
-
-        # Keep truncation algebra in the complex dtype to avoid complex->real
-        # casts in autodiff (which can trigger warnings/NaNs).
-        S_c = S.astype(Vh.dtype)
-        transfer = S_c[:, None] * Vh  # (k, Dr*wr)
-        carry = transfer.reshape(k, Dr, wr)
+        new.append(U[:, :k].reshape(left_dim, phys_dim, k))
+        S_c = S[:k].astype(Vh.dtype)
+        carry = (S_c[:, None] * Vh[:k, :]).reshape(k, Dr, wr)
 
     return tuple(new)
 
@@ -174,43 +162,24 @@ def _apply_mpo_zip_up(
 def _apply_mpo_density_matrix(
     mps: tuple, mpo: tuple, truncate_bond_dimension: int
 ) -> tuple:
-    """Density-matrix truncation while applying an MPO to an MPS.
-
-    Uses the right reduced density matrix to select the dominant
-    eigenvectors (TEBD-style).
-    """
+    """Density-matrix truncation while applying an MPO to an MPS."""
     new = []
-    carry = None  # shape (bond, Dr_prev, wr_prev)
+    carry = None
 
     for i, (m, w) in enumerate(zip(mps, mpo)):
-        theta = jnp.tensordot(m, w, axes=[[1], [2]])
-        theta = jnp.transpose(theta, (0, 2, 4, 1, 3))  # (Dl, wl, down, Dr, wr)
-
-        if carry is not None:
-            theta = jnp.tensordot(carry, theta, axes=[[1, 2], [0, 1]])
-
-        if theta.ndim == 5:
-            Dl, wl, down, Dr, wr = theta.shape
-            theta = theta.reshape(Dl * wl, down, Dr, wr)
-
-        left_dim, phys_dim, Dr, wr = theta.shape
+        theta, left_dim, phys_dim, Dr, wr = _contract_theta(m, w, carry)
         theta = theta.reshape(left_dim * phys_dim, Dr * wr)
 
         if i == len(mps) - 1:
             new.append(theta.reshape(left_dim, phys_dim, Dr * wr))
-            carry = None
             break
 
-        rho = theta.conj().T @ theta  # (Dr*wr, Dr*wr)
+        rho = theta.conj().T @ theta
         evals, evecs = jnp.linalg.eigh(rho)
-        order = jnp.argsort(evals)[::-1]
         k = min(truncate_bond_dimension, rho.shape[0])
-        vecs_k = evecs[:, order[:k]]
+        vecs_k = evecs[:, jnp.argsort(evals)[::-1][:k]]
 
-        theta_projected = theta @ vecs_k  # (left_dim*phys, k)
-        site = theta_projected.reshape(left_dim, phys_dim, k)
-        new.append(site)
-
+        new.append((theta @ vecs_k).reshape(left_dim, phys_dim, k))
         carry = vecs_k.conj().T.reshape(k, Dr, wr)
 
     return tuple(new)
@@ -238,25 +207,11 @@ def _forward_with_cache(
     shape: tuple[int, int],
     strategy: ContractionStrategy,
 ) -> tuple[jax.Array, list[tuple]]:
-    """Forward pass that caches all intermediate boundary MPSs.
-
-    Args:
-        tensors: Nested list of PEPS site tensors.
-        spins: Physical indices array with shape (n_rows, n_cols).
-        shape: Grid shape (n_rows, n_cols).
-        strategy: Contraction strategy instance.
-
-    Returns:
-        Tuple of (amplitude, top_envs) where top_envs[r] is the boundary MPS
-        after contracting rows 0..r-1.
-    """
+    """Forward pass that caches all intermediate boundary MPSs."""
     n_rows, n_cols = shape
     dtype = jnp.asarray(tensors[0][0]).dtype
 
-    # Cache boundary MPSs after each row
     top_envs = []
-
-    # Initial boundary (before row 0)
     boundary = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
     top_envs.append(boundary)
 
@@ -273,22 +228,8 @@ def _apply_mpo_from_below(
     mpo: tuple,
     strategy: ContractionStrategy,
 ) -> tuple:
-    """Apply MPO to boundary MPS from below (for backward sweep).
-
-    When contracting from below, the MPO's 'down' leg connects to the boundary's
-    physical dimension, and the 'up' leg becomes the new physical dimension.
-
-    Args:
-        bottom_mps: Current bottom boundary MPS.
-        mpo: Row MPO with tensors of shape (left, right, up, down).
-        strategy: Contraction strategy instance.
-
-    Returns:
-        Updated bottom boundary MPS.
-    """
-    # Transpose MPO tensors to swap up/down: (left, right, up, down) -> (left, right, down, up)
-    mpo_transposed = tuple(jnp.transpose(w, (0, 1, 3, 2)) for w in mpo)
-    return strategy.apply(bottom_mps, mpo_transposed)
+    """Apply MPO to boundary MPS from below (for backward sweep)."""
+    return strategy.apply(bottom_mps, tuple(jnp.transpose(w, (0, 1, 3, 2)) for w in mpo))
 
 
 def _contract_column_transfer(
@@ -296,56 +237,171 @@ def _contract_column_transfer(
     mpo_tensor: jax.Array,
     bot_tensor: jax.Array,
 ) -> jax.Array:
-    """Contract a single column (top MPS tensor + MPO tensor + bottom MPS tensor)
-    into a transfer tensor.
-
-    Args:
-        top_tensor: (tL, tD, tR) - top boundary MPS tensor, tD == up bond of mpo
-        mpo_tensor: (mL, mR, up, down) - row MPO tensor
-        bot_tensor: (bL, bD, bR) - bottom boundary MPS tensor, bD == down bond of mpo
-
-    Returns:
-        Transfer tensor with shape (tL, tR, mL, mR, bL, bR) after contracting
-        over the physical dimensions (up, down).
-    """
-    # Contract top with mpo over physical/up bond, then with bottom over down bond
-    return jnp.einsum(
-        "abcdv,evf->abcdef",
-        jnp.einsum("aub,cduv->abcdv", top_tensor, mpo_tensor),
-        bot_tensor,
-    )
+    """Contract column into transfer tensor with shape (tL, tR, mL, mR, bL, bR)."""
+    top_mpo = jnp.einsum("aub,cduv->abcdv", top_tensor, mpo_tensor)
+    return jnp.einsum("abcdv,evf->abcdef", top_mpo, bot_tensor)
 
 
-def _contract_left_partial(
-    left_env: jax.Array,
-    transfer: jax.Array,
-) -> jax.Array:
-    """Contract left environment with a transfer tensor.
-
-    Args:
-        left_env: (tL, mL, bL) - left environment tensor
-        transfer: (tL, tR, mL, mR, bL, bR) - column transfer tensor
-
-    Returns:
-        New left environment with shape (tR, mR, bR).
-    """
+def _contract_left_partial(left_env: jax.Array, transfer: jax.Array) -> jax.Array:
+    """Contract left environment (tL, mL, bL) with transfer -> (tR, mR, bR)."""
     return jnp.einsum("ace,abcdef->bdf", left_env, transfer)
 
 
-def _contract_right_partial(
+def _contract_right_partial(transfer: jax.Array, right_env: jax.Array) -> jax.Array:
+    """Contract transfer with right environment (tR, mR, bR) -> (tL, mL, bL)."""
+    return jnp.einsum("abcdef,bdf->ace", transfer, right_env)
+
+
+def _contract_column_transfer_2row(
+    top_tensor: jax.Array,
+    mpo0: jax.Array,
+    mpo1: jax.Array,
+    bot_tensor: jax.Array,
+) -> jax.Array:
+    """Contract two-row column transfer with shape (tL, tR, m0L, m0R, m1L, m1R, bL, bR)."""
+    tmp = jnp.einsum("aub,lruv->alrbv", top_tensor, mpo0)
+    tmp = jnp.einsum("alrbv,xyvw->alrbxyw", tmp, mpo1)
+    tmp = jnp.einsum("alrbxyw,ewf->alrbxyef", tmp, bot_tensor)
+    return jnp.transpose(tmp, (0, 3, 1, 2, 4, 5, 6, 7))
+
+
+def _contract_left_partial_2row(
+    left_env: jax.Array,
+    transfer: jax.Array,
+) -> jax.Array:
+    """Contract left environment (tL, m0L, m1L, bL) with transfer."""
+    return jnp.einsum("aceg,abcdefgh->bdfh", left_env, transfer)
+
+
+def _contract_right_partial_2row(
     transfer: jax.Array,
     right_env: jax.Array,
 ) -> jax.Array:
-    """Contract transfer tensor with right environment.
+    """Contract transfer with right environment (tR, m0R, m1R, bR)."""
+    return jnp.einsum("abcdefgh,bdfh->aceg", transfer, right_env)
 
-    Args:
-        transfer: (tL, tR, mL, mR, bL, bR) - column transfer tensor
-        right_env: (tR, mR, bR) - right environment tensor
 
-    Returns:
-        New right environment with shape (tL, mL, bL).
-    """
-    return jnp.einsum("abcdef,bdf->ace", transfer, right_env)
+def _contract_column_transfer_2row_open(
+    top_tensor: jax.Array,
+    tensor0: jax.Array,
+    tensor1: jax.Array,
+    bot_tensor: jax.Array,
+) -> jax.Array:
+    """Contract two rows leaving physical indices open."""
+    tmp = jnp.einsum("aub,puvlr->apbvlr", top_tensor, tensor0)
+    tmp = jnp.einsum("apbvlr,qvdmn->apbqlrdmn", tmp, tensor1)
+    tmp = jnp.einsum("apbqlrdmn,edf->apbqlrmnef", tmp, bot_tensor)
+    return jnp.transpose(tmp, (0, 2, 4, 5, 6, 7, 8, 9, 1, 3))
+
+
+def _compute_right_envs_2row(
+    transfers: list[jax.Array],
+    dtype,
+) -> list[jax.Array]:
+    """Compute right environments for 2-row contractions (backward pass)."""
+    n_cols = len(transfers)
+    right_envs = [None] * n_cols
+    right_envs[n_cols - 1] = jnp.ones((1, 1, 1, 1), dtype=dtype)
+    for c in range(n_cols - 2, -1, -1):
+        right_envs[c] = _contract_right_partial_2row(transfers[c + 1], right_envs[c + 1])
+    return right_envs
+
+
+def _compute_row_pair_vertical_amps(
+    top_mps: tuple,
+    bottom_mps: tuple,
+    mpo0: tuple,
+    mpo1: tuple,
+    tensors_row0: list[jax.Array],
+    tensors_row1: list[jax.Array],
+) -> list[jax.Array]:
+    """Compute vertical 2-site amplitudes between adjacent rows."""
+    n_cols = len(mpo0)
+    dtype = mpo0[0].dtype
+    transfers = [
+        _contract_column_transfer_2row(top_mps[c], mpo0[c], mpo1[c], bottom_mps[c])
+        for c in range(n_cols)
+    ]
+    right_envs = _compute_right_envs_2row(transfers, dtype)
+
+    left_env = jnp.ones((1, 1, 1, 1), dtype=dtype)
+    amps_v2site = []
+    for c in range(n_cols):
+        transfer_open = _contract_column_transfer_2row_open(
+            top_mps[c], tensors_row0[c], tensors_row1[c], bottom_mps[c]
+        )
+        amps_v2site.append(
+            jnp.einsum(
+                "aceg,abcdefghpq,bdfh->pq",
+                left_env,
+                transfer_open,
+                right_envs[c],
+            )
+        )
+        left_env = _contract_left_partial_2row(left_env, transfers[c])
+    return amps_v2site
+
+
+def _compute_row_pair_vertical_energy(
+    top_mps: tuple,
+    bottom_mps: tuple,
+    mpo_row0: tuple,
+    mpo_row1: tuple,
+    tensors_row0: list[jax.Array],
+    tensors_row1: list[jax.Array],
+    spins_row0: jax.Array,
+    spins_row1: jax.Array,
+    terms_row: list[list],
+    amp: jax.Array,
+    phys_dim: int,
+) -> jax.Array:
+    """Compute vertical 2-site energy contributions for a row pair."""
+    if not any(terms_row):
+        return jnp.zeros((), dtype=amp.dtype)
+    n_cols = len(mpo_row0)
+    dtype = mpo_row0[0].dtype
+    transfers = [
+        _contract_column_transfer_2row(
+            top_mps[c], mpo_row0[c], mpo_row1[c], bottom_mps[c]
+        )
+        for c in range(n_cols)
+    ]
+    right_envs = _compute_right_envs_2row(transfers, dtype)
+    left_env = jnp.ones((1, 1, 1, 1), dtype=dtype)
+    energy = jnp.zeros((), dtype=amp.dtype)
+    for c in range(n_cols):
+        col_terms = terms_row[c]
+        if col_terms:
+            transfer_open = _contract_column_transfer_2row_open(
+                top_mps[c], tensors_row0[c], tensors_row1[c], bottom_mps[c]
+            )
+            amps_edge = jnp.einsum(
+                "aceg,abcdefghpq,bdfh->pq",
+                left_env,
+                transfer_open,
+                right_envs[c],
+            )
+            spin0 = spins_row0[c]
+            spin1 = spins_row1[c]
+            col_idx = spin0 * phys_dim + spin1
+            amps_flat = amps_edge.reshape(-1)
+            for term in col_terms:
+                energy = energy + jnp.dot(term.op[:, col_idx], amps_flat) / amp
+        left_env = _contract_left_partial_2row(left_env, transfers[c])
+    return energy
+
+
+def _compute_right_envs(
+    transfers: list[jax.Array],
+    dtype,
+) -> list[jax.Array]:
+    """Compute right environments from column transfers (backward pass)."""
+    n_cols = len(transfers)
+    right_envs = [None] * n_cols
+    right_envs[n_cols - 1] = jnp.ones((1, 1, 1), dtype=dtype)
+    for c in range(n_cols - 2, -1, -1):
+        right_envs[c] = _contract_right_partial(transfers[c + 1], right_envs[c + 1])
+    return right_envs
 
 
 def _compute_all_row_gradients(
@@ -353,41 +409,165 @@ def _compute_all_row_gradients(
     bottom_mps: tuple,
     mpo: tuple,
 ) -> list[jax.Array]:
-    """Compute gradients for all tensors in a row using environment contraction.
-
-    Args:
-        top_mps: Top boundary MPS after contracting rows above.
-        bottom_mps: Bottom boundary MPS after contracting rows below.
-        mpo: Row MPO (with physical indices selected).
-
-    Returns:
-        List of gradient tensors, one per column.
-    """
+    """Compute gradients for all tensors in a row using environment contraction."""
     n_cols = len(mpo)
     dtype = mpo[0].dtype
-
     transfers = [
         _contract_column_transfer(top_mps[c], mpo[c], bottom_mps[c])
         for c in range(n_cols)
     ]
+    right_envs = _compute_right_envs(transfers, dtype)
 
-    # Compute left environments (partial contractions from left)
-    left_envs = [jnp.ones((1, 1, 1), dtype=dtype)]
-    for c in range(n_cols - 1):
-        left_envs.append(_contract_left_partial(left_envs[-1], transfers[c]))
-
-    # Compute right environments (partial contractions from right)
-    right_envs = [None] * n_cols
-    right_envs[n_cols - 1] = jnp.ones((1, 1, 1), dtype=dtype)
-    for c in range(n_cols - 2, -1, -1):
-        right_envs[c] = _contract_right_partial(transfers[c + 1], right_envs[c + 1])
-
-    return [
-        _compute_single_gradient(
-            left_envs[c], right_envs[c], top_mps[c], bottom_mps[c], mpo[c].shape
+    env_grads = []
+    left_env = jnp.ones((1, 1, 1), dtype=dtype)
+    for c in range(n_cols):
+        env_grads.append(
+            _compute_single_gradient(left_env, right_envs[c], top_mps[c], bottom_mps[c])
         )
-        for c in range(n_cols)
-    ]
+        left_env = _contract_left_partial(left_env, transfers[c])
+    return env_grads
+
+
+def _compute_all_env_grads_and_energy(
+    tensors: Any,
+    spins: jax.Array,
+    amp: jax.Array,
+    shape: tuple[int, int],
+    strategy: ContractionStrategy,
+    top_envs: list[tuple],
+    *,
+    row_mpos: list[tuple] | None = None,
+    diagonal_terms: list,
+    one_site_terms: list[list[list]],
+    horizontal_terms: list[list[list]],
+    vertical_terms: list[list[list]],
+    collect_grads: bool = True,
+) -> tuple[list[list[jax.Array]], jax.Array, list[tuple]]:
+    """Compute gradients and local energy for a PEPS sample."""
+    n_rows, n_cols = shape
+    dtype = jnp.asarray(tensors[0][0]).dtype
+    phys_dim = int(jnp.asarray(tensors[0][0]).shape[0])
+
+    env_grads = (
+        [[None for _ in range(n_cols)] for _ in range(n_rows)]
+        if collect_grads
+        else []
+    )
+    bottom_envs = [None for _ in range(n_rows)]
+    row_mpos_local = row_mpos or [None for _ in range(n_rows)]
+    energy = jnp.zeros((), dtype=amp.dtype)
+    for term in diagonal_terms:
+        idx = jnp.asarray(0, dtype=jnp.int32)
+        for row, col in term.sites:
+            idx = idx * phys_dim + spins[row, col]
+        energy = energy + term.diag[idx]
+
+    bottom_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
+    for row in range(n_rows - 1, -1, -1):
+        bottom_envs[row] = bottom_env
+        if row_mpos is None:
+            mpo = _build_row_mpo(tensors, spins[row], row, n_cols)
+            row_mpos_local[row] = mpo
+        else:
+            mpo = row_mpos[row]
+
+        transfers = [
+            _contract_column_transfer(top_envs[row][c], mpo[c], bottom_env[c])
+            for c in range(n_cols)
+        ]
+        right_envs = _compute_right_envs(transfers, dtype)
+        left_env = jnp.ones((1, 1, 1), dtype=dtype)
+        for c in range(n_cols):
+            env_grad = _compute_single_gradient(
+                left_env, right_envs[c], top_envs[row][c], bottom_env[c]
+            )
+            if collect_grads:
+                env_grads[row][c] = env_grad
+            site_terms = one_site_terms[row][c]
+            if site_terms:
+                amps_site = jnp.einsum("pudlr,udlr->p", tensors[row][c], env_grad)
+                spin_idx = spins[row, c]
+                for term in site_terms:
+                    energy = energy + jnp.dot(term.op[:, spin_idx], amps_site) / amp
+            if c < n_cols - 1:
+                edge_terms = horizontal_terms[row][c]
+                if edge_terms:
+                    env_2site = _compute_2site_horizontal_env(
+                        left_env,
+                        right_envs[c + 1],
+                        top_envs[row][c],
+                        bottom_env[c],
+                        top_envs[row][c + 1],
+                        bottom_env[c + 1],
+                    )
+                    amps_edge = jnp.einsum(
+                        "pudlr,qverx,udlvex->pq",
+                        tensors[row][c],
+                        tensors[row][c + 1],
+                        env_2site,
+                    )
+                    spin0 = spins[row, c]
+                    spin1 = spins[row, c + 1]
+                    col_idx = spin0 * phys_dim + spin1
+                    amps_flat = amps_edge.reshape(-1)
+                    for term in edge_terms:
+                        energy = energy + jnp.dot(term.op[:, col_idx], amps_flat) / amp
+            left_env = _contract_left_partial(left_env, transfers[c])
+        bottom_env = _apply_mpo_from_below(bottom_env, mpo, strategy)
+
+    for row in range(n_rows - 1):
+        energy = energy + _compute_row_pair_vertical_energy(
+            top_envs[row],
+            bottom_envs[row + 1],
+            row_mpos_local[row],
+            row_mpos_local[row + 1],
+            tensors[row],
+            tensors[row + 1],
+            spins[row],
+            spins[row + 1],
+            vertical_terms[row],
+            amp,
+            phys_dim,
+        )
+
+    return env_grads, energy, bottom_envs
+
+
+def _compute_2site_horizontal_env(
+    left_env: jax.Array,
+    right_env: jax.Array,
+    top0: jax.Array,
+    bot0: jax.Array,
+    top1: jax.Array,
+    bot1: jax.Array,
+) -> jax.Array:
+    """Compute 2-site environment for horizontal edge (c, c+1).
+
+    Index conventions:
+        left_env: (tL, mL, bL) - top/mpo/bottom left bonds
+        right_env: (tR, mR, bR) - top/mpo/bottom right bonds
+        top0/top1: (left, up, right) - boundary MPS
+        bot0/bot1: (left, down, right) - boundary MPS
+
+    Returns tensor with shape (up0, down0, mL, up1, down1, mR).
+    """
+    # Contract left side: left_env with top0 and bot0
+    # left_env (a,c,e) @ top0 (a,u,b) -> (c,e,u,b) = (mL, bL, up0, t01)
+    tmp_left = jnp.einsum("ace,aub->ceub", left_env, top0)
+    # (c,e,u,b) @ bot0 (e,d,f) -> (c,u,b,d,f) = (mL, up0, t01, down0, b01)
+    tmp_left = jnp.einsum("ceub,edf->cubdf", tmp_left, bot0)
+
+    # Contract right side: top1 and bot1 with right_env
+    # top1 (b,v,g) @ right_env (g,h,i) -> (b,v,h,i) = (t01, up1, mR, bR)
+    tmp_right = jnp.einsum("bvg,ghi->bvhi", top1, right_env)
+    # (b,v,h,i) @ bot1 (f,w,i) -> (b,v,h,f,w) = (t01, up1, mR, b01, down1)
+    tmp_right = jnp.einsum("bvhi,fwi->bvhfw", tmp_right, bot1)
+
+    # Contract left and right: connect t01 and b01
+    # (c,u,b,d,f) @ (b,v,h,f,w) -> (c,u,d,v,h,w) = (mL, up0, down0, up1, mR, down1)
+    env = jnp.einsum("cubdf,bvhfw->cudvhw", tmp_left, tmp_right)
+    # Transpose to (up0, down0, mL, up1, down1, mR)
+    return jnp.transpose(env, (1, 2, 0, 3, 5, 4))
 
 
 def _compute_single_gradient(
@@ -395,27 +575,15 @@ def _compute_single_gradient(
     right_env: jax.Array,
     top_tensor: jax.Array,
     bot_tensor: jax.Array,
-    mpo_shape: tuple,
 ) -> jax.Array:
     """Compute gradient for a single tensor given left/right environments.
 
-    Args:
-        left_env: (tL, mL, bL) - left environment
-        right_env: (tR, mR, bR) - right environment
-        top_tensor: (tL, up, tR) - top boundary MPS tensor
-        bot_tensor: (bL, down, bR) - bottom boundary MPS tensor
-        mpo_shape: (mL, mR, up, down) - shape of the MPO tensor
-
-    Returns:
-        Gradient tensor with shape (up, down, mL, mR).
+    Returns gradient tensor with shape (up, down, mL, mR).
     """
-    # TODO: optimize tensor network contraction order for better performance
-    # Contract left_env with top_tensor over tL
-    tmp1 = jnp.einsum("ace,aub->ceub", left_env, top_tensor)
-    # Contract with bot_tensor over bL
-    tmp2 = jnp.einsum("ceub,evf->cubvf", tmp1, bot_tensor)
-    # Contract with right_env over tR and bR, transpose to (up, down, left, right)
-    return jnp.transpose(jnp.einsum("cubvf,bdf->cuvd", tmp2, right_env), (1, 2, 0, 3))
+    tmp_top = jnp.einsum("ace,aub->ceub", left_env, top_tensor)
+    tmp_bot = jnp.einsum("evf,bdf->ebdv", bot_tensor, right_env)
+    grad = jnp.einsum("ceub,ebdv->cuvd", tmp_top, tmp_bot)
+    return jnp.transpose(grad, (1, 2, 0, 3))
 
 
 def _compute_all_gradients(
@@ -426,98 +594,67 @@ def _compute_all_gradients(
     top_envs: list[tuple],
     *,
     cache_bottom_envs: bool = False,
+    row_mpos: list[tuple] | None = None,
 ) -> list[list[jax.Array]] | tuple[list[list[jax.Array]], list[tuple]]:
-    """Compute gradients for all PEPS tensors using cached top environments.
-
-    Args:
-        tensors: Nested list of PEPS site tensors.
-        spins: Physical indices array with shape (n_rows, n_cols).
-        shape: Grid shape (n_rows, n_cols).
-        strategy: Contraction strategy instance.
-        top_envs: Cached top boundary MPSs from forward pass.
-
-    Returns:
-        Nested list of gradient tensors matching the structure of tensors.
-        If ``cache_bottom_envs`` is True, also returns the bottom environments
-        for each row (before updating with that row's MPO).
-    """
+    """Compute gradients for all PEPS tensors using cached top environments."""
     n_rows, n_cols = shape
     dtype = jnp.asarray(tensors[0][0]).dtype
 
-    # Initialize gradient storage
     grads = [[None for _ in range(n_cols)] for _ in range(n_rows)]
-    # Optional cache for callers that reuse bottom environments (e.g. samplers).
     bottom_envs_cached = [None] * n_rows if cache_bottom_envs else None
-
-    # Initialize bottom environment (trivial for below the last row)
     bottom_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
 
-    # Sweep from bottom to top
     for row in range(n_rows - 1, -1, -1):
-        top_env = top_envs[row]
         if cache_bottom_envs:
             bottom_envs_cached[row] = bottom_env
-        mpo = _build_row_mpo(tensors, spins[row], row, n_cols)
-
-        # Compute gradients for all tensors in this row
-        row_grads = _compute_all_row_gradients(top_env, bottom_env, mpo)
-        grads[row] = row_grads
-
-        # Update bottom_env by contracting this row from below
+        mpo = row_mpos[row] if row_mpos else _build_row_mpo(tensors, spins[row], row, n_cols)
+        grads[row] = _compute_all_row_gradients(top_envs[row], bottom_env, mpo)
         bottom_env = _apply_mpo_from_below(bottom_env, mpo, strategy)
 
     return (grads, bottom_envs_cached) if cache_bottom_envs else grads
 
 
-def make_peps_amplitude(
+@functools.partial(jax.custom_vjp, nondiff_argnums=(2, 3))
+def _peps_apply(
+    tensors: Any,
+    sample: jax.Array,
     shape: tuple[int, int],
     strategy: ContractionStrategy,
-):
-    """Create a PEPS amplitude function with custom VJP for the given configuration.
+) -> jax.Array:
+    """Compute PEPS amplitude with custom VJP for efficient gradients."""
+    spins = spin_to_occupancy(sample).reshape(shape)
+    boundary = tuple(
+        jnp.ones((1, 1, 1), dtype=jnp.asarray(tensors[0][0]).dtype)
+        for _ in range(shape[1])
+    )
+    for row in range(shape[0]):
+        mpo = _build_row_mpo(tensors, spins[row], row, shape[1])
+        boundary = strategy.apply(boundary, mpo)
+    return _contract_bottom(boundary)
 
-    The returned function has signature `(tensors, sample) -> amplitude` and
-    implements a custom VJP computing gradients via environment contraction.
 
-    Args:
-        shape: Grid shape (n_rows, n_cols).
-        strategy: Contraction strategy instance.
+def _peps_apply_fwd(tensors, sample, shape, strategy):
+    spins = spin_to_occupancy(sample).reshape(shape)
+    amp, top_envs = _forward_with_cache(tensors, spins, shape, strategy)
+    return amp, (tensors, spins, top_envs)
 
-    Returns:
-        A function `(tensors, sample) -> amplitude` with a custom VJP.
-    """
 
-    @jax.custom_vjp
-    def amplitude_fn(tensors: Any, sample: jax.Array) -> jax.Array:
-        """Compute PEPS amplitude with custom VJP."""
-        return PEPS._single_amplitude(tensors, sample, shape, strategy)
+def _peps_apply_bwd(shape, strategy, residuals, g):
+    tensors, spins, top_envs = residuals
+    n_rows, n_cols = shape
+    env_grads = _compute_all_gradients(tensors, spins, shape, strategy, top_envs)
+    grad_leaves = []
+    for r in range(n_rows):
+        for c in range(n_cols):
+            grad_full = jnp.zeros_like(jnp.asarray(tensors[r][c]))
+            grad_leaves.append(grad_full.at[spins[r, c]].set(g * env_grads[r][c]))
+    return (
+        jax.tree_util.tree_unflatten(jax.tree_util.tree_structure(tensors), grad_leaves),
+        None,
+    )
 
-    def amplitude_fwd(tensors: Any, sample: jax.Array) -> tuple[jax.Array, tuple]:
-        """Forward pass returning residuals."""
-        spins = spin_to_occupancy(sample).reshape(shape)
-        amp, top_envs = _forward_with_cache(tensors, spins, shape, strategy)
-        return amp, (tensors, spins, top_envs)
 
-    def amplitude_bwd(residuals: tuple, g: jax.Array) -> tuple:
-        """Backward pass computing gradients via environment contraction."""
-        tensors, spins, top_envs = residuals
-        n_rows, n_cols = shape
-        env_grads = _compute_all_gradients(tensors, spins, shape, strategy, top_envs)
-
-        grad_leaves = []
-        for r in range(n_rows):
-            for c in range(n_cols):
-                grad_full = jnp.zeros_like(jnp.asarray(tensors[r][c]))
-                grad_leaves.append(grad_full.at[spins[r, c]].set(g * env_grads[r][c]))
-
-        return (
-            jax.tree_util.tree_unflatten(
-                jax.tree_util.tree_structure(tensors), grad_leaves
-            ),
-            None,
-        )
-
-    amplitude_fn.defvjp(amplitude_fwd, amplitude_bwd)
-    return amplitude_fn
+_peps_apply.defvjp(_peps_apply_fwd, _peps_apply_bwd)
 
 
 class PEPS(nnx.Module):
@@ -592,34 +729,7 @@ class PEPS(nnx.Module):
             for r in range(n_rows)
         ]
 
-    @staticmethod
-    @functools.partial(jax.jit, static_argnames=("shape", "strategy"))
-    def _single_amplitude(
-        tensors,
-        sample: jax.Array,
-        shape: tuple[int, int],
-        strategy: ContractionStrategy,
-    ) -> jax.Array:
-        """Compute a single PEPS amplitude for a spin configuration.
-
-        Args:
-            tensors: Nested list of PEPS site tensors.
-            sample: Spin configuration with shape (n_sites,).
-            shape: Grid shape (rows, cols).
-            strategy: Contraction strategy instance.
-
-        Returns:
-            Complex amplitude scalar.
-        """
-        spins = spin_to_occupancy(sample).reshape(shape)
-        boundary = tuple(
-            jnp.ones((1, 1, 1), dtype=jnp.asarray(tensors[0][0]).dtype)
-            for _ in range(shape[1])
-        )
-        for row in range(shape[0]):
-            mpo = _build_row_mpo(tensors, spins[row], row, shape[1])
-            boundary = strategy.apply(boundary, mpo)
-        return _contract_bottom(boundary)
+    apply = staticmethod(_peps_apply)
 
     @nnx.jit
     def __call__(self, x: jax.Array) -> jax.Array:
@@ -632,7 +742,7 @@ class PEPS(nnx.Module):
             Log-amplitudes with shape (batch,).
         """
         amps = jax.vmap(
-            lambda s: self._single_amplitude(
+            lambda s: self.apply(
                 self.tensors, s, self.shape, self.strategy
             )
         )(x)

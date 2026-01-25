@@ -7,6 +7,7 @@ Variational Monte Carlo dynamics for tensor-network states (MPS/PEPS), implement
 ## Features (for tensor-network states)
 
 - Sequential sampling [^1]
+- Efficient energy evaluation
 - Gauge removal for better stability [^2]
 - Sliced/sparse gradients for balance between efficiency and memory use
 

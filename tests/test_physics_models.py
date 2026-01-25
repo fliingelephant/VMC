@@ -33,6 +33,7 @@ def _kron_all(mats: list[np.ndarray]) -> np.ndarray:
 def _exact_sampler_with_gradients(
     states: jax.Array,
     model,
+    operator,
     *,
     n_samples: int,
     key: jax.Array,
@@ -46,7 +47,8 @@ def _exact_sampler_with_gradients(
         model, samples, full_gradient=True
     )
     o = grads / amps[:, None]
-    return samples, o, None, key, None
+    local_energies = local_estimate(model, samples, operator, amps)
+    return samples, o, None, key, None, amps, local_energies
 
 
 class ExactSRPreconditioner:
@@ -58,16 +60,15 @@ class ExactSRPreconditioner:
     def apply(
         self,
         model,
+        params,
         samples: jax.Array,
         o: jax.Array,
         p: jax.Array | None,
         local_energies: jax.Array,
         *,
-        step: int | None = None,
         grad_factor: complex = 1.0,
-        stage: int = 0,
     ):
-        del (p, step, stage)
+        del p
         amps = _value(model, samples)
         weights = jnp.abs(amps) ** 2
         weights = weights / jnp.sum(weights)
@@ -85,11 +86,11 @@ class ExactSRPreconditioner:
         )
         update_flat = jnp.linalg.solve(mat, grad_factor * forces)
 
-        params = jax.tree_util.tree_map(jnp.asarray, model.tensors)
-        _, unravel = jax.flatten_util.ravel_pytree(params)
+        params_arrays = jax.tree_util.tree_map(jnp.asarray, params)
+        _, unravel = jax.flatten_util.ravel_pytree(params_arrays)
         updates = unravel(update_flat)
         return jax.tree_util.tree_map(
-            lambda u, t: u.astype(t.dtype), updates, params
+            lambda u, t: u.astype(t.dtype), updates, params_arrays
         )
 
 
@@ -103,7 +104,7 @@ def _exact_energy_from_samples(
     mask = probs > 1e-12
     probs = probs[mask]
     probs = probs / jnp.sum(probs)
-    local = local_estimate(model, states[mask], operator)
+    local = local_estimate(model, states[mask], operator, amps[mask])
     return jnp.sum(probs * local)
 
 

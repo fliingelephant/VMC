@@ -8,6 +8,7 @@ from vmc import config  # noqa: F401 - JAX config must be imported first
 
 import jax
 import jax.numpy as jnp
+from jax.flatten_util import ravel_pytree
 from plum import dispatch
 
 from vmc.models.mps import MPS
@@ -15,7 +16,6 @@ from vmc.models.peps import (
     PEPS,
     _compute_all_gradients,
     _forward_with_cache,
-    make_peps_amplitude,
 )
 from vmc.utils.utils import spin_to_occupancy
 
@@ -38,8 +38,8 @@ def _value(
     sample = jnp.asarray(sample)
     tensors = [jnp.asarray(t) for t in model.tensors]
     if sample.ndim == 2:
-        return MPS._batch_amplitudes(tensors, sample)
-    return MPS._batch_amplitudes(tensors, sample[None, :])[0]
+        return MPS.apply(tensors, sample)
+    return MPS.apply(tensors, sample[None, :])[0]
 
 
 @dispatch
@@ -55,9 +55,9 @@ def _value(
     tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
     if sample.ndim == 2:
         return jax.vmap(
-            lambda s: PEPS._single_amplitude(tensors, s, model.shape, model.strategy)
+            lambda s: PEPS.apply(tensors, s, model.shape, model.strategy)
         )(sample)
-    return PEPS._single_amplitude(tensors, sample, model.shape, model.strategy)
+    return PEPS.apply(tensors, sample, model.shape, model.strategy)
 
 
 def _grad(
@@ -169,34 +169,11 @@ def _value_and_grad(
     n_rows, n_cols = shape
 
     if full_gradient:
-        amp_fn = make_peps_amplitude(shape, model.strategy)
-
-        def tensors_to_flat(nested) -> jax.Array:
-            return jnp.concatenate([t.ravel() for row in nested for t in row])
-
-        def flat_to_tensors(flat: jax.Array, template) -> list[list[jax.Array]]:
-            result = []
-            offset = 0
-            for row in template:
-                row_result = []
-                for tensor in row:
-                    t = jnp.asarray(tensor)
-                    size = t.size
-                    row_result.append(flat[offset : offset + size].reshape(t.shape))
-                    offset += size
-                result.append(row_result)
-            return result
-
-        flat_params = tensors_to_flat(tensors)
-
-        def amplitude_full(flat_params: jax.Array) -> jax.Array:
-            tensors_nested = flat_to_tensors(flat_params, tensors)
-            return amp_fn(tensors_nested, sample)
-
-        amp, grad_row = jax.value_and_grad(amplitude_full, holomorphic=True)(
-            flat_params
+        amp, grad = jax.value_and_grad(PEPS.apply, holomorphic=True)(
+            tensors, sample, shape, model.strategy
         )
-        return amp, grad_row, None
+        grad_flat, _ = ravel_pytree(grad)
+        return amp, grad_flat, None
 
     spins = spin_to_occupancy(sample).reshape(shape)
     amp, top_envs = _forward_with_cache(tensors, spins, shape, model.strategy)

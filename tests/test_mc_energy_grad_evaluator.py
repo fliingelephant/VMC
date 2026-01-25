@@ -30,7 +30,7 @@ def _exact_energy_and_grad(
     mask = weights > 1e-12
     weights = weights[mask]
     weights = weights / jnp.sum(weights)
-    local = local_estimate(model, states[mask], operator)
+    local = local_estimate(model, states[mask], operator, amps[mask])
     energy = jnp.sum(weights * local)
     o = grads[mask] / amps[mask, None]
     grad = jnp.sum(
@@ -56,7 +56,7 @@ def _mc_energy_and_grad(
         key=key,
     )
     amps, grads, _ = _value_and_grad(model, samples, full_gradient=True)
-    local = local_estimate(model, samples, operator)
+    local = local_estimate(model, samples, operator, amps)
     energy = jnp.mean(local)
     o = grads / amps[:, None]
     contrib = (local - energy)[:, None] * o.conj()

@@ -14,8 +14,16 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 from flax import nnx
+from plum import dispatch
 
 from vmc.core.eval import _value
+from vmc.models.peps import (
+    PEPS,
+    _build_row_mpo,
+    _compute_all_env_grads_and_energy,
+)
+from vmc.operators.local_terms import LocalHamiltonian, bucket_terms
+from vmc.utils.utils import spin_to_occupancy
 
 __all__ = [
     "flatten_samples",
@@ -94,13 +102,92 @@ def build_dense_jac(
     return jnp.concatenate(leaves, axis=1)
 
 
-def local_estimate(model, samples: jax.Array, operator) -> jax.Array:
+@dispatch
+def local_estimate(
+    model: PEPS,
+    samples: jax.Array,
+    operator: LocalHamiltonian,
+    amps: jax.Array,
+) -> jax.Array:
+    """Compute local energy estimates for PEPS from local operator terms."""
+    samples = jnp.asarray(samples)
+    amps = jnp.asarray(amps)
+    shape = model.shape
+    n_rows, n_cols = shape
+    diagonal_terms, one_site_terms, horizontal_terms, vertical_terms = bucket_terms(
+        operator.terms, shape
+    )
+    has_diag = bool(diagonal_terms)
+    has_one_site = any(term_list for row in one_site_terms for term_list in row)
+    has_horizontal = any(term_list for row in horizontal_terms for term_list in row)
+    has_vertical = any(term_list for row in vertical_terms for term_list in row)
+    has_offdiag = has_one_site or has_horizontal or has_vertical
+
+    if not has_diag and not has_offdiag:
+        return jnp.zeros((samples.shape[0],), dtype=amps.dtype)
+
+    if has_diag and not has_offdiag:
+        phys_dim = model.phys_dim
+
+        def diag_only(sample):
+            spins = spin_to_occupancy(sample).reshape(shape)
+            total = jnp.zeros((), dtype=amps.dtype)
+            for term in diagonal_terms:
+                idx = jnp.asarray(0, dtype=jnp.int32)
+                for row, col in term.sites:
+                    idx = idx * phys_dim + spins[row, col]
+                total = total + term.diag[idx]
+            return total
+
+        return jax.vmap(diag_only)(samples)
+
+    tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
+    dtype = tensors[0][0].dtype
+
+    def per_sample(sample, amp):
+        spins = spin_to_occupancy(sample).reshape(shape)
+        row_mpos = [
+            _build_row_mpo(tensors, spins[row], row, n_cols)
+            for row in range(n_rows)
+        ]
+        boundary = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
+        top_envs = []
+        for row in range(n_rows):
+            top_envs.append(boundary)
+            boundary = model.strategy.apply(boundary, row_mpos[row])
+        _, energy, _ = _compute_all_env_grads_and_energy(
+            tensors,
+            spins,
+            amp,
+            shape,
+            model.strategy,
+            top_envs,
+            row_mpos=row_mpos,
+            diagonal_terms=diagonal_terms,
+            one_site_terms=one_site_terms,
+            horizontal_terms=horizontal_terms,
+            vertical_terms=vertical_terms,
+            collect_grads=False,
+        )
+        return energy
+
+    return jax.vmap(per_sample, in_axes=(0, 0))(samples, amps)
+
+
+@dispatch
+def local_estimate(
+    model: object,
+    samples: jax.Array,
+    operator: object,
+    amps: jax.Array,
+) -> jax.Array:
     """Compute local energy estimates for samples.
 
     Args:
         model: Variational model (MPS/PEPS).
         samples: Spin configurations with shape (n_samples, n_sites).
         operator: Operator providing ``get_conn_padded``.
+        amps: Pre-computed amplitudes for samples.
 
     Returns:
         Local energy estimates with shape (n_samples,).
@@ -114,9 +201,8 @@ def local_estimate(model, samples: jax.Array, operator) -> jax.Array:
         sigma_p = sigma_p.reshape(samples.shape[0], -1, samples.shape[-1])
         mels = mels.reshape(sigma_p.shape[:2])
 
-    amps_sigma = jax.vmap(_value, in_axes=(None, 0))(model, samples)
     flat_sigma_p = sigma_p.reshape(-1, sigma_p.shape[-1])
     amps_sigma_p = jax.vmap(_value, in_axes=(None, 0))(model, flat_sigma_p).reshape(
         sigma_p.shape[:-1]
     )
-    return jnp.sum(mels * (amps_sigma_p / amps_sigma[:, None]), axis=-1)
+    return jnp.sum(mels * (amps_sigma_p / amps[:, None]), axis=-1)

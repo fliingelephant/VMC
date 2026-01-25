@@ -10,6 +10,7 @@ from vmc import config  # noqa: F401 - JAX config must be imported first
 
 import jax
 import jax.numpy as jnp
+import netket as nk
 from flax import nnx
 from plum import dispatch
 
@@ -17,6 +18,7 @@ from vmc.core import _value_and_grad
 from vmc.samplers.sequential import sequential_sample, sequential_sample_with_gradients
 from vmc.models.mps import MPS
 from vmc.models.peps import NoTruncation, PEPS
+from vmc.operators import LocalHamiltonian
 from vmc.utils.utils import occupancy_to_spin, spin_to_occupancy
 
 logger = logging.getLogger(__name__)
@@ -154,6 +156,17 @@ class SequentialSamplingTest(unittest.TestCase):
             [self._make_mps, self._make_peps], self.CHAINS, self.SEEDS
         ):
             model = make_model(seed)
+            if isinstance(model, MPS):
+                hi = nk.hilbert.Spin(s=1 / 2, N=self.N_SITES)
+                operator = nk.operator.Ising(
+                    hi,
+                    nk.graph.Chain(length=self.N_SITES),
+                    h=0.0,
+                    J=0.0,
+                    dtype=jnp.complex128,
+                )
+            else:
+                operator = LocalHamiltonian(shape=self.SHAPE, terms=())
             amps_basis, _, p_ref = _value_and_grad(
                 model, jnp.asarray(spins_basis), full_gradient=False
             )
@@ -161,8 +174,9 @@ class SequentialSamplingTest(unittest.TestCase):
             probs /= probs.sum()
             key = jax.random.key(seed)
             start = time.perf_counter()
-            samples_sliced, grads_sliced, p_sliced, _, _, _ = sequential_sample_with_gradients(
+            samples_sliced, grads_sliced, p_sliced, _, _, _, _ = sequential_sample_with_gradients(
                 model,
+                operator,
                 n_samples=self.SAMPLES,
                 n_chains=n_chains,
                 burn_in=self.BURN_IN,
@@ -179,8 +193,9 @@ class SequentialSamplingTest(unittest.TestCase):
                 elapsed,
             )
             start = time.perf_counter()
-            samples_full, grads_full, p_full, _, _, _ = sequential_sample_with_gradients(
+            samples_full, grads_full, p_full, _, _, _, _ = sequential_sample_with_gradients(
                 model,
+                operator,
                 n_samples=self.SAMPLES,
                 n_chains=n_chains,
                 burn_in=self.BURN_IN,

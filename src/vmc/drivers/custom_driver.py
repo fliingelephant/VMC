@@ -20,7 +20,6 @@ from flax import nnx
 from tqdm.auto import tqdm
 
 from vmc.preconditioners import SRPreconditioner
-from vmc.utils.vmc_utils import local_estimate
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -193,6 +192,7 @@ class DynamicsDriver:
         log_timing = logger.isEnabledFor(logging.INFO)
         if log_timing:
             t0 = time.perf_counter()
+        op_t = self._operator_at(t)
         (
             samples,
             o,
@@ -200,8 +200,10 @@ class DynamicsDriver:
             self._sampler_key,
             self._sampler_configuration,
             amp,
+            local_energies,
         ) = self.sampler(
             self.model,
+            op_t,
             key=self._sampler_key,
             initial_configuration=self._sampler_configuration,
         )
@@ -211,14 +213,20 @@ class DynamicsDriver:
             if p is not None:
                 jax.block_until_ready(p)
             jax.block_until_ready(amp)
-            t1 = time.perf_counter()
-        op_t = self._operator_at(t)
-        local_energies = local_estimate(self.model, samples, op_t)
-        if log_timing:
             jax.block_until_ready(local_energies)
-            t2 = time.perf_counter()
+            t1 = time.perf_counter()
+            logger.info("Step %d stage %d | sampling %.3fs", self.step_count, stage, t1 - t0)
         if stage == 0:
             self._loss_stats = nkstats.statistics(local_energies)
+            if log_timing:
+                e = self._loss_stats
+                logger.info(
+                    "Step %d | E = %.6f ± %.4f [σ²=%.4f]",
+                    self.step_count,
+                    e.mean.real,
+                    e.error_of_mean.real,
+                    e.variance.real,
+                )
 
         updates = self.preconditioner.apply(
             self.model,
@@ -231,14 +239,12 @@ class DynamicsDriver:
         )
         if log_timing:
             jax.block_until_ready(updates)
-            t3 = time.perf_counter()
+            t2 = time.perf_counter()
             logger.info(
-                "Step %d stage %d | sampling %.3fs | local_energy %.3fs | sr_solve %.3fs",
+                "Step %d stage %d | sr_solve %.3fs",
                 self.step_count,
                 stage,
-                t1 - t0,
                 t2 - t1,
-                t3 - t2,
             )
         if stage == 0:
             self._sync_preconditioner_metrics()

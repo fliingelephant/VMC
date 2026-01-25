@@ -17,14 +17,16 @@ from vmc.models.peps import (
     PEPS,
     _apply_mpo_from_below,
     _build_row_mpo,
-    _compute_all_gradients,
+    _compute_all_env_grads_and_energy,
     _contract_bottom,
     _contract_column_transfer,
     _contract_left_partial,
     _contract_right_partial,
 )
+from vmc.operators import LocalHamiltonian, bucket_terms
 from vmc.utils.smallo import params_per_site as params_per_site_fn
 from vmc.utils.utils import occupancy_to_spin, spin_to_occupancy
+from vmc.utils.vmc_utils import local_estimate
 
 __all__ = [
     "sequential_sample",
@@ -338,6 +340,7 @@ def sequential_sample(
 @dispatch
 def sequential_sample_with_gradients(
     model: MPS,
+    operator: object,
     *,
     n_samples: int = 1,
     n_chains: int = 1,
@@ -346,18 +349,27 @@ def sequential_sample_with_gradients(
     burn_in: int = 0,
     full_gradient: bool = False,
 ) -> (
-    tuple[jax.Array, jax.Array, jax.Array | None, jax.Array, jax.Array, jax.Array]
+    tuple[
+        jax.Array,
+        jax.Array,
+        jax.Array | None,
+        jax.Array,
+        jax.Array,
+        jax.Array,
+        jax.Array,
+    ]
 ):
     """Sequential sampling for MPS with per-sample gradient recording.
 
     Total samples are ``n_samples`` across chains (burn-in sweeps are not recorded).
 
     Args:
+        operator: Operator used to compute local energies after sampling.
         initial_configuration: Optional initial chain configs, shape (n_chains, n_sites),
             in spin format (-1/+1). If None, random initialization is used.
 
     Returns:
-        samples, grads, p, key, final_configurations, amps
+        samples, grads, p, key, final_configurations, amps, local_energies
     """
     num_samples, num_chains, num_burn_in, chain_length, total_samples = _sample_counts(
         n_samples, n_chains, burn_in
@@ -473,12 +485,14 @@ def sequential_sample_with_gradients(
         p = _trim_samples(p, total_samples, num_samples)
     final_configurations = occupancy_to_spin(final_configurations)
 
-    return samples, grads, p, key, final_configurations, amps
+    local_energies = local_estimate(model, samples, operator, amps)
+    return samples, grads, p, key, final_configurations, amps, local_energies
 
 
 @dispatch
 def sequential_sample_with_gradients(
     model: PEPS,
+    operator: LocalHamiltonian,
     *,
     n_samples: int = 1,
     n_chains: int = 1,
@@ -487,18 +501,27 @@ def sequential_sample_with_gradients(
     burn_in: int = 0,
     full_gradient: bool = False,
 ) -> (
-    tuple[jax.Array, jax.Array, jax.Array | None, jax.Array, jax.Array, jax.Array]
+    tuple[
+        jax.Array,
+        jax.Array,
+        jax.Array | None,
+        jax.Array,
+        jax.Array,
+        jax.Array,
+        jax.Array,
+    ]
 ):
     """Sequential sampling for PEPS with per-sample gradient recording.
 
     Total samples are ``n_samples`` across chains (burn-in sweeps are not recorded).
 
     Args:
+        operator: Local Hamiltonian used for on-the-fly local energy evaluation.
         initial_configuration: Optional initial chain configs, shape (n_chains, n_rows, n_cols),
             in spin format (-1/+1). If None, random initialization is used.
 
     Returns:
-        samples, grads, p, key, final_configurations, amps
+        samples, grads, p, key, final_configurations, amps, local_energies
     """
     num_samples, num_chains, num_burn_in, chain_length, total_samples = _sample_counts(
         n_samples, n_chains, burn_in
@@ -565,62 +588,48 @@ def sequential_sample_with_gradients(
         p = jnp.repeat(spins.reshape(-1).astype(jnp.int8), params_per_site)
         return jnp.concatenate(grad_parts), p
 
+    diagonal_terms, one_site_terms, horizontal_terms, vertical_terms = bucket_terms(
+        operator.terms, shape
+    )
+
     def sample_step(carry, _):
-        spins, chain_keys, bottom_envs, steps_left = carry
+        spins, chain_keys, bottom_envs = carry
         spins, chain_keys, aux, amp = sweep_with_envs(
             spins, chain_keys, bottom_envs, True
         )
         top_envs, row_mpos = aux
-        # Skip bottom-env caching on the last sweep.
-        cache_envs = steps_left > 1
-
-        def cached_branch(_):
-            return jax.vmap(
-                lambda s, t, m: _compute_all_gradients(
-                    tensors,
-                    s,
-                    shape,
-                    model.strategy,
-                    t,
-                    cache_bottom_envs=True,
-                    row_mpos=m,
-                )
-            )(spins, top_envs, row_mpos)
-
-        def final_branch(_):
-            env_grads = jax.vmap(
-                lambda s, t, m: _compute_all_gradients(
-                    tensors,
-                    s,
-                    shape,
-                    model.strategy,
-                    t,
-                    cache_bottom_envs=False,
-                    row_mpos=m,
-                )
-            )(spins, top_envs, row_mpos)
-            return env_grads, bottom_envs
-
-        env_grads, bottom_envs_next = jax.lax.cond(
-            cache_envs, cached_branch, final_branch, operand=None
-        )
+        env_grads, local_energy, bottom_envs_next = jax.vmap(
+            lambda s, a, t, m: _compute_all_env_grads_and_energy(
+                tensors,
+                s,
+                a,
+                shape,
+                model.strategy,
+                t,
+                row_mpos=m,
+                diagonal_terms=diagonal_terms,
+                one_site_terms=one_site_terms,
+                horizontal_terms=horizontal_terms,
+                vertical_terms=vertical_terms,
+            )
+        )(spins, amp, top_envs, row_mpos)
         if full_gradient:
             grad_row = jax.vmap(flatten_full_gradients)(env_grads, spins)
             p_row = jnp.zeros((amp.shape[0], 0), dtype=jnp.int8)
         else:
             grad_row, p_row = jax.vmap(flatten_sliced_gradients)(env_grads, spins)
         grad_row = grad_row / amp[:, None]
-        return (spins, chain_keys, bottom_envs_next, steps_left - 1), (
+        return (spins, chain_keys, bottom_envs_next), (
             spins.reshape(num_chains, n_sites),
             grad_row,
             p_row,
             amp,
+            local_energy,
         )
 
-    steps_left = jnp.asarray(chain_length)
-    (final_spins, _, _, _), (samples, grads, p, amps) = _collect_steps(
+    (final_spins, _, _), (samples, grads, p, amps, local_energies) = _collect_steps(
         sample_step,
-        (spins, chain_keys, bottom_envs, steps_left),
+        (spins, chain_keys, bottom_envs),
         chain_length,
         "Sequential sampling",
     )
@@ -630,13 +639,14 @@ def sequential_sample_with_gradients(
     samples = occupancy_to_spin(samples)
     grads = _trim_samples(grads, total_samples, num_samples)
     amps = _trim_samples(amps, total_samples, num_samples)
+    local_energies = _trim_samples(local_energies, total_samples, num_samples)
     if full_gradient:
         p = None
     else:
         p = _trim_samples(p, total_samples, num_samples)
     final_configurations = occupancy_to_spin(final_spins)
 
-    return samples, grads, p, key, final_configurations, amps
+    return samples, grads, p, key, final_configurations, amps, local_energies
 
 
 @functools.partial(jax.jit, static_argnames=("shape", "strategy"))

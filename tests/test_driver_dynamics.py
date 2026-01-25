@@ -22,7 +22,7 @@ from vmc.drivers import DynamicsDriver, ImaginaryTimeUnit, RealTimeUnit
 from vmc.models.mps import MPS
 from vmc.preconditioners import SRPreconditioner
 from vmc.samplers.sequential import sequential_sample, sequential_sample_with_gradients
-from vmc.core.eval import _value_and_grad
+from vmc.core.eval import _value, _value_and_grad
 from vmc.utils.utils import spin_to_occupancy
 from vmc.utils.vmc_utils import local_estimate
 
@@ -77,7 +77,8 @@ class DynamicsDriverTest(unittest.TestCase):
         samples, key = sequential_sample(
             model, n_samples=n_samples, n_chains=self.N_CHAINS, burn_in=self.BURN_IN, key=key, return_key=True,
         )
-        local_energies = local_estimate(model, samples, hamiltonian)
+        amps = _value(model, samples)
+        local_energies = local_estimate(model, samples, hamiltonian, amps)
         chain_length = n_samples // self.N_CHAINS
         return nkstats.statistics(local_energies.reshape(chain_length, self.N_CHAINS).T), key
 

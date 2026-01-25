@@ -103,7 +103,7 @@ def _exact_energy_from_samples(
     mask = probs > 1e-12
     probs = probs[mask]
     probs = probs / jnp.sum(probs)
-    local = local_estimate(model, states[mask], operator)
+    local = local_estimate(model, states[mask], operator, amps[mask])
     return jnp.sum(probs * local)
 
 

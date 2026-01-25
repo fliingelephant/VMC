@@ -1,13 +1,8 @@
-"""Ground state optimization for Transverse-Field Ising Model.
+"""Ground state optimization for 2D Ising (ZZ-only) model.
 
-This example matches the NetKet tutorial parameters:
-- 1D chain with 20 sites and periodic boundary conditions
-- Transverse field h = -1.0
+Uses a rectangular grid with open boundary conditions:
+- shape = (n_rows, n_cols)
 - Coupling J = -1.0
-
-Runs both MPS (natural for 1D) and PEPS for comparison.
-
-Reference: https://netket.readthedocs.io/en/stable/tutorials/gs-ising.html
 """
 
 from __future__ import annotations
@@ -23,28 +18,43 @@ import netket as nk
 from flax import nnx
 
 from vmc.drivers import DynamicsDriver, ImaginaryTimeUnit
-from vmc.models.mps import MPS
 from vmc.models.peps import PEPS, ZipUp
+from vmc.operators import DiagonalTerm, LocalHamiltonian
 from vmc.preconditioners import SRPreconditioner, DirectSolve
 from vmc.qgt import SampleSpace
-from vmc.qgt.solvers import solve_cg
+from vmc.qgt.solvers import solve_cholesky
 from vmc.samplers.sequential import sequential_sample_with_gradients
 
 logger = logging.getLogger(__name__)
 
 
-def build_ising_1d(
-    n_sites: int = 20,
-    h: float = -1.0,
+def build_ising_2d(
+    shape: tuple[int, int] = (4, 4),
     J: float = -1.0,
-) -> tuple[nk.hilbert.Spin, nk.operator.Ising]:
-    """Build 1D transverse-field Ising Hamiltonian."""
-    graph = nk.graph.Hypercube(length=n_sites, n_dim=1, pbc=True)
-    hi = nk.hilbert.Spin(s=0.5, N=n_sites)
-    return hi, nk.operator.Ising(hi, graph=graph, h=h, J=J, dtype=jnp.complex128)
+) -> LocalHamiltonian:
+    """Build 2D Ising Hamiltonian with diagonal ZZ terms."""
+    n_rows, n_cols = shape
+    diag_zz = J * jnp.array([1, -1, -1, 1], dtype=jnp.complex128)
+    terms = []
+    for row in range(n_rows):
+        for col in range(n_cols):
+            if col + 1 < n_cols:
+                terms.append(DiagonalTerm(((row, col), (row, col + 1)), diag_zz))
+            if row + 1 < n_rows:
+                terms.append(DiagonalTerm(((row, col), (row + 1, col)), diag_zz))
+    return LocalHamiltonian(shape=shape, terms=tuple(terms))
 
 
-def run_optimization(model, H, exact_e, n_samples=2048, n_steps=120, dt=0.05, diag_shift=0.01, seed=42, log_interval=10):
+def run_optimization(
+    model,
+    H,
+    exact_e: float | None = None,
+    n_samples=2048,
+    n_steps=120,
+    dt=0.05,
+    diag_shift=0.01,
+    seed=42,
+):
     """Run ground state optimization loop."""
     sampler = functools.partial(
         sequential_sample_with_gradients,
@@ -58,7 +68,7 @@ def run_optimization(model, H, exact_e, n_samples=2048, n_steps=120, dt=0.05, di
         sampler=sampler,
         preconditioner=SRPreconditioner(
             space=SampleSpace(),
-            strategy=DirectSolve(solver=solve_cg),
+            strategy=DirectSolve(solver=solve_cholesky),
             diag_shift=diag_shift
         ),
         dt=dt,
@@ -68,49 +78,37 @@ def run_optimization(model, H, exact_e, n_samples=2048, n_steps=120, dt=0.05, di
 
     for step in range(n_steps):
         driver.step()
-        if step % log_interval == 0 and driver.energy is not None:
-            e = driver.energy
-            logger.info(
-                "Step %4d | E = %.6f ± %.4f [σ²=%.4f] | Error = %.2e",
-                step,
-                e.mean.real,
-                e.error_of_mean.real,
-                e.variance.real,
-                abs(e.mean.real - exact_e),
-            )
 
     e = driver.energy
     logger.info("Final: E = %.6f ± %.4f [σ²=%.4f]", e.mean.real, e.error_of_mean.real, e.variance.real)
-    logger.info("Exact: E = %.6f", exact_e)
-    logger.info("Absolute error: %.2e", abs(e.mean.real - exact_e))
+    if exact_e is not None:
+        logger.info("Exact: E = %.6f", exact_e)
+        logger.info("Absolute error: %.2e", abs(e.mean.real - exact_e))
 
 
-def main(n_sites: int = 20, h: float = -1.0, J: float = -1.0):
-    """Run ground state optimization with both MPS and PEPS."""
-    _, H = build_ising_1d(n_sites, h, J)
-    exact_e = nk.exact.lanczos_ed(H, k=1)[0].real
+def main(shape: tuple[int, int] = (4, 4), J: float = -1.0):
+    """Run ground state optimization with PEPS."""
+    n_sites = shape[0] * shape[1]
+    graph = nk.graph.Grid(extent=shape, pbc=False)
+    hi = nk.hilbert.Spin(s=0.5, N=n_sites)
+    H_ed = nk.operator.Ising(hi, graph, h=0.0, J=J, dtype=jnp.complex128)
+    exact_e = nk.exact.lanczos_ed(H_ed, k=1)[0].real
+    H = build_ising_2d(shape, J)
+    logger.info("Hamiltonian: ZZ terms only, J=%.3f", J)
+    logger.info("System size: %d sites", n_sites)
     logger.info("Exact ground state energy: %.6f (%.6f per site)", exact_e, exact_e / n_sites)
 
-    """
-    # MPS (natural for 1D chains)
+    # PEPS
     logger.info("=" * 60)
-    logger.info("MPS with bond_dim=16")
-    logger.info("=" * 60)
-    mps = MPS(rngs=nnx.Rngs(42), n_sites=n_sites, bond_dim=16)
-    run_optimization(mps, H, exact_e)
-    """
-
-    # PEPS (for comparison)
-    logger.info("=" * 60)
-    logger.info("PEPS with shape=(4,5), bond_dim=4")
+    logger.info("PEPS with shape=%s, bond_dim=4", shape)
     logger.info("=" * 60)
     peps = PEPS(
         rngs=nnx.Rngs(42),
-        shape=(4, 5),
+        shape=shape,
         bond_dim=4,
         contraction_strategy=ZipUp(truncate_bond_dimension=16),
     )
-    run_optimization(peps, H, exact_e)
+    run_optimization(peps, H, exact_e=exact_e)
 
 
 if __name__ == "__main__":

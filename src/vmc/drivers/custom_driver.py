@@ -165,9 +165,6 @@ class DynamicsDriver:
         self.t = float(t0)
         self.step_count = 0
         self._loss_stats = None
-        self.last_samples = None
-        self.last_o = None
-        self.last_p = None
         self._sampler_configuration = None
         self._graphdef, params, model_state = nnx.split(self.model, nnx.Param, ...)
         self._params = params.to_pure_dict()
@@ -202,6 +199,7 @@ class DynamicsDriver:
             p,
             self._sampler_key,
             self._sampler_configuration,
+            amp,
         ) = self.sampler(
             self.model,
             key=self._sampler_key,
@@ -212,10 +210,8 @@ class DynamicsDriver:
             jax.block_until_ready(o)
             if p is not None:
                 jax.block_until_ready(p)
+            jax.block_until_ready(amp)
             t1 = time.perf_counter()
-        self.last_samples = samples
-        self.last_o = o
-        self.last_p = p
         op_t = self._operator_at(t)
         local_energies = local_estimate(self.model, samples, op_t)
         if log_timing:

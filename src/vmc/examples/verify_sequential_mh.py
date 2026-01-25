@@ -221,7 +221,6 @@ def _peps_sequential_sweep_with_accept(
                 right_envs[col],
                 top_env[col],
                 bottom_env[col],
-                mpo_row[col].shape,
             )
             site_tensor = tensors[row][col]
 

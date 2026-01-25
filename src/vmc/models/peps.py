@@ -272,7 +272,7 @@ def _compute_all_row_gradients(
 
     return [
         _compute_single_gradient(
-            left_envs[c], right_envs[c], top_mps[c], bottom_mps[c], mpo[c].shape
+            left_envs[c], right_envs[c], top_mps[c], bottom_mps[c]
         )
         for c in range(n_cols)
     ]
@@ -283,16 +283,15 @@ def _compute_single_gradient(
     right_env: jax.Array,
     top_tensor: jax.Array,
     bot_tensor: jax.Array,
-    mpo_shape: tuple,
 ) -> jax.Array:
     """Compute gradient for a single tensor given left/right environments.
 
     Returns gradient tensor with shape (up, down, mL, mR).
     """
-    # TODO: optimize tensor network contraction order for better performance
-    tmp1 = jnp.einsum("ace,aub->ceub", left_env, top_tensor)
-    tmp2 = jnp.einsum("ceub,evf->cubvf", tmp1, bot_tensor)
-    return jnp.transpose(jnp.einsum("cubvf,bdf->cuvd", tmp2, right_env), (1, 2, 0, 3))
+    tmp_top = jnp.einsum("ace,aub->ceub", left_env, top_tensor)
+    tmp_bot = jnp.einsum("evf,bdf->ebdv", bot_tensor, right_env)
+    grad = jnp.einsum("ceub,ebdv->cuvd", tmp_top, tmp_bot)
+    return jnp.transpose(grad, (1, 2, 0, 3))
 
 
 def _compute_all_gradients(
@@ -303,6 +302,7 @@ def _compute_all_gradients(
     top_envs: list[tuple],
     *,
     cache_bottom_envs: bool = False,
+    row_mpos: list[tuple] | None = None,
 ) -> list[list[jax.Array]] | tuple[list[list[jax.Array]], list[tuple]]:
     """Compute gradients for all PEPS tensors using cached top environments."""
     n_rows, n_cols = shape
@@ -315,7 +315,10 @@ def _compute_all_gradients(
     for row in range(n_rows - 1, -1, -1):
         if cache_bottom_envs:
             bottom_envs_cached[row] = bottom_env
-        mpo = _build_row_mpo(tensors, spins[row], row, n_cols)
+        if row_mpos is None:
+            mpo = _build_row_mpo(tensors, spins[row], row, n_cols)
+        else:
+            mpo = row_mpos[row]
         grads[row] = _compute_all_row_gradients(top_envs[row], bottom_env, mpo)
         bottom_env = _apply_mpo_from_below(bottom_env, mpo, strategy)
 

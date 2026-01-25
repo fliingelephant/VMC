@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import itertools
+import logging
+import time
 import unittest
 
 from vmc import config  # noqa: F401 - JAX config must be imported first
@@ -16,6 +18,8 @@ from vmc.samplers.sequential import sequential_sample, sequential_sample_with_gr
 from vmc.models.mps import MPS
 from vmc.models.peps import NoTruncation, PEPS
 from vmc.utils.utils import occupancy_to_spin, spin_to_occupancy
+
+logger = logging.getLogger(__name__)
 
 
 @dispatch
@@ -156,7 +160,8 @@ class SequentialSamplingTest(unittest.TestCase):
             probs = jnp.abs(amps_basis) ** 2
             probs /= probs.sum()
             key = jax.random.key(seed)
-            samples_sliced, grads_sliced, p_sliced, _, _ = sequential_sample_with_gradients(
+            start = time.perf_counter()
+            samples_sliced, grads_sliced, p_sliced, _, _, _ = sequential_sample_with_gradients(
                 model,
                 n_samples=self.SAMPLES,
                 n_chains=n_chains,
@@ -164,13 +169,32 @@ class SequentialSamplingTest(unittest.TestCase):
                 key=key,
                 full_gradient=False,
             )
-            samples_full, grads_full, p_full, _, _ = sequential_sample_with_gradients(
+            elapsed = time.perf_counter() - start
+            logger.info(
+                "sequential_sample_with_gradients full_gradient=%s model=%s n_chains=%d seed=%d took %.3fs",
+                False,
+                make_model.__name__,
+                n_chains,
+                seed,
+                elapsed,
+            )
+            start = time.perf_counter()
+            samples_full, grads_full, p_full, _, _, _ = sequential_sample_with_gradients(
                 model,
                 n_samples=self.SAMPLES,
                 n_chains=n_chains,
                 burn_in=self.BURN_IN,
                 key=key,
                 full_gradient=True,
+            )
+            elapsed = time.perf_counter() - start
+            logger.info(
+                "sequential_sample_with_gradients full_gradient=%s model=%s n_chains=%d seed=%d took %.3fs",
+                True,
+                make_model.__name__,
+                n_chains,
+                seed,
+                elapsed,
             )
             self.assertEqual(grads_sliced.shape, p_sliced.shape)
             self.assertEqual(grads_sliced.shape[0], samples_sliced.shape[0])

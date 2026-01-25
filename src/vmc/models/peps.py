@@ -34,7 +34,7 @@ __all__ = [
     "_compute_all_gradients",
     "_compute_all_row_gradients",
     "_compute_all_env_grads_and_energy",
-    "_compute_row_env_grads_and_amps",
+    "_compute_right_envs",
     "_compute_2site_horizontal_env",
     "_compute_single_gradient",
     "_contract_bottom",
@@ -294,6 +294,19 @@ def _contract_column_transfer_2row_open(
     return jnp.transpose(tmp, (0, 2, 4, 5, 6, 7, 8, 9, 1, 3))
 
 
+def _compute_right_envs_2row(
+    transfers: list[jax.Array],
+    dtype,
+) -> list[jax.Array]:
+    """Compute right environments for 2-row contractions (backward pass)."""
+    n_cols = len(transfers)
+    right_envs = [None] * n_cols
+    right_envs[n_cols - 1] = jnp.ones((1, 1, 1, 1), dtype=dtype)
+    for c in range(n_cols - 2, -1, -1):
+        right_envs[c] = _contract_right_partial_2row(transfers[c + 1], right_envs[c + 1])
+    return right_envs
+
+
 def _compute_row_pair_vertical_amps(
     top_mps: tuple,
     bottom_mps: tuple,
@@ -309,11 +322,7 @@ def _compute_row_pair_vertical_amps(
         _contract_column_transfer_2row(top_mps[c], mpo0[c], mpo1[c], bottom_mps[c])
         for c in range(n_cols)
     ]
-
-    right_envs = [None] * n_cols
-    right_envs[n_cols - 1] = jnp.ones((1, 1, 1, 1), dtype=dtype)
-    for c in range(n_cols - 2, -1, -1):
-        right_envs[c] = _contract_right_partial_2row(transfers[c + 1], right_envs[c + 1])
+    right_envs = _compute_right_envs_2row(transfers, dtype)
 
     left_env = jnp.ones((1, 1, 1, 1), dtype=dtype)
     amps_v2site = []
@@ -357,13 +366,8 @@ def _compute_row_pair_vertical_energy(
         )
         for c in range(n_cols)
     ]
-    right_envs = [None] * n_cols
-    right_envs[n_cols - 1] = jnp.ones((1, 1, 1), dtype=dtype)
-    for c in range(n_cols - 2, -1, -1):
-        right_envs[c] = _contract_right_partial_2row(
-            transfers[c + 1], right_envs[c + 1]
-        )
-    left_env = jnp.ones((1, 1, 1), dtype=dtype)
+    right_envs = _compute_right_envs_2row(transfers, dtype)
+    left_env = jnp.ones((1, 1, 1, 1), dtype=dtype)
     energy = jnp.zeros((), dtype=amp.dtype)
     for c in range(n_cols):
         col_terms = terms_row[c]
@@ -387,6 +391,19 @@ def _compute_row_pair_vertical_energy(
     return energy
 
 
+def _compute_right_envs(
+    transfers: list[jax.Array],
+    dtype,
+) -> list[jax.Array]:
+    """Compute right environments from column transfers (backward pass)."""
+    n_cols = len(transfers)
+    right_envs = [None] * n_cols
+    right_envs[n_cols - 1] = jnp.ones((1, 1, 1), dtype=dtype)
+    for c in range(n_cols - 2, -1, -1):
+        right_envs[c] = _contract_right_partial(transfers[c + 1], right_envs[c + 1])
+    return right_envs
+
+
 def _compute_all_row_gradients(
     top_mps: tuple,
     bottom_mps: tuple,
@@ -399,14 +416,8 @@ def _compute_all_row_gradients(
         _contract_column_transfer(top_mps[c], mpo[c], bottom_mps[c])
         for c in range(n_cols)
     ]
+    right_envs = _compute_right_envs(transfers, dtype)
 
-    # Backward pass: precompute all right_envs
-    right_envs = [None] * n_cols
-    right_envs[n_cols - 1] = jnp.ones((1, 1, 1), dtype=dtype)
-    for c in range(n_cols - 2, -1, -1):
-        right_envs[c] = _contract_right_partial(transfers[c + 1], right_envs[c + 1])
-
-    # Forward pass: maintain one left_env, compute gradients on the fly
     env_grads = []
     left_env = jnp.ones((1, 1, 1), dtype=dtype)
     for c in range(n_cols):
@@ -464,13 +475,7 @@ def _compute_all_env_grads_and_energy(
             _contract_column_transfer(top_envs[row][c], mpo[c], bottom_env[c])
             for c in range(n_cols)
         ]
-        right_envs = [None] * n_cols
-        right_envs[n_cols - 1] = jnp.ones((1, 1, 1), dtype=dtype)
-        for c in range(n_cols - 2, -1, -1):
-            right_envs[c] = _contract_right_partial(
-                transfers[c + 1], right_envs[c + 1]
-            )
-
+        right_envs = _compute_right_envs(transfers, dtype)
         left_env = jnp.ones((1, 1, 1), dtype=dtype)
         for c in range(n_cols):
             env_grad = _compute_single_gradient(
@@ -565,65 +570,6 @@ def _compute_2site_horizontal_env(
     return jnp.transpose(env, (1, 2, 0, 3, 5, 4))
 
 
-def _compute_row_env_grads_and_amps(
-    top_mps: tuple,
-    bottom_mps: tuple,
-    mpo: tuple,
-    tensors_row: list[jax.Array],
-) -> tuple[list[jax.Array], list[jax.Array], list[jax.Array]]:
-    """Compute gradients and amplitudes for operator evaluation in a row.
-
-    Returns:
-        env_grads: gradient environments for each site
-        amps_1site: ψ(p) for each site, shape (phys_dim,) per site
-        amps_h2site: ψ(p0,p1) for each horizontal edge, shape (phys_dim, phys_dim)
-    """
-    n_cols = len(mpo)
-    dtype = mpo[0].dtype
-    transfers = [
-        _contract_column_transfer(top_mps[c], mpo[c], bottom_mps[c])
-        for c in range(n_cols)
-    ]
-
-    # Backward pass: precompute all right_envs
-    right_envs = [None] * n_cols
-    right_envs[n_cols - 1] = jnp.ones((1, 1, 1), dtype=dtype)
-    for c in range(n_cols - 2, -1, -1):
-        right_envs[c] = _contract_right_partial(transfers[c + 1], right_envs[c + 1])
-
-    # Forward pass: compute gradients and amplitudes
-    env_grads = []
-    amps_1site = []
-    amps_h2site = []
-    left_env = jnp.ones((1, 1, 1), dtype=dtype)
-
-    for c in range(n_cols):
-        env_grad = _compute_single_gradient(
-            left_env, right_envs[c], top_mps[c], bottom_mps[c]
-        )
-        env_grads.append(env_grad)
-        amps_1site.append(jnp.einsum("pudlr,udlr->p", tensors_row[c], env_grad))
-
-        if c < n_cols - 1:
-            env_2site = _compute_2site_horizontal_env(
-                left_env, right_envs[c + 1],
-                top_mps[c], bottom_mps[c], top_mps[c + 1], bottom_mps[c + 1],
-            )
-            # tensor0: (p, up0, down0, left, right0), tensor1: (q, up1, down1, right0, right)
-            # env_2site: (up0, down0, left, up1, down1, right)
-            # Contract: shared bond right0 between tensors, spatial indices with env
-            amps_h2site.append(jnp.einsum(
-                "pudlr,qverx,udlvex->pq", tensors_row[c], tensors_row[c + 1], env_2site
-            ))
-
-        left_env = _contract_left_partial(left_env, transfers[c])
-
-    # Vertical 2-site amplitudes are computed separately via
-    # _compute_row_pair_vertical_amps using cached top/bottom environments.
-
-    return env_grads, amps_1site, amps_h2site
-
-
 def _compute_single_gradient(
     left_env: jax.Array,
     right_env: jax.Array,
@@ -661,10 +607,7 @@ def _compute_all_gradients(
     for row in range(n_rows - 1, -1, -1):
         if cache_bottom_envs:
             bottom_envs_cached[row] = bottom_env
-        if row_mpos is None:
-            mpo = _build_row_mpo(tensors, spins[row], row, n_cols)
-        else:
-            mpo = row_mpos[row]
+        mpo = row_mpos[row] if row_mpos else _build_row_mpo(tensors, spins[row], row, n_cols)
         grads[row] = _compute_all_row_gradients(top_envs[row], bottom_env, mpo)
         bottom_env = _apply_mpo_from_below(bottom_env, mpo, strategy)
 

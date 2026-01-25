@@ -18,6 +18,7 @@ from vmc.models.peps import (
     _apply_mpo_from_below,
     _build_row_mpo,
     _compute_all_env_grads_and_energy,
+    _compute_right_envs,
     _contract_bottom,
     _contract_column_transfer,
     _contract_left_partial,
@@ -416,28 +417,27 @@ def sequential_sample_with_gradients(
         num_burn_in=num_burn_in,
     )
 
+    def compute_site_grad(site, left_envs, right_envs):
+        left_dim, right_dim = MPS.site_dims(site, n_sites, bond_dim)
+        left = left_envs[site][:left_dim]
+        right = right_envs[site + 1][:right_dim]
+        return left[:, None] * right[None, :]
+
     def flatten_full_gradients(indices, left_envs, right_envs):
         grad_parts = []
         for site in range(n_sites):
+            grad_site = compute_site_grad(site, left_envs, right_envs)
             left_dim, right_dim = MPS.site_dims(site, n_sites, bond_dim)
-            left = left_envs[site][:left_dim]
-            right = right_envs[site + 1][:right_dim]
-            grad_site = left[:, None] * right[None, :]
-            grad_full = jnp.zeros(
-                (phys_dim, left_dim, right_dim), dtype=tensors[0].dtype
-            )
+            grad_full = jnp.zeros((phys_dim, left_dim, right_dim), dtype=tensors[0].dtype)
             grad_full = grad_full.at[indices[site]].set(grad_site)
             grad_parts.append(grad_full.ravel())
         return jnp.concatenate(grad_parts)
 
     def flatten_sliced_gradients(indices, left_envs, right_envs):
-        grad_parts = []
-        for site in range(n_sites):
-            left_dim, right_dim = MPS.site_dims(site, n_sites, bond_dim)
-            left = left_envs[site][:left_dim]
-            right = right_envs[site + 1][:right_dim]
-            grad_site = left[:, None] * right[None, :]
-            grad_parts.append(grad_site.reshape(-1))
+        grad_parts = [
+            compute_site_grad(site, left_envs, right_envs).reshape(-1)
+            for site in range(n_sites)
+        ]
         p = jnp.repeat(indices.astype(jnp.int8), params_per_site)
         return jnp.concatenate(grad_parts), p
 
@@ -581,10 +581,11 @@ def sequential_sample_with_gradients(
         return jnp.concatenate(grad_parts)
 
     def flatten_sliced_gradients(env_grads, spins):
-        grad_parts = []
-        for row in range(n_rows):
-            for col in range(n_cols):
-                grad_parts.append(env_grads[row][col].reshape(-1))
+        grad_parts = [
+            env_grads[row][col].reshape(-1)
+            for row in range(n_rows)
+            for col in range(n_cols)
+        ]
         p = jnp.repeat(spins.reshape(-1).astype(jnp.int8), params_per_site)
         return jnp.concatenate(grad_parts), p
 
@@ -701,19 +702,11 @@ def _peps_sequential_sweep_with_envs(
         # rebuilding per-row MPOs after flips; would require caching updated rows.
         mpo_row = _build_row_mpo(tensors, spins[row], row, n_cols)
 
-        transfers = []
-        for col in range(n_cols):
-            transfer = _contract_column_transfer(
-                top_env[col], mpo_row[col], bottom_env[col]
-            )
-            transfers.append(transfer)
-
-        right_envs = [None] * n_cols
-        right_envs[n_cols - 1] = env = jnp.ones((1, 1, 1), dtype=dtype)
-        for col in range(n_cols - 2, -1, -1):
-            env = _contract_right_partial(transfers[col + 1], env)
-            right_envs[col] = env
-
+        transfers = [
+            _contract_column_transfer(top_env[col], mpo_row[col], bottom_env[col])
+            for col in range(n_cols)
+        ]
+        right_envs = _compute_right_envs(transfers, dtype)
         left_env = jnp.ones((1, 1, 1), dtype=dtype)
         updated_row = []  # Track updated MPOs to avoid rebuilding the row.
         for col in range(n_cols):

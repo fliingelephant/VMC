@@ -190,38 +190,28 @@ class DynamicsDriver:
     def _time_derivative(self, params: Any, t: float, *, stage: int) -> Any:
         self.model = nnx.merge(self._graphdef, params, self._model_state)
         log_timing = logger.isEnabledFor(logging.INFO)
-        if log_timing:
-            t0 = time.perf_counter()
-        op_t = self._operator_at(t)
-        (
-            samples,
-            o,
-            p,
-            self._sampler_key,
-            self._sampler_configuration,
-            amp,
-            local_energies,
-        ) = self.sampler(
+        t0 = time.perf_counter() if log_timing else 0.0
+
+        samples, o, p, self._sampler_key, self._sampler_configuration, amp, local_energies = self.sampler(
             self.model,
-            op_t,
+            self._operator_at(t),
             key=self._sampler_key,
             initial_configuration=self._sampler_configuration,
         )
+
         if log_timing:
-            jax.block_until_ready(samples)
-            jax.block_until_ready(o)
-            if p is not None:
-                jax.block_until_ready(p)
-            jax.block_until_ready(amp)
-            jax.block_until_ready(local_energies)
+            for arr in (samples, o, p, amp, local_energies):
+                if arr is not None:
+                    jax.block_until_ready(arr)
             t1 = time.perf_counter()
             logger.info("Step %d stage %d | sampling %.3fs", self.step_count, stage, t1 - t0)
+
         if stage == 0:
             self._loss_stats = nkstats.statistics(local_energies)
             if log_timing:
                 e = self._loss_stats
                 logger.info(
-                    "Step %d | E = %.6f ± %.4f [σ²=%.4f]",
+                    "Step %d | E = %.6f +/- %.4f [var=%.4f]",
                     self.step_count,
                     e.mean.real,
                     e.error_of_mean.real,
@@ -229,25 +219,17 @@ class DynamicsDriver:
                 )
 
         updates = self.preconditioner.apply(
-            self.model,
-            params,
-            samples,
-            o,
-            p,
-            local_energies,
+            self.model, params, samples, o, p, local_energies,
             grad_factor=self.time_unit.grad_factor,
         )
+
         if log_timing:
             jax.block_until_ready(updates)
-            t2 = time.perf_counter()
-            logger.info(
-                "Step %d stage %d | sr_solve %.3fs",
-                self.step_count,
-                stage,
-                t2 - t1,
-            )
+            logger.info("Step %d stage %d | sr_solve %.3fs", self.step_count, stage, time.perf_counter() - t1)
+
         if stage == 0:
             self._sync_preconditioner_metrics()
+
         return updates
 
     @staticmethod

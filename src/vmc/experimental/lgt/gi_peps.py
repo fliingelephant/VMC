@@ -208,13 +208,33 @@ def _link_value_or_zero(
     direction: str,
 ) -> jax.Array:
     if direction == "left":
-        return jnp.where(c > 0, h_links[r, c - 1], 0)
+        return jax.lax.cond(
+            c > 0,
+            lambda _: h_links[r, c - 1],
+            lambda _: jnp.zeros((), dtype=h_links.dtype),
+            operand=None,
+        )
     if direction == "right":
-        return jnp.where(c < h_links.shape[1], h_links[r, c], 0)
+        return jax.lax.cond(
+            c < h_links.shape[1],
+            lambda _: h_links[r, c],
+            lambda _: jnp.zeros((), dtype=h_links.dtype),
+            operand=None,
+        )
     if direction == "up":
-        return jnp.where(r > 0, v_links[r - 1, c], 0)
+        return jax.lax.cond(
+            r > 0,
+            lambda _: v_links[r - 1, c],
+            lambda _: jnp.zeros((), dtype=v_links.dtype),
+            operand=None,
+        )
     if direction == "down":
-        return jnp.where(r < v_links.shape[0], v_links[r, c], 0)
+        return jax.lax.cond(
+            r < v_links.shape[0],
+            lambda _: v_links[r, c],
+            lambda _: jnp.zeros((), dtype=v_links.dtype),
+            operand=None,
+        )
     raise ValueError(f"Unknown direction: {direction}")
 
 

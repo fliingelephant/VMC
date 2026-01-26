@@ -16,7 +16,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from vmc.utils.utils import random_tensor, spin_to_occupancy
+from vmc.utils.utils import occupancy_to_spin, random_tensor, spin_to_occupancy
 
 if TYPE_CHECKING:
     from jax.typing import DTypeLike
@@ -747,3 +747,11 @@ class PEPS(nnx.Module):
             )
         )(x)
         return jnp.log(amps)
+
+    def random_physical_configuration(
+        self, key: jax.Array, n_chains: int = 1
+    ) -> jax.Array:
+        spins = jax.random.bernoulli(
+            key, 0.5, shape=(n_chains, self.shape[0], self.shape[1])
+        ).astype(jnp.int32)
+        return occupancy_to_spin(spins)

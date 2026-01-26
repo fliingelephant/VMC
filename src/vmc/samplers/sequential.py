@@ -489,6 +489,10 @@ def sequential_sample_with_gradients(
     return samples, grads, p, key, final_configurations, amps, local_energies
 
 
+@functools.partial(
+    jax.jit,
+    static_argnames=("n_samples", "n_chains", "burn_in", "full_gradient"),
+)
 @dispatch
 def sequential_sample_with_gradients(
     model: PEPS,
@@ -497,7 +501,7 @@ def sequential_sample_with_gradients(
     n_samples: int = 1,
     n_chains: int = 1,
     key: jax.Array,
-    initial_configuration: jax.Array | None = None,
+    initial_configuration: jax.Array,
     burn_in: int = 0,
     full_gradient: bool = False,
 ) -> (
@@ -517,8 +521,8 @@ def sequential_sample_with_gradients(
 
     Args:
         operator: Local Hamiltonian used for on-the-fly local energy evaluation.
-        initial_configuration: Optional initial chain configs, shape (n_chains, n_rows, n_cols),
-            in spin format (-1/+1). If None, random initialization is used.
+        initial_configuration: Initial chain configs, shape (n_chains, n_rows, n_cols),
+            in spin format (-1/+1).
 
     Returns:
         samples, grads, p, key, final_configurations, amps, local_energies
@@ -534,11 +538,7 @@ def sequential_sample_with_gradients(
     params_per_site = jnp.asarray(params_per_site_fn(model), dtype=jnp.int32)
 
     key, chain_key = jax.random.split(key)
-    if initial_configuration is not None:
-        spins = spin_to_occupancy(initial_configuration)
-    else:
-        key, init_key = jax.random.split(key)
-        spins = _random_occupancy(init_key, num_chains, shape)
+    spins = spin_to_occupancy(initial_configuration)
     chain_keys = jax.random.split(chain_key, num_chains)
     bottom_envs = jax.vmap(
         lambda s: _peps_bottom_envs(tensors, s, shape, model.strategy)

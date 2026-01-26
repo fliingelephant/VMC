@@ -165,8 +165,13 @@ class SequentialSamplingTest(unittest.TestCase):
                     J=0.0,
                     dtype=jnp.complex128,
                 )
+                initial_configuration = None
             else:
                 operator = LocalHamiltonian(shape=self.SHAPE, terms=())
+                key, init_key = jax.random.split(key)
+                initial_configuration = model.random_physical_configuration(
+                    init_key, n_chains=n_chains
+                )
             amps_basis, _, p_ref = _value_and_grad(
                 model, jnp.asarray(spins_basis), full_gradient=False
             )
@@ -182,6 +187,7 @@ class SequentialSamplingTest(unittest.TestCase):
                 burn_in=self.BURN_IN,
                 key=key,
                 full_gradient=False,
+                initial_configuration=initial_configuration,
             )
             elapsed = time.perf_counter() - start
             logger.info(
@@ -201,6 +207,7 @@ class SequentialSamplingTest(unittest.TestCase):
                 burn_in=self.BURN_IN,
                 key=key,
                 full_gradient=True,
+                initial_configuration=initial_configuration,
             )
             elapsed = time.perf_counter() - start
             logger.info(

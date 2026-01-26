@@ -173,6 +173,11 @@ class DynamicsDriver:
         self.integrator = integrator or self.time_unit.default_integrator()
         self._sampler_key = sampler_key
 
+        self._sampler_key, init_key = jax.random.split(self._sampler_key)
+        self._sampler_configuration = jax.vmap(self.model.random_physical_configuration)(
+            jax.random.split(init_key, self.sampler.n_chains)
+        )
+
         self.diag_shift_error: float | None = None
         self.residual_error: float | None = None
         self.solve_time: float | None = None

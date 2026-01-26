@@ -22,6 +22,7 @@ class LocalTerm(abc.ABC):
     """Abstract base class for local operator terms."""
 
 
+@jax.tree_util.register_pytree_node_class
 @dataclass(frozen=True)
 class OneSiteTerm(LocalTerm):
     """Single-site operator term acting at (row, col)."""
@@ -37,7 +38,17 @@ class OneSiteTerm(LocalTerm):
     def __post_init__(self) -> None:
         object.__setattr__(self, "op", jnp.asarray(self.op))
 
+    def tree_flatten(self):
+        return (self.op,), (self.row, self.col)
 
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        (op,) = children
+        row, col = aux_data
+        return cls(row=row, col=col, op=op)
+
+
+@jax.tree_util.register_pytree_node_class
 @dataclass(frozen=True)
 class DiagonalTerm(LocalTerm):
     """Diagonal operator term on one or two sites."""
@@ -48,7 +59,17 @@ class DiagonalTerm(LocalTerm):
     def __post_init__(self) -> None:
         object.__setattr__(self, "diag", jnp.asarray(self.diag))
 
+    def tree_flatten(self):
+        return (self.diag,), (self.sites,)
 
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        (diag,) = children
+        (sites,) = aux_data
+        return cls(sites=sites, diag=diag)
+
+
+@jax.tree_util.register_pytree_node_class
 @dataclass(frozen=True)
 class HorizontalTwoSiteTerm(LocalTerm):
     """Two-site operator on horizontal neighbor (row, col) -> (row, col+1)."""
@@ -64,7 +85,17 @@ class HorizontalTwoSiteTerm(LocalTerm):
     def __post_init__(self) -> None:
         object.__setattr__(self, "op", jnp.asarray(self.op))
 
+    def tree_flatten(self):
+        return (self.op,), (self.row, self.col)
 
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        (op,) = children
+        row, col = aux_data
+        return cls(row=row, col=col, op=op)
+
+
+@jax.tree_util.register_pytree_node_class
 @dataclass(frozen=True)
 class VerticalTwoSiteTerm(LocalTerm):
     """Two-site operator on vertical neighbor (row, col) -> (row+1, col)."""
@@ -80,13 +111,32 @@ class VerticalTwoSiteTerm(LocalTerm):
     def __post_init__(self) -> None:
         object.__setattr__(self, "op", jnp.asarray(self.op))
 
+    def tree_flatten(self):
+        return (self.op,), (self.row, self.col)
 
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        (op,) = children
+        row, col = aux_data
+        return cls(row=row, col=col, op=op)
+
+
+@jax.tree_util.register_pytree_node_class
 @dataclass(frozen=True)
 class LocalHamiltonian:
     """Container for local PEPS operator terms."""
 
     shape: tuple[int, int]
     terms: tuple[LocalTerm, ...] = ()
+
+    def tree_flatten(self):
+        return (self.terms,), (self.shape,)
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        (terms,) = children
+        (shape,) = aux_data
+        return cls(shape=shape, terms=terms)
 
 
 def bucket_terms(

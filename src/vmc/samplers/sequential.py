@@ -239,14 +239,10 @@ def sequential_sample(
     n_samples: int = 1,
     n_chains: int = 1,
     key: jax.Array,
+    initial_configuration: jax.Array,
     burn_in: int = 0,
-    return_key: bool = False,
-) -> jax.Array | tuple[jax.Array, jax.Array]:
-    """Sequential sampling for MPS using Metropolis sweeps.
-
-    Records one sample per sweep. ``n_samples`` counts recorded sweeps across
-    chains; burn-in sweeps are not recorded.
-    """
+):
+    """Sequential sampling for MPS using Metropolis sweeps."""
     num_samples, num_chains, num_burn_in, chain_length, total_samples = _sample_counts(
         n_samples, n_chains, burn_in
     )
@@ -254,9 +250,8 @@ def sequential_sample(
     n_sites = len(tensors)
     tensors_padded = _pad_mps_tensors(tensors, model.bond_dim)
 
-    key, init_key = jax.random.split(key)
     key, chain_key = jax.random.split(key)
-    indices = _random_occupancy(init_key, num_chains, (n_sites,))
+    indices = initial_configuration
     chain_keys = jax.random.split(chain_key, num_chains)
 
     def sweep_once(indices, key):
@@ -278,10 +273,7 @@ def sequential_sample(
     )
     # TODO: properly distribute n_samples, avoid sampling overhead.
     samples = _trim_samples(samples, total_samples, num_samples)
-    spins_batch = occupancy_to_spin(samples)
-    if return_key:
-        return spins_batch, key
-    return spins_batch
+    return samples
 
 
 @dispatch
@@ -291,14 +283,10 @@ def sequential_sample(
     n_samples: int = 1,
     n_chains: int = 1,
     key: jax.Array,
+    initial_configuration: jax.Array,
     burn_in: int = 0,
-    return_key: bool = False,
-) -> jax.Array | tuple[jax.Array, jax.Array]:
-    """Sequential sampling for PEPS using Metropolis sweeps.
-
-    Records one sample per sweep. ``n_samples`` counts recorded sweeps across
-    chains; burn-in sweeps are not recorded.
-    """
+):
+    """Sequential sampling for PEPS using Metropolis sweeps."""
     num_samples, num_chains, num_burn_in, chain_length, total_samples = _sample_counts(
         n_samples, n_chains, burn_in
     )
@@ -307,34 +295,57 @@ def sequential_sample(
     n_sites = int(n_rows * n_cols)
     tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
 
-    key, init_key = jax.random.split(key)
     key, chain_key = jax.random.split(key)
-    spins = _random_occupancy(init_key, num_chains, shape)
+    spins = initial_configuration
     chain_keys = jax.random.split(chain_key, num_chains)
+    bottom_envs = jax.vmap(
+        lambda s: _peps_bottom_envs(tensors, s, shape, model.strategy)
+    )(spins)
 
-    def sweep_once(spins, key):
-        return peps_sequential_sweep(
-            tensors,
-            spins,
-            shape,
-            model.strategy,
-            key,
+    def sweep_with_envs(spins, chain_keys, bottom_envs, collect_top_envs):
+        def sweep_single(s, key, envs):
+            return _peps_sequential_sweep_with_envs(
+                tensors,
+                s,
+                shape,
+                model.strategy,
+                key,
+                envs,
+                collect_top_envs,
+                collect_top_envs,
+            )
+
+        return jax.vmap(sweep_single, in_axes=(0, 0, 0))(
+            spins, chain_keys, bottom_envs
         )
 
-    sweep_batched = jax.vmap(sweep_once, in_axes=(0, 0))
-    _, samples = _collect_samples(
-        sweep_batched,
+    spins, chain_keys, bottom_envs = _run_burn_in_with_envs(
+        sweep_with_envs,
+        lambda s: _peps_bottom_envs(tensors, s, shape, model.strategy),
         spins,
         chain_keys,
+        bottom_envs,
         num_burn_in=num_burn_in,
-        chain_length=chain_length,
-        sample_view=lambda x: x.reshape(num_chains, n_sites),
+    )
+
+    def sample_step(carry, _):
+        spins, chain_keys, bottom_envs = carry
+        spins, chain_keys, _, _ = sweep_with_envs(
+            spins, chain_keys, bottom_envs, False
+        )
+        bottom_envs = jax.vmap(
+            lambda s: _peps_bottom_envs(tensors, s, shape, model.strategy)
+        )(spins)
+        return (spins, chain_keys, bottom_envs), spins.reshape(num_chains, n_sites)
+
+    (_, _, _), samples = _collect_steps(
+        sample_step,
+        (spins, chain_keys, bottom_envs),
+        chain_length,
+        "Sequential sampling",
     )
     # TODO: properly distribute n_samples, avoid sampling overhead.
     samples = _trim_samples(samples, total_samples, num_samples)
-    samples = occupancy_to_spin(samples)
-    if return_key:
-        return samples, key
     return samples
 
 
@@ -346,7 +357,7 @@ def sequential_sample_with_gradients(
     n_samples: int = 1,
     n_chains: int = 1,
     key: jax.Array,
-    initial_configuration: jax.Array | None = None,
+    initial_configuration: jax.Array,
     burn_in: int = 0,
     full_gradient: bool = False,
 ) -> (
@@ -366,8 +377,8 @@ def sequential_sample_with_gradients(
 
     Args:
         operator: Operator used to compute local energies after sampling.
-        initial_configuration: Optional initial chain configs, shape (n_chains, n_sites),
-            in spin format (-1/+1). If None, random initialization is used.
+        initial_configuration: Initial chain configs, shape (n_chains, n_sites),
+            in occupancy format (0..phys_dim-1).
 
     Returns:
         samples, grads, p, key, final_configurations, amps, local_energies
@@ -383,11 +394,7 @@ def sequential_sample_with_gradients(
     params_per_site = tuple(int(p) for p in params_per_site_fn(model))
 
     key, chain_key = jax.random.split(key)
-    if initial_configuration is not None:
-        indices = spin_to_occupancy(initial_configuration)
-    else:
-        key, init_key = jax.random.split(key)
-        indices = _random_occupancy(init_key, num_chains, (n_sites,))
+    indices = initial_configuration
     chain_keys = jax.random.split(chain_key, num_chains)
     right_envs = jax.vmap(
         lambda idx: _mps_right_envs(tensors_padded, idx, n_sites=n_sites)
@@ -479,16 +486,16 @@ def sequential_sample_with_gradients(
 
     # TODO: properly distribute n_samples, avoid sampling overhead.
     samples = _trim_samples(samples, total_samples, num_samples)
-    samples = occupancy_to_spin(samples)
     grads = _trim_samples(grads, total_samples, num_samples)
     amps = _trim_samples(amps, total_samples, num_samples)
     if full_gradient:
         p = None
     else:
         p = _trim_samples(p, total_samples, num_samples)
-    final_configurations = occupancy_to_spin(final_configurations)
 
-    local_energies = local_estimate(model, samples, operator, amps)
+    local_energies = local_estimate(
+        model, occupancy_to_spin(samples), operator, amps
+    )
     return samples, grads, p, key, final_configurations, amps, local_energies
 
 
@@ -525,7 +532,7 @@ def sequential_sample_with_gradients(
     Args:
         operator: Local Hamiltonian used for on-the-fly local energy evaluation.
         initial_configuration: Initial chain configs, shape (n_chains, n_rows, n_cols),
-            in spin format (-1/+1).
+            in occupancy format (0..phys_dim-1).
 
     Returns:
         samples, grads, p, key, final_configurations, amps, local_energies
@@ -541,7 +548,7 @@ def sequential_sample_with_gradients(
     params_per_site = tuple(int(p) for p in params_per_site_fn(model))
 
     key, chain_key = jax.random.split(key)
-    spins = spin_to_occupancy(initial_configuration)
+    spins = initial_configuration
     chain_keys = jax.random.split(chain_key, num_chains)
     bottom_envs = jax.vmap(
         lambda s: _peps_bottom_envs(tensors, s, shape, model.strategy)
@@ -643,7 +650,6 @@ def sequential_sample_with_gradients(
 
     # TODO: properly distribute n_samples, avoid sampling overhead.
     samples = _trim_samples(samples, total_samples, num_samples)
-    samples = occupancy_to_spin(samples)
     grads = _trim_samples(grads, total_samples, num_samples)
     amps = _trim_samples(amps, total_samples, num_samples)
     local_energies = _trim_samples(local_energies, total_samples, num_samples)
@@ -651,9 +657,8 @@ def sequential_sample_with_gradients(
         p = None
     else:
         p = _trim_samples(p, total_samples, num_samples)
-    final_configurations = occupancy_to_spin(final_spins)
 
-    return samples, grads, p, key, final_configurations, amps, local_energies
+    return samples, grads, p, key, final_spins, amps, local_energies
 
 
 @functools.partial(jax.jit, static_argnames=("shape", "strategy"))

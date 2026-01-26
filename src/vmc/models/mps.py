@@ -13,7 +13,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from vmc.utils.utils import random_tensor, spin_to_occupancy
+from vmc.utils.utils import occupancy_to_spin, random_tensor, spin_to_occupancy
 
 if TYPE_CHECKING:
     from jax.typing import DTypeLike
@@ -110,3 +110,14 @@ class MPS(nnx.Module):
         amps = self.apply(self.tensors, samples)
         log_amps = jnp.log(amps)
         return log_amps if x.ndim == 2 else log_amps[0]
+
+    def random_physical_configuration(
+        self, key: jax.Array, n_samples: int = 1
+    ) -> jax.Array:
+        return jax.random.randint(
+            key,
+            (n_samples, self.n_sites),
+            0,
+            self.phys_dim,
+            dtype=jnp.int32,
+        )

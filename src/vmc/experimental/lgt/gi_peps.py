@@ -119,8 +119,17 @@ class GIPEPS(nnx.Module):
     def random_physical_configuration(
         self,
         key: jax.Array,
+        n_samples: int = 1,
     ) -> jax.Array:
         n_rows, n_cols = self.shape
+        keys = jax.random.split(key, n_samples)
+        return jax.vmap(
+            lambda k: self._single_physical_configuration(k, n_rows, n_cols)
+        )(keys)
+
+    def _single_physical_configuration(
+        self, key: jax.Array, n_rows: int, n_cols: int
+    ) -> jax.Array:
         h_links = jnp.zeros((n_rows, n_cols - 1), dtype=jnp.int32)
         v_links = jnp.zeros((n_rows - 1, n_cols), dtype=jnp.int32)
         if n_rows > 1 and n_cols > 1:
@@ -151,52 +160,29 @@ def _apply_gauss_mask(
     Qx: int,
     degeneracy_per_charge: tuple[int, ...],
 ) -> jax.Array:
-    phys_dim = tensor.shape[0]
-    ku_dim, mu_u_dim = tensor.shape[1], tensor.shape[2]
-    kd_dim, md_dim = tensor.shape[3], tensor.shape[4]
-    kl_dim, ml_dim = tensor.shape[5], tensor.shape[6]
-    kr_dim, mr_dim = tensor.shape[7], tensor.shape[8]
+    phys_dim, ku_dim, mu_u_dim, kd_dim, md_dim, kl_dim, ml_dim, kr_dim, mr_dim = tensor.shape
+    dmax = int(max(degeneracy_per_charge))
 
-    ku_vals = jnp.arange(ku_dim, dtype=jnp.int32) if ku_dim > 1 else jnp.zeros((1,), jnp.int32)
-    kd_vals = jnp.arange(kd_dim, dtype=jnp.int32) if kd_dim > 1 else jnp.zeros((1,), jnp.int32)
-    kl_vals = jnp.arange(kl_dim, dtype=jnp.int32) if kl_dim > 1 else jnp.zeros((1,), jnp.int32)
-    kr_vals = jnp.arange(kr_dim, dtype=jnp.int32) if kr_dim > 1 else jnp.zeros((1,), jnp.int32)
+    def k_vals(dim: int) -> jax.Array:
+        return jnp.arange(dim, dtype=jnp.int32) if dim > 1 else jnp.zeros((1,), jnp.int32)
 
+    ku_vals, kd_vals, kl_vals, kr_vals = k_vals(ku_dim), k_vals(kd_dim), k_vals(kl_dim), k_vals(kr_dim)
     ku, kd, kl, kr = jnp.meshgrid(ku_vals, kd_vals, kl_vals, kr_vals, indexing="ij")
     phys = jnp.arange(phys_dim, dtype=jnp.int32) % N
     gauss = (kl + ku - kr - kd - Qx - phys[:, None, None, None, None]) % N
     base = (gauss == 0).astype(tensor.dtype)
 
-    dmax = int(max(degeneracy_per_charge))
-    mu_mask = []
-    for d in degeneracy_per_charge:
-        mu_mask.append(jnp.arange(dmax) < d)
-    mu_mask = jnp.asarray(mu_mask, dtype=tensor.dtype)
+    mu_mask = jnp.asarray([jnp.arange(dmax) < d for d in degeneracy_per_charge], dtype=tensor.dtype)
 
-    if mu_u_dim == 1:
-        mu_u_mask = jnp.ones((ku_dim, 1), dtype=tensor.dtype)
-    else:
-        mu_u_mask = mu_mask[ku_vals]
-    if md_dim == 1:
-        mu_d_mask = jnp.ones((kd_dim, 1), dtype=tensor.dtype)
-    else:
-        mu_d_mask = mu_mask[kd_vals]
-    if ml_dim == 1:
-        mu_l_mask = jnp.ones((kl_dim, 1), dtype=tensor.dtype)
-    else:
-        mu_l_mask = mu_mask[kl_vals]
-    if mr_dim == 1:
-        mu_r_mask = jnp.ones((kr_dim, 1), dtype=tensor.dtype)
-    else:
-        mu_r_mask = mu_mask[kr_vals]
+    def get_mu_mask(k_vals: jax.Array, mu_dim: int, k_dim: int) -> jax.Array:
+        return jnp.ones((k_dim, 1), dtype=tensor.dtype) if mu_dim == 1 else mu_mask[k_vals]
 
-    mu_u = mu_u_mask[None, :, :, None, None, None, None, None, None]
-    mu_d = mu_d_mask[None, None, None, :, :, None, None, None, None]
-    mu_l = mu_l_mask[None, None, None, None, None, :, :, None, None]
-    mu_r = mu_r_mask[None, None, None, None, None, None, None, :, :]
+    mu_u = get_mu_mask(ku_vals, mu_u_dim, ku_dim)[None, :, :, None, None, None, None, None, None]
+    mu_d = get_mu_mask(kd_vals, md_dim, kd_dim)[None, None, None, :, :, None, None, None, None]
+    mu_l = get_mu_mask(kl_vals, ml_dim, kl_dim)[None, None, None, None, None, :, :, None, None]
+    mu_r = get_mu_mask(kr_vals, mr_dim, kr_dim)[None, None, None, None, None, None, None, :, :]
 
-    mask = base[:, :, None, :, None, :, None, :, None] * mu_u * mu_d * mu_l * mu_r
-    return tensor * mask
+    return tensor * base[:, :, None, :, None, :, None, :, None] * mu_u * mu_d * mu_l * mu_r
 
 
 def _link_value_or_zero(
@@ -238,20 +224,6 @@ def _link_value_or_zero(
     raise ValueError(f"Unknown direction: {direction}")
 
 
-def _assemble_site_tensor(
-    tensor: jax.Array,
-    k_u: jax.Array,
-    k_d: jax.Array,
-    k_l: jax.Array,
-    k_r: jax.Array,
-) -> jax.Array:
-    t = jnp.take(tensor, k_u, axis=1)
-    t = jnp.take(t, k_d, axis=2)
-    t = jnp.take(t, k_l, axis=3)
-    t = jnp.take(t, k_r, axis=4)
-    return t.reshape((tensor.shape[0], tensor.shape[2], tensor.shape[4], tensor.shape[6], tensor.shape[8]))
-
-
 def assemble_tensors(
     tensors: list[list[jax.Array]],
     h_links: jax.Array,
@@ -267,26 +239,9 @@ def assemble_tensors(
             k_r = _link_value_or_zero(h_links, v_links, r, c, direction="right")
             k_u = _link_value_or_zero(h_links, v_links, r, c, direction="up")
             k_d = _link_value_or_zero(h_links, v_links, r, c, direction="down")
-            row.append(
-                _assemble_site_tensor(
-                    tensors[r][c],
-                    k_u,
-                    k_d,
-                    k_l,
-                    k_r,
-                )
-            )
+            row.append(tensors[r][c][:, k_u, :, k_d, :, k_l, :, k_r, :])
         eff.append(row)
     return eff
-
-
-def build_row_mpo(
-    tensors_row: list[jax.Array], sites_row: jax.Array
-) -> tuple[jax.Array, ...]:
-    return tuple(
-        jnp.transpose(t[sites_row[c]], (2, 3, 0, 1))
-        for c, t in enumerate(tensors_row)
-    )
 
 
 def _site_dims(config: GIPEPSConfig, r: int, c: int) -> tuple[int, int, int, int, int, int, int, int]:

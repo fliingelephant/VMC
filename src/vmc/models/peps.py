@@ -749,9 +749,12 @@ class PEPS(nnx.Module):
         return jnp.log(amps)
 
     def random_physical_configuration(
-        self, key: jax.Array, n_chains: int = 1
+        self, key: jax.Array, n_samples: int = 1
     ) -> jax.Array:
-        spins = jax.random.bernoulli(
-            key, 0.5, shape=(n_chains, self.shape[0], self.shape[1])
-        ).astype(jnp.int32)
-        return occupancy_to_spin(spins)
+        return jax.random.randint(
+            key,
+            (n_samples, self.shape[0], self.shape[1]),
+            0,
+            self.phys_dim,
+            dtype=jnp.int32,
+        )

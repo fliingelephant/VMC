@@ -85,9 +85,9 @@ class GIPEPSTest(unittest.TestCase):
                     key = jax.random.key(idx)
                     key, init_key = jax.random.split(key)
                     init_keys = jax.random.split(init_key, n_chains)
-                    initial_configuration = jax.vmap(
-                        model.random_physical_configuration
-                    )(init_keys)
+                    initial_configuration = model.random_physical_configuration(
+                        init_key, n_samples=n_chains
+                    )
                     samples, grads, _, _, _, amps, energies = sequential_sample_with_gradients(
                         model,
                         operator,
@@ -119,9 +119,9 @@ class GIPEPSTest(unittest.TestCase):
         )
         key = jax.random.key(0)
         key, init_key = jax.random.split(key)
-        initial_configuration = jax.vmap(
-            model.random_physical_configuration
-        )(jax.random.split(init_key, 1))
+        initial_configuration = model.random_physical_configuration(
+            init_key, n_samples=1
+        )
         samples, grads, _, _, _, amps, _ = sequential_sample_with_gradients(
             model,
             operator,

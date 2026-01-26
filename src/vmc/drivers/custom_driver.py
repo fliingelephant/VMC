@@ -174,8 +174,8 @@ class DynamicsDriver:
         self._sampler_key = sampler_key
 
         self._sampler_key, init_key = jax.random.split(self._sampler_key)
-        self._sampler_configuration = jax.vmap(self.model.random_physical_configuration)(
-            jax.random.split(init_key, self.sampler.n_chains)
+        self._sampler_configuration = self.model.random_physical_configuration(
+            init_key, n_samples=self.sampler.n_chains
         )
 
         self.diag_shift_error: float | None = None

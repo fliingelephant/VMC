@@ -12,6 +12,10 @@ from jax import config
 
 # Enable 64-bit precision for JAX
 config.update("jax_enable_x64", True)
+os.environ["JAX_COMPILATION_CACHE_DIR"] = os.path.expanduser("jax_cache")
+config.update("jax_persistent_cache_min_compile_time_secs", 0)
+config.update("jax_persistent_cache_min_entry_size_bytes", -1)
+config.update("jax_persistent_cache_enable_xla_caches", "all")
 
 
 def setup_logging() -> None:

@@ -19,7 +19,7 @@ from vmc.samplers.sequential import sequential_sample, sequential_sample_with_gr
 from vmc.models.mps import MPS
 from vmc.models.peps import NoTruncation, PEPS
 from vmc.operators import LocalHamiltonian
-from vmc.utils.utils import occupancy_to_spin, spin_to_occupancy
+from vmc.utils.utils import occupancy_to_spin
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,6 @@ def _max_full_vs_sliced_diff(
     grads_sliced: jax.Array,
 ) -> float:
     n_sites, bond_dim, phys_dim = model.n_sites, model.bond_dim, model.phys_dim
-    indices = spin_to_occupancy(samples)
     max_diff = offset_full = offset_sliced = 0
     for site in range(n_sites):
         left_dim, right_dim = MPS.site_dims(site, n_sites, bond_dim)
@@ -41,7 +40,7 @@ def _max_full_vs_sliced_diff(
             :, offset_full : offset_full + phys_dim * params_per_phys
         ].reshape(samples.shape[0], phys_dim, params_per_phys)
         selected = jnp.take_along_axis(
-            full_site, indices[:, site][:, None, None], axis=1
+            full_site, samples[:, site][:, None, None], axis=1
         ).squeeze(axis=1)
         sliced_site = grads_sliced[:, offset_sliced : offset_sliced + params_per_phys]
         max_diff = jnp.maximum(max_diff, jnp.max(jnp.abs(selected - sliced_site)))
@@ -59,7 +58,7 @@ def _max_full_vs_sliced_diff(
 ) -> float:
     n_rows, n_cols = model.shape
     bond_dim, phys_dim = model.bond_dim, model.phys_dim
-    spins = spin_to_occupancy(samples).reshape(samples.shape[0], n_rows, n_cols)
+    samples = samples.reshape(samples.shape[0], n_rows, n_cols)
     max_diff = offset_full = offset_sliced = 0
     for row in range(n_rows):
         for col in range(n_cols):
@@ -71,7 +70,7 @@ def _max_full_vs_sliced_diff(
                 :, offset_full : offset_full + phys_dim * params_per_phys
             ].reshape(samples.shape[0], phys_dim, params_per_phys)
             selected = jnp.take_along_axis(
-                full_site, spins[:, row, col][:, None, None], axis=1
+                full_site, samples[:, row, col][:, None, None], axis=1
             ).squeeze(axis=1)
             sliced_site = grads_sliced[:, offset_sliced : offset_sliced + params_per_phys]
             max_diff = jnp.maximum(max_diff, jnp.max(jnp.abs(selected - sliced_site)))
@@ -134,16 +133,20 @@ class SequentialSamplingTest(unittest.TestCase):
                 )
                 probs = jnp.abs(amps_basis) ** 2
                 probs /= probs.sum()
+                key = jax.random.key(seed)
+                key, init_key = jax.random.split(key)
+                initial_configuration = model.random_physical_configuration(
+                    init_key, n_samples=n_chains
+                )
                 samples = sequential_sample(
                     model,
                     n_samples=self.SAMPLES,
                     n_chains=n_chains,
                     burn_in=self.BURN_IN,
-                    key=jax.random.key(seed),
+                    key=key,
+                    initial_configuration=initial_configuration,
                 )
-                indices = jnp.sum(
-                    spin_to_occupancy(samples) * weights, axis=-1
-                ).astype(jnp.int32)
+                indices = jnp.sum(samples * weights, axis=-1).astype(jnp.int32)
                 empirical = jnp.bincount(indices, length=2**self.N_SITES) / samples.shape[0]
                 self.assertLess(float(jnp.max(jnp.abs(empirical - probs))), self.MAX_DIFF)
 
@@ -165,13 +168,13 @@ class SequentialSamplingTest(unittest.TestCase):
                     J=0.0,
                     dtype=jnp.complex128,
                 )
-                initial_configuration = None
             else:
                 operator = LocalHamiltonian(shape=self.SHAPE, terms=())
-                key, init_key = jax.random.split(key)
-                initial_configuration = model.random_physical_configuration(
-                    init_key, n_chains=n_chains
-                )
+            key = jax.random.key(seed)
+            key, init_key = jax.random.split(key)
+            initial_configuration = model.random_physical_configuration(
+                init_key, n_samples=n_chains
+            )
             amps_basis, _, p_ref = _value_and_grad(
                 model, jnp.asarray(spins_basis), full_gradient=False
             )
@@ -222,13 +225,9 @@ class SequentialSamplingTest(unittest.TestCase):
             self.assertEqual(grads_sliced.shape[0], samples_sliced.shape[0])
             self.assertEqual(grads_full.shape[0], samples_full.shape[0])
             self.assertEqual(grads_full.shape[1], grads_sliced.shape[1] * model.phys_dim)
-            indices_sliced = jnp.sum(
-                spin_to_occupancy(samples_sliced) * weights, axis=-1
-            ).astype(jnp.int32)
+            indices_sliced = jnp.sum(samples_sliced * weights, axis=-1).astype(jnp.int32)
             empirical_sliced = jnp.bincount(indices_sliced, length=2**self.N_SITES) / samples_sliced.shape[0]
-            indices_full = jnp.sum(
-                spin_to_occupancy(samples_full) * weights, axis=-1
-            ).astype(jnp.int32)
+            indices_full = jnp.sum(samples_full * weights, axis=-1).astype(jnp.int32)
             empirical_full = jnp.bincount(indices_full, length=2**self.N_SITES) / samples_full.shape[0]
             with self.subTest(
                 model=make_model.__name__,
@@ -259,7 +258,7 @@ class SequentialSamplingTest(unittest.TestCase):
             ):
                 self.assertLess(float(jnp.max(jnp.abs(empirical_full - probs))), self.MAX_DIFF)
                 amps, grads_ref_full, _ = _value_and_grad(
-                    model, jnp.asarray(samples_full), full_gradient=True
+                    model, occupancy_to_spin(jnp.asarray(samples_full)), full_gradient=True
                 )
                 grads_ref_full = grads_ref_full / amps[:, None]
                 self.assertLess(

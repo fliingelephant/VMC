@@ -12,7 +12,6 @@ from vmc.experimental.lgt.gi_local_terms import GILocalHamiltonian, LinkDiagonal
 from vmc.experimental.lgt.gi_peps import (
     GIPEPS,
     GIPEPSConfig,
-    _assemble_site_tensor,
     _link_value_or_zero,
 )
 from vmc.models.peps import (
@@ -24,10 +23,6 @@ from vmc.models.peps import (
     _compute_right_envs_2row,
 )
 from vmc.samplers.sequential import _metropolis_ratio, _sample_counts, _trim_samples
-
-
-def _build_row_mpo_entry(tensor: jax.Array, phys_index: jax.Array) -> jax.Array:
-    return jnp.transpose(tensor[phys_index], (2, 3, 0, 1))
 
 
 def _assemble_site(
@@ -42,20 +37,14 @@ def _assemble_site(
     k_r = _link_value_or_zero(h_links, v_links, r, c, direction="right")
     k_u = _link_value_or_zero(h_links, v_links, r, c, direction="up")
     k_d = _link_value_or_zero(h_links, v_links, r, c, direction="down")
-    return _assemble_site_tensor(
-        tensors[r][c],
-        k_u,
-        k_d,
-        k_l,
-        k_r,
-    )
+    return tensors[r][c][:, k_u, :, k_d, :, k_l, :, k_r, :]
 
 
 def _build_row_mpos_with_sites(
     eff_tensors: list[list[jax.Array]], sites: jax.Array
 ) -> list[tuple]:
     return [
-        tuple(_build_row_mpo_entry(t, sites[r, c]) for c, t in enumerate(row))
+        tuple(jnp.transpose(t[sites[r, c]], (2, 3, 0, 1)) for c, t in enumerate(row))
         for r, row in enumerate(eff_tensors)
     ]
 
@@ -117,7 +106,7 @@ def _update_row_mpo_for_site(
     row_mpo: tuple, col: int, tensor: jax.Array, phys_index: jax.Array
 ) -> tuple:
     row_list = list(row_mpo)
-    row_list[col] = _build_row_mpo_entry(tensor, phys_index)
+    row_list[col] = jnp.transpose(tensor[phys_index], (2, 3, 0, 1))
     return tuple(row_list)
 
 
@@ -221,11 +210,6 @@ def _updated_transfer_for_column(
     return transfer, row_mpo0, row_mpo1, updates
 
 
-def _local_single_amp(left_env: jax.Array, transfer: jax.Array, right_env: jax.Array) -> jax.Array:
-    tmp = _contract_left_partial_2row(left_env, transfer)
-    return jnp.einsum("aceg,aceg->", tmp, right_env)
-
-
 def _row_pair_sweep(
     key: jax.Array,
     tensors: list[list[jax.Array]],
@@ -302,7 +286,8 @@ def _row_pair_sweep(
             key, subkey = jax.random.split(key)
             delta = jnp.where(jax.random.bernoulli(subkey), 1, -1)
 
-            amp_cur = _local_single_amp(left_env, transfers[c], right_envs[c])
+            tmp = _contract_left_partial_2row(left_env, transfers[c])
+            amp_cur = jnp.einsum("aceg,aceg->", tmp, right_envs[c])
             v_prop = v_links.at[r, c].set((v_links[r, c] + delta) % config.N)
             sites_prop = sites.at[r, c].set((sites[r, c] - delta) % config.phys_dim)
             sites_prop = sites_prop.at[r + 1, c].set(
@@ -320,7 +305,8 @@ def _row_pair_sweep(
                 r,
                 c,
             )
-            amp_prop = _local_single_amp(left_env, trans, right_envs[c])
+            tmp_prop = _contract_left_partial_2row(left_env, trans)
+            amp_prop = jnp.einsum("aceg,aceg->", tmp_prop, right_envs[c])
             ratio = _metropolis_ratio(jnp.abs(amp_cur) ** 2, jnp.abs(amp_prop) ** 2)
             key, accept_key = jax.random.split(key)
             accept = jax.random.uniform(accept_key) < jnp.minimum(1.0, ratio)
@@ -447,21 +433,6 @@ def _plaquette_energy(
     return total
 
 
-def _gi_bottom_envs(
-    tensors: list[list[jax.Array]],
-    sites: jax.Array,
-    h_links: jax.Array,
-    v_links: jax.Array,
-    config: GIPEPSConfig,
-    strategy: Any,
-) -> list[tuple]:
-    eff_tensors = [[_assemble_site(tensors, h_links, v_links, config, r, c)
-                    for c in range(config.shape[1])]
-                   for r in range(config.shape[0])]
-    row_mpos = _build_row_mpos_with_sites(eff_tensors, sites)
-    return _bottom_envs(row_mpos, strategy)
-
-
 @functools.partial(
     jax.jit,
     static_argnames=("n_samples", "n_chains", "burn_in", "full_gradient"),
@@ -492,7 +463,11 @@ def sequential_sample_with_gradients(
 
     def cache_envs_fn(state):
         sites, h_links, v_links = state
-        return _gi_bottom_envs(tensors, sites, h_links, v_links, config, model.strategy)
+        eff_tensors = [[_assemble_site(tensors, h_links, v_links, config, r, c)
+                        for c in range(n_cols)]
+                       for r in range(n_rows)]
+        row_mpos = _build_row_mpos_with_sites(eff_tensors, sites)
+        return _bottom_envs(row_mpos, model.strategy)
 
     bottom_envs = jax.vmap(cache_envs_fn)((sites, h_links, v_links))
 

@@ -380,7 +380,7 @@ def sequential_sample_with_gradients(
     bond_dim = model.bond_dim
     phys_dim = model.phys_dim
     tensors_padded = _pad_mps_tensors(tensors, bond_dim)
-    params_per_site = jnp.asarray(params_per_site_fn(model), dtype=jnp.int32)
+    params_per_site = tuple(int(p) for p in params_per_site_fn(model))
 
     key, chain_key = jax.random.split(key)
     if initial_configuration is not None:
@@ -438,8 +438,11 @@ def sequential_sample_with_gradients(
             compute_site_grad(site, left_envs, right_envs).reshape(-1)
             for site in range(n_sites)
         ]
-        p = jnp.repeat(indices.astype(jnp.int8), params_per_site)
-        return jnp.concatenate(grad_parts), p
+        p_parts = [
+            jnp.full((params_per_site[site],), indices[site], dtype=jnp.int8)
+            for site in range(n_sites)
+        ]
+        return jnp.concatenate(grad_parts), jnp.concatenate(p_parts)
 
     def sample_step(carry, _):
         indices, chain_keys, right_envs = carry
@@ -535,7 +538,7 @@ def sequential_sample_with_gradients(
     n_sites = int(n_rows * n_cols)
     tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
     bond_dim = model.bond_dim
-    params_per_site = jnp.asarray(params_per_site_fn(model), dtype=jnp.int32)
+    params_per_site = tuple(int(p) for p in params_per_site_fn(model))
 
     key, chain_key = jax.random.split(key)
     spins = spin_to_occupancy(initial_configuration)
@@ -586,8 +589,11 @@ def sequential_sample_with_gradients(
             for row in range(n_rows)
             for col in range(n_cols)
         ]
-        p = jnp.repeat(spins.reshape(-1).astype(jnp.int8), params_per_site)
-        return jnp.concatenate(grad_parts), p
+        p_parts = [
+            jnp.full((params_per_site[site],), spins.reshape(-1)[site], dtype=jnp.int8)
+            for site in range(n_sites)
+        ]
+        return jnp.concatenate(grad_parts), jnp.concatenate(p_parts)
 
     diagonal_terms, one_site_terms, horizontal_terms, vertical_terms = bucket_terms(
         operator.terms, shape

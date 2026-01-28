@@ -422,9 +422,6 @@ def _compute_all_env_grads_and_energy_gi(
         vertical_terms,
         plaquette_terms,
     ) = bucket_terms(operator.terms, config.shape)
-    has_vertical = any(term_list for row in vertical_terms for term_list in row)
-    has_plaquette = any(term_list for row in plaquette_terms for term_list in row)
-    has_row_pair = has_vertical or has_plaquette
 
     env_grads = (
         [[None for _ in range(n_cols)] for _ in range(n_rows)]
@@ -452,24 +449,43 @@ def _compute_all_env_grads_and_energy_gi(
         ]
         right_envs = _compute_right_envs(transfers, dtype)
         left_env = jnp.ones((1, 1, 1), dtype=dtype)
+        row_has_one_site = any(one_site_terms[row][c] for c in range(n_cols))
+        row_has_horizontal = any(horizontal_terms[row][c] for c in range(n_cols - 1))
+        row_has_vertical = row < n_rows - 1 and any(
+            vertical_terms[row][c] for c in range(n_cols)
+        )
+        row_has_plaquette = row < n_rows - 1 and any(
+            plaquette_terms[row][c] for c in range(n_cols - 1)
+        )
+        eff_row = None
+        eff_row_next = None
+        if row_has_one_site or row_has_horizontal or row_has_vertical:
+            eff_row = [
+                _assemble_site(tensors, h_links, v_links, row, c)
+                for c in range(n_cols)
+            ]
+        if row_has_vertical:
+            eff_row_next = [
+                _assemble_site(tensors, h_links, v_links, row + 1, c)
+                for c in range(n_cols)
+            ]
         for c in range(n_cols):
-            env_grad = _compute_single_gradient(
-                left_env, right_envs[c], top_env[c], bottom_env[c]
-            )
-            if collect_grads:
-                env_grads[row][c] = env_grad
             site_terms = one_site_terms[row][c]
-            if site_terms:
-                eff = _assemble_site(tensors, h_links, v_links, row, c)
-                amps_site = jnp.einsum("pudlr,udlr->p", eff, env_grad)
-                spin_idx = sites[row, c]
-                for term in site_terms:
-                    energy = energy + jnp.dot(term.op[:, spin_idx], amps_site) / amp
+            need_env_grad = collect_grads or site_terms
+            if need_env_grad:
+                env_grad = _compute_single_gradient(
+                    left_env, right_envs[c], top_env[c], bottom_env[c]
+                )
+                if collect_grads:
+                    env_grads[row][c] = env_grad
+                if site_terms:
+                    amps_site = jnp.einsum("pudlr,udlr->p", eff_row[c], env_grad)
+                    spin_idx = sites[row, c]
+                    for term in site_terms:
+                        energy = energy + jnp.dot(term.op[:, spin_idx], amps_site) / amp
             if c < n_cols - 1:
                 edge_terms = horizontal_terms[row][c]
                 if edge_terms:
-                    eff0 = _assemble_site(tensors, h_links, v_links, row, c)
-                    eff1 = _assemble_site(tensors, h_links, v_links, row, c + 1)
                     env_2site = _compute_2site_horizontal_env(
                         left_env,
                         right_envs[c + 1],
@@ -480,8 +496,8 @@ def _compute_all_env_grads_and_energy_gi(
                     )
                     amps_edge = jnp.einsum(
                         "pudlr,qverx,udlvex->pq",
-                        eff0,
-                        eff1,
+                        eff_row[c],
+                        eff_row[c + 1],
                         env_2site,
                     )
                     spin0 = sites[row, c]
@@ -495,17 +511,18 @@ def _compute_all_env_grads_and_energy_gi(
             row_mpo_next = _build_row_mpo_gi(
                 tensors, sites, h_links, v_links, row + 1, n_cols
             )
-            if has_row_pair:
+            if row_has_vertical or row_has_plaquette:
                 bottom_env_next = bottom_envs[row + 1]
-                if has_vertical:
-                    eff_row = [
-                        _assemble_site(tensors, h_links, v_links, row, c)
-                        for c in range(n_cols)
-                    ]
-                    eff_row_next = [
-                        _assemble_site(tensors, h_links, v_links, row + 1, c)
-                        for c in range(n_cols)
-                    ]
+                transfers_2row = [
+                    _contract_column_transfer_2row(
+                        top_env[c], row_mpo[c], row_mpo_next[c], bottom_env_next[c]
+                    )
+                    for c in range(n_cols)
+                ]
+                right_envs_2row = _compute_right_envs_2row(
+                    transfers_2row, transfers_2row[0].dtype
+                )
+                if row_has_vertical:
                     energy = energy + _compute_row_pair_vertical_energy(
                         top_env,
                         bottom_env_next,
@@ -518,17 +535,10 @@ def _compute_all_env_grads_and_energy_gi(
                         vertical_terms[row],
                         amp,
                         phys_dim,
+                        transfers_2row=transfers_2row,
+                        right_envs_2row=right_envs_2row,
                     )
-                if has_plaquette:
-                    transfers_2row = [
-                        _contract_column_transfer_2row(
-                            top_env[c], row_mpo[c], row_mpo_next[c], bottom_env_next[c]
-                        )
-                        for c in range(n_cols)
-                    ]
-                    right_envs_2row = _compute_right_envs_2row(
-                        transfers_2row, transfers_2row[0].dtype
-                    )
+                if row_has_plaquette:
                     left_env_2row = jnp.ones((1, 1, 1, 1), dtype=transfers_2row[0].dtype)
                     for c in range(n_cols - 1):
                         plaquette_here = plaquette_terms[row][c]

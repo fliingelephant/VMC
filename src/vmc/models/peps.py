@@ -354,19 +354,26 @@ def _compute_row_pair_vertical_energy(
     terms_row: list[list],
     amp: jax.Array,
     phys_dim: int,
+    *,
+    transfers_2row: list[jax.Array] | None = None,
+    right_envs_2row: list[jax.Array] | None = None,
 ) -> jax.Array:
     """Compute vertical 2-site energy contributions for a row pair."""
     if not any(terms_row):
         return jnp.zeros((), dtype=amp.dtype)
     n_cols = len(mpo_row0)
-    dtype = mpo_row0[0].dtype
-    transfers = [
-        _contract_column_transfer_2row(
-            top_mps[c], mpo_row0[c], mpo_row1[c], bottom_mps[c]
+    if transfers_2row is None:
+        transfers_2row = [
+            _contract_column_transfer_2row(
+                top_mps[c], mpo_row0[c], mpo_row1[c], bottom_mps[c]
+            )
+            for c in range(n_cols)
+        ]
+    if right_envs_2row is None:
+        right_envs_2row = _compute_right_envs_2row(
+            transfers_2row, transfers_2row[0].dtype
         )
-        for c in range(n_cols)
-    ]
-    right_envs = _compute_right_envs_2row(transfers, dtype)
+    dtype = transfers_2row[0].dtype
     left_env = jnp.ones((1, 1, 1, 1), dtype=dtype)
     energy = jnp.zeros((), dtype=amp.dtype)
     for c in range(n_cols):
@@ -379,7 +386,7 @@ def _compute_row_pair_vertical_energy(
                 "aceg,abcdefghpq,bdfh->pq",
                 left_env,
                 transfer_open,
-                right_envs[c],
+                right_envs_2row[c],
             )
             spin0 = spins_row0[c]
             spin1 = spins_row1[c]
@@ -387,7 +394,7 @@ def _compute_row_pair_vertical_energy(
             amps_flat = amps_edge.reshape(-1)
             for term in col_terms:
                 energy = energy + jnp.dot(term.op[:, col_idx], amps_flat) / amp
-        left_env = _contract_left_partial_2row(left_env, transfers[c])
+        left_env = _contract_left_partial_2row(left_env, transfers_2row[c])
     return energy
 
 
@@ -476,17 +483,19 @@ def _compute_all_env_grads_and_energy(
         right_envs = _compute_right_envs(transfers, dtype)
         left_env = jnp.ones((1, 1, 1), dtype=dtype)
         for c in range(n_cols):
-            env_grad = _compute_single_gradient(
-                left_env, right_envs[c], top_env[c], bottom_env[c]
-            )
-            if collect_grads:
-                env_grads[row][c] = env_grad
             site_terms = one_site_terms[row][c]
-            if site_terms:
-                amps_site = jnp.einsum("pudlr,udlr->p", tensors[row][c], env_grad)
-                spin_idx = spins[row, c]
-                for term in site_terms:
-                    energy = energy + jnp.dot(term.op[:, spin_idx], amps_site) / amp
+            need_env_grad = collect_grads or site_terms
+            if need_env_grad:
+                env_grad = _compute_single_gradient(
+                    left_env, right_envs[c], top_env[c], bottom_env[c]
+                )
+                if collect_grads:
+                    env_grads[row][c] = env_grad
+                if site_terms:
+                    amps_site = jnp.einsum("pudlr,udlr->p", tensors[row][c], env_grad)
+                    spin_idx = spins[row, c]
+                    for term in site_terms:
+                        energy = energy + jnp.dot(term.op[:, spin_idx], amps_site) / amp
             if c < n_cols - 1:
                 edge_terms = horizontal_terms[row][c]
                 if edge_terms:

@@ -162,7 +162,7 @@ class GIPEPS(nnx.Module):
         nd = jnp.pad(v_links, ((0, 1), (0, 0)), constant_values=0)
         div = (nl + nu - nr - nd) % self.N
         charge = (self.Qx - div) % self.N
-        keys = jax.random.split(site_key, n_rows * n_cols).reshape((n_rows, n_cols, -1))
+        keys = jax.random.split(site_key, n_rows * n_cols).reshape((n_rows, n_cols))
         sites = jax.vmap(
             lambda row_keys, row_charge: jax.vmap(
                 _sample_site_index_for_charge, in_axes=(0, 0, None, None)

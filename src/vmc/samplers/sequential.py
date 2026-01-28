@@ -26,7 +26,7 @@ from vmc.models.peps import (
 )
 from vmc.operators import LocalHamiltonian, bucket_terms
 from vmc.utils.smallo import params_per_site as params_per_site_fn
-from vmc.utils.utils import occupancy_to_spin, spin_to_occupancy
+from vmc.utils.utils import occupancy_to_spin
 from vmc.utils.vmc_utils import local_estimate
 
 __all__ = [
@@ -302,7 +302,7 @@ def sequential_sample(
         lambda s: _peps_bottom_envs(tensors, s, shape, model.strategy)
     )(spins)
 
-    def sweep_with_envs(spins, chain_keys, bottom_envs, collect_top_envs):
+    def sweep_with_envs(spins, chain_keys, bottom_envs, collect_top_envs, return_amp):
         def sweep_single(s, key, envs):
             return _peps_sequential_sweep_with_envs(
                 tensors,
@@ -312,7 +312,7 @@ def sequential_sample(
                 key,
                 envs,
                 collect_top_envs,
-                collect_top_envs,
+                return_amp,
             )
 
         return jax.vmap(sweep_single, in_axes=(0, 0, 0))(
@@ -320,7 +320,7 @@ def sequential_sample(
         )
 
     spins, chain_keys, bottom_envs = _run_burn_in_with_envs(
-        sweep_with_envs,
+        lambda s, k, e, c: sweep_with_envs(s, k, e, c, False),
         lambda s: _peps_bottom_envs(tensors, s, shape, model.strategy),
         spins,
         chain_keys,
@@ -331,7 +331,7 @@ def sequential_sample(
     def sample_step(carry, _):
         spins, chain_keys, bottom_envs = carry
         spins, chain_keys, _, _ = sweep_with_envs(
-            spins, chain_keys, bottom_envs, False
+            spins, chain_keys, bottom_envs, False, False
         )
         bottom_envs = jax.vmap(
             lambda s: _peps_bottom_envs(tensors, s, shape, model.strategy)
@@ -544,7 +544,6 @@ def sequential_sample_with_gradients(
     n_rows, n_cols = shape
     n_sites = int(n_rows * n_cols)
     tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
-    bond_dim = model.bond_dim
     params_per_site = tuple(int(p) for p in params_per_site_fn(model))
 
     key, chain_key = jax.random.split(key)
@@ -554,7 +553,7 @@ def sequential_sample_with_gradients(
         lambda s: _peps_bottom_envs(tensors, s, shape, model.strategy)
     )(spins)
 
-    def sweep_with_envs(spins, chain_keys, bottom_envs, collect_top_envs):
+    def sweep_with_envs(spins, chain_keys, bottom_envs, collect_top_envs, return_amp):
         def sweep_single(s, key, envs):
             return _peps_sequential_sweep_with_envs(
                 tensors,
@@ -564,7 +563,7 @@ def sequential_sample_with_gradients(
                 key,
                 envs,
                 collect_top_envs,
-                collect_top_envs,
+                return_amp,
             )
 
         return jax.vmap(sweep_single, in_axes=(0, 0, 0))(
@@ -572,7 +571,7 @@ def sequential_sample_with_gradients(
         )
 
     spins, chain_keys, bottom_envs = _run_burn_in_with_envs(
-        sweep_with_envs,
+        lambda s, k, e, c: sweep_with_envs(s, k, e, c, False),
         lambda s: _peps_bottom_envs(tensors, s, shape, model.strategy),
         spins,
         chain_keys,
@@ -602,31 +601,28 @@ def sequential_sample_with_gradients(
         ]
         return jnp.concatenate(grad_parts), jnp.concatenate(p_parts)
 
-    diagonal_terms, one_site_terms, horizontal_terms, vertical_terms = bucket_terms(
+    diagonal_terms, one_site_terms, horizontal_terms, vertical_terms, _ = bucket_terms(
         operator.terms, shape
     )
 
     def sample_step(carry, _):
         spins, chain_keys, bottom_envs = carry
-        spins, chain_keys, aux, amp = sweep_with_envs(
-            spins, chain_keys, bottom_envs, True
+        spins, chain_keys, _, amp = sweep_with_envs(
+            spins, chain_keys, bottom_envs, False, True
         )
-        top_envs, row_mpos = aux
         env_grads, local_energy, bottom_envs_next = jax.vmap(
-            lambda s, a, t, m: _compute_all_env_grads_and_energy(
+            lambda s, a: _compute_all_env_grads_and_energy(
                 tensors,
                 s,
                 a,
                 shape,
                 model.strategy,
-                t,
-                row_mpos=m,
                 diagonal_terms=diagonal_terms,
                 one_site_terms=one_site_terms,
                 horizontal_terms=horizontal_terms,
                 vertical_terms=vertical_terms,
             )
-        )(spins, amp, top_envs, row_mpos)
+        )(spins, amp)
         if full_gradient:
             grad_row = jax.vmap(flatten_full_gradients)(env_grads, spins)
             p_row = jnp.zeros((amp.shape[0], 0), dtype=jnp.int8)
@@ -696,14 +692,13 @@ def _peps_sequential_sweep_with_envs(
 ) -> tuple[jax.Array, jax.Array, tuple, jax.Array]:
     """Run one sequential Metropolis sweep over PEPS sites.
 
-    Returns updated spins, key, (top_envs, row_mpos) when requested, and amplitude
+    Returns updated spins, key, top environments when requested, and amplitude
     if ``return_amp`` is True.
     """
     n_rows, n_cols = shape
     dtype = tensors[0][0].dtype
 
     top_envs = [] if collect_top_envs else ()
-    row_mpos = [] if collect_top_envs else ()
     top_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
     for row in range(n_rows):
         if collect_top_envs:
@@ -756,13 +751,11 @@ def _peps_sequential_sweep_with_envs(
             updated_row.append(mpo_sel)
             left_env = _contract_left_partial(left_env, transfer)
 
-        if collect_top_envs:
-            row_mpos.append(tuple(updated_row))
         # Update top boundary with the updated row (reuse environments in sweep).
         top_env = strategy.apply(top_env, tuple(updated_row))
 
     amp = _contract_bottom(top_env) if return_amp else jnp.zeros((), dtype=dtype)
-    aux = (top_envs, row_mpos) if collect_top_envs else ()
+    aux = top_envs if collect_top_envs else ()
     return spins, key, aux, amp
 
 

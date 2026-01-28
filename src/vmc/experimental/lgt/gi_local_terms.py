@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
 
-from vmc.operators.local_terms import DiagonalTerm
+from vmc.operators.local_terms import DiagonalTerm, LocalTerm
 
 
 @jax.tree_util.register_pytree_node_class
@@ -40,18 +40,19 @@ class LinkDiagonalTerm(DiagonalTerm):
 
 @jax.tree_util.register_pytree_node_class
 @dataclass(frozen=True)
-class PlaquetteTerm:
-    """Plaquette term coefficient for U_p + U_p^dagger."""
+class MatterMassTerm(DiagonalTerm):
+    """Matter mass term m_x n_x (diagonal on the matter site)."""
 
-    coeff: float
-
-    def tree_flatten(self):
-        return (jnp.asarray(self.coeff),), ()
-
-    @classmethod
-    def tree_unflatten(cls, aux_data, children):
-        (coeff,) = children
-        return cls(coeff=coeff)
+    def __init__(
+        self,
+        *,
+        row: int,
+        col: int,
+        coeff: float,
+        charge_of_site: tuple[int, ...],
+    ) -> None:
+        diag = jnp.asarray(charge_of_site, dtype=jnp.int32) * jnp.asarray(coeff)
+        super().__init__(sites=((row, col),), diag=diag)
 
 
 @jax.tree_util.register_pytree_node_class
@@ -60,17 +61,16 @@ class GILocalHamiltonian:
     """Local Hamiltonian container for GI-PEPS."""
 
     shape: tuple[int, int]
-    electric_terms: tuple[LinkDiagonalTerm, ...]
-    plaquette: PlaquetteTerm
+    terms: tuple[LocalTerm, ...] = ()
 
     def tree_flatten(self):
-        return (self.electric_terms, self.plaquette), (self.shape,)
+        return (self.terms,), (self.shape,)
 
     @classmethod
     def tree_unflatten(cls, aux_data, children):
-        (electric_terms, plaquette) = children
+        (terms,) = children
         (shape,) = aux_data
-        return cls(shape=shape, electric_terms=electric_terms, plaquette=plaquette)
+        return cls(shape=shape, terms=terms)
 
 
 def build_electric_terms(

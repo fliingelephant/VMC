@@ -16,7 +16,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from vmc.utils.utils import occupancy_to_spin, random_tensor, spin_to_occupancy
+from vmc.utils.utils import random_tensor, spin_to_occupancy
 
 if TYPE_CHECKING:
     from jax.typing import DTypeLike
@@ -434,9 +434,7 @@ def _compute_all_env_grads_and_energy(
     amp: jax.Array,
     shape: tuple[int, int],
     strategy: ContractionStrategy,
-    top_envs: list[tuple],
     *,
-    row_mpos: list[tuple] | None = None,
     diagonal_terms: list,
     one_site_terms: list[list[list]],
     horizontal_terms: list[list[list]],
@@ -454,7 +452,6 @@ def _compute_all_env_grads_and_energy(
         else []
     )
     bottom_envs = [None for _ in range(n_rows)]
-    row_mpos_local = row_mpos or [None for _ in range(n_rows)]
     energy = jnp.zeros((), dtype=amp.dtype)
     for term in diagonal_terms:
         idx = jnp.asarray(0, dtype=jnp.int32)
@@ -465,21 +462,22 @@ def _compute_all_env_grads_and_energy(
     bottom_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
     for row in range(n_rows - 1, -1, -1):
         bottom_envs[row] = bottom_env
-        if row_mpos is None:
-            mpo = _build_row_mpo(tensors, spins[row], row, n_cols)
-            row_mpos_local[row] = mpo
-        else:
-            mpo = row_mpos[row]
+        mpo = _build_row_mpo(tensors, spins[row], row, n_cols)
+        bottom_env = _apply_mpo_from_below(bottom_env, mpo, strategy)
 
+    top_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
+    mpo = _build_row_mpo(tensors, spins[0], 0, n_cols)
+    for row in range(n_rows):
+        bottom_env = bottom_envs[row]
         transfers = [
-            _contract_column_transfer(top_envs[row][c], mpo[c], bottom_env[c])
+            _contract_column_transfer(top_env[c], mpo[c], bottom_env[c])
             for c in range(n_cols)
         ]
         right_envs = _compute_right_envs(transfers, dtype)
         left_env = jnp.ones((1, 1, 1), dtype=dtype)
         for c in range(n_cols):
             env_grad = _compute_single_gradient(
-                left_env, right_envs[c], top_envs[row][c], bottom_env[c]
+                left_env, right_envs[c], top_env[c], bottom_env[c]
             )
             if collect_grads:
                 env_grads[row][c] = env_grad
@@ -495,9 +493,9 @@ def _compute_all_env_grads_and_energy(
                     env_2site = _compute_2site_horizontal_env(
                         left_env,
                         right_envs[c + 1],
-                        top_envs[row][c],
+                        top_env[c],
                         bottom_env[c],
-                        top_envs[row][c + 1],
+                        top_env[c + 1],
                         bottom_env[c + 1],
                     )
                     amps_edge = jnp.einsum(
@@ -513,22 +511,24 @@ def _compute_all_env_grads_and_energy(
                     for term in edge_terms:
                         energy = energy + jnp.dot(term.op[:, col_idx], amps_flat) / amp
             left_env = _contract_left_partial(left_env, transfers[c])
-        bottom_env = _apply_mpo_from_below(bottom_env, mpo, strategy)
-
-    for row in range(n_rows - 1):
-        energy = energy + _compute_row_pair_vertical_energy(
-            top_envs[row],
-            bottom_envs[row + 1],
-            row_mpos_local[row],
-            row_mpos_local[row + 1],
-            tensors[row],
-            tensors[row + 1],
-            spins[row],
-            spins[row + 1],
-            vertical_terms[row],
-            amp,
-            phys_dim,
-        )
+        if row < n_rows - 1:
+            mpo_next = _build_row_mpo(tensors, spins[row + 1], row + 1, n_cols)
+            energy = energy + _compute_row_pair_vertical_energy(
+                top_env,
+                bottom_envs[row + 1],
+                mpo,
+                mpo_next,
+                tensors[row],
+                tensors[row + 1],
+                spins[row],
+                spins[row + 1],
+                vertical_terms[row],
+                amp,
+                phys_dim,
+            )
+        top_env = strategy.apply(top_env, mpo)
+        if row < n_rows - 1:
+            mpo = mpo_next
 
     return env_grads, energy, bottom_envs
 

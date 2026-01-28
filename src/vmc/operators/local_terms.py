@@ -13,6 +13,7 @@ __all__ = [
     "DiagonalTerm",
     "HorizontalTwoSiteTerm",
     "VerticalTwoSiteTerm",
+    "PlaquetteTerm",
     "LocalHamiltonian",
     "bucket_terms",
 ]
@@ -123,6 +124,28 @@ class VerticalTwoSiteTerm(LocalTerm):
 
 @jax.tree_util.register_pytree_node_class
 @dataclass(frozen=True)
+class PlaquetteTerm(LocalTerm):
+    """Plaquette term on the square with top-left corner at (row, col)."""
+
+    row: int
+    col: int
+    coeff: jax.Array
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "coeff", jnp.asarray(self.coeff))
+
+    def tree_flatten(self):
+        return (self.coeff,), (self.row, self.col)
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        (coeff,) = children
+        row, col = aux_data
+        return cls(row=row, col=col, coeff=coeff)
+
+
+@jax.tree_util.register_pytree_node_class
+@dataclass(frozen=True)
 class LocalHamiltonian:
     """Container for local PEPS operator terms."""
 
@@ -147,12 +170,17 @@ def bucket_terms(
     list[list[list[OneSiteTerm]]],
     list[list[list[HorizontalTwoSiteTerm]]],
     list[list[list[VerticalTwoSiteTerm]]],
+    list[list[list[PlaquetteTerm]]],
 ]:
     """Group terms by type and lattice location."""
     n_rows, n_cols = shape
     one_site_terms = [[[] for _ in range(n_cols)] for _ in range(n_rows)]
     horizontal_terms = [[[] for _ in range(max(n_cols - 1, 0))] for _ in range(n_rows)]
     vertical_terms = [[[] for _ in range(n_cols)] for _ in range(max(n_rows - 1, 0))]
+    plaquette_terms = [
+        [[] for _ in range(max(n_cols - 1, 0))]
+        for _ in range(max(n_rows - 1, 0))
+    ]
     diagonal_terms: list[DiagonalTerm] = []
 
     for term in terms:
@@ -164,7 +192,9 @@ def bucket_terms(
             vertical_terms[term.row][term.col].append(term)
         elif isinstance(term, DiagonalTerm):
             diagonal_terms.append(term)
+        elif isinstance(term, PlaquetteTerm):
+            plaquette_terms[term.row][term.col].append(term)
         else:
             raise TypeError(f"Unsupported term type: {type(term)!r}")
 
-    return diagonal_terms, one_site_terms, horizontal_terms, vertical_terms
+    return diagonal_terms, one_site_terms, horizontal_terms, vertical_terms, plaquette_terms

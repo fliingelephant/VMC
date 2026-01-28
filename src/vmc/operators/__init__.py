@@ -7,6 +7,7 @@ from vmc.operators.local_terms import (
     HorizontalTwoSiteTerm,
     LocalTerm,
     OneSiteTerm,
+    PlaquetteTerm,
     VerticalTwoSiteTerm,
     bucket_terms,
 )
@@ -17,6 +18,7 @@ __all__ = [
     "HorizontalTwoSiteTerm",
     "LocalTerm",
     "OneSiteTerm",
+    "PlaquetteTerm",
     "VerticalTwoSiteTerm",
     "bucket_terms",
 ]

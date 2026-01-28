@@ -114,7 +114,7 @@ def local_estimate(
     amps = jnp.asarray(amps)
     shape = model.shape
     n_rows, n_cols = shape
-    diagonal_terms, one_site_terms, horizontal_terms, vertical_terms = bucket_terms(
+    diagonal_terms, one_site_terms, horizontal_terms, vertical_terms, _ = bucket_terms(
         operator.terms, shape
     )
     has_diag = bool(diagonal_terms)
@@ -142,27 +142,14 @@ def local_estimate(
         return jax.vmap(diag_only)(samples)
 
     tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
-    dtype = tensors[0][0].dtype
-
     def per_sample(sample, amp):
         spins = spin_to_occupancy(sample).reshape(shape)
-        row_mpos = [
-            _build_row_mpo(tensors, spins[row], row, n_cols)
-            for row in range(n_rows)
-        ]
-        boundary = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
-        top_envs = []
-        for row in range(n_rows):
-            top_envs.append(boundary)
-            boundary = model.strategy.apply(boundary, row_mpos[row])
         _, energy, _ = _compute_all_env_grads_and_energy(
             tensors,
             spins,
             amp,
             shape,
             model.strategy,
-            top_envs,
-            row_mpos=row_mpos,
             diagonal_terms=diagonal_terms,
             one_site_terms=one_site_terms,
             horizontal_terms=horizontal_terms,

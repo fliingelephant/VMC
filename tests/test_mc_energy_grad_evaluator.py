@@ -48,12 +48,16 @@ def _mc_energy_and_grad(
     burn_in: int,
     key: jax.Array,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    key, init_key = jax.random.split(key)
     samples = sequential_sample(
         model,
         n_samples=n_samples,
         n_chains=n_chains,
         burn_in=burn_in,
         key=key,
+        initial_configuration=model.random_physical_configuration(
+            init_key, n_samples=n_chains
+        ),
     )
     amps, grads, _ = _value_and_grad(model, samples, full_gradient=True)
     local = local_estimate(model, samples, operator, amps)

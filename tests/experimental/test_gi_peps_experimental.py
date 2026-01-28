@@ -103,16 +103,15 @@ class GIPEPSTest(unittest.TestCase):
                     )
                     key = jax.random.key(idx)
                     key, init_key = jax.random.split(key)
-                    initial_configuration = model.random_physical_configuration(
-                        init_key, n_samples=n_chains
-                    )
                     samples, grads, _, _, _, amps, energies = sequential_sample_with_gradients(
                         model,
                         operator,
                         n_samples=3,
                         n_chains=n_chains,
                         key=key,
-                        initial_configuration=initial_configuration,
+                        initial_configuration=model.random_physical_configuration(
+                            init_key, n_samples=n_chains
+                        ),
                         burn_in=1,
                         full_gradient=True,
                     )
@@ -150,16 +149,15 @@ class GIPEPSTest(unittest.TestCase):
         )
         key = jax.random.key(0)
         key, init_key = jax.random.split(key)
-        initial_configuration = model.random_physical_configuration(
-            init_key, n_samples=1
-        )
         samples, grads, _, _, _, amps, _ = sequential_sample_with_gradients(
             model,
             operator,
             n_samples=20,
             n_chains=1,
             key=key,
-            initial_configuration=initial_configuration,
+            initial_configuration=model.random_physical_configuration(
+                init_key, n_samples=1
+            ),
             burn_in=1,
             full_gradient=True,
         )
@@ -203,16 +201,15 @@ class GIPEPSTest(unittest.TestCase):
         )
         key = jax.random.key(1)
         key, init_key = jax.random.split(key)
-        initial_configuration = model.random_physical_configuration(
-            init_key, n_samples=1
-        )
         samples, grads, _, _, _, amps, _ = sequential_sample_with_gradients(
             model,
             operator,
             n_samples=2,
             n_chains=1,
             key=key,
-            initial_configuration=initial_configuration,
+            initial_configuration=model.random_physical_configuration(
+                init_key, n_samples=1
+            ),
             burn_in=1,
             full_gradient=True,
         )

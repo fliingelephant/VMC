@@ -135,16 +135,15 @@ class SequentialSamplingTest(unittest.TestCase):
                 probs /= probs.sum()
                 key = jax.random.key(seed)
                 key, init_key = jax.random.split(key)
-                initial_configuration = model.random_physical_configuration(
-                    init_key, n_samples=n_chains
-                )
                 samples = sequential_sample(
                     model,
                     n_samples=self.SAMPLES,
                     n_chains=n_chains,
                     burn_in=self.BURN_IN,
                     key=key,
-                    initial_configuration=initial_configuration,
+                    initial_configuration=model.random_physical_configuration(
+                        init_key, n_samples=n_chains
+                    ),
                 )
                 indices = jnp.sum(samples * weights, axis=-1).astype(jnp.int32)
                 empirical = jnp.bincount(indices, length=2**self.N_SITES) / samples.shape[0]

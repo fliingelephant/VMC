@@ -74,8 +74,16 @@ class DynamicsDriverTest(unittest.TestCase):
         return driver, vstate
 
     def _energy_stats(self, model, hamiltonian, *, key, n_samples: int):
-        samples, key = sequential_sample(
-            model, n_samples=n_samples, n_chains=self.N_CHAINS, burn_in=self.BURN_IN, key=key, return_key=True,
+        key, init_key = jax.random.split(key)
+        samples = sequential_sample(
+            model,
+            n_samples=n_samples,
+            n_chains=self.N_CHAINS,
+            burn_in=self.BURN_IN,
+            key=key,
+            initial_configuration=model.random_physical_configuration(
+                init_key, n_samples=self.N_CHAINS
+            ),
         )
         amps = _value(model, samples)
         local_energies = local_estimate(model, samples, hamiltonian, amps)

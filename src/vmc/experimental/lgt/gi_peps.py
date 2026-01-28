@@ -57,6 +57,11 @@ class GIPEPS(nnx.Module):
         self.charge_to_indices, self.charge_deg = _build_charge_index_map(
             self.charge_of_site, self.N
         )
+        # NOTE: charge_deg counts physical-state multiplicity per charge; it is
+        # unrelated to degeneracy_per_charge (virtual bond-sector dimension).
+        # TODO: rename charge_deg to avoid confusion with virtual degeneracy.
+        if bool(jnp.any(self.charge_deg <= 0)):
+            raise ValueError("charge_of_site must include all charges 0..N-1.")
         self.dmax = config.dmax
         self.dtype = config.dtype
         self.strategy = contraction_strategy

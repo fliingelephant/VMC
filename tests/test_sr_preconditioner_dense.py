@@ -29,13 +29,15 @@ class SRPreconditionerDenseTest(unittest.TestCase):
         )
         model = MPS(rngs=nnx.Rngs(0), n_sites=n_sites, bond_dim=bond_dim)
 
-        key = jax.random.key(0)
         samples = sequential_sample(
             model,
             n_samples=512,
             n_chains=8,
             burn_in=30,
-            key=key,
+            key=jax.random.key(0),
+            initial_configuration=model.random_physical_configuration(
+                jax.random.key(1), n_samples=8
+            ),
         )
         amps, grads_sliced, p = _value_and_grad(
             model, samples, full_gradient=False

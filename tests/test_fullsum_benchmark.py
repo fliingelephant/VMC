@@ -50,7 +50,16 @@ class FullSumBenchmarkTest(unittest.TestCase):
         )
         fs_state = nk.vqs.FullSumState(hi, model)
 
-        samples = sequential_sample(model, n_samples=self.N_SAMPLES_MPS, n_chains=self.N_CHAINS, burn_in=self.BURN_IN, key=jax.random.key(self.SEED))
+        samples = sequential_sample(
+            model,
+            n_samples=self.N_SAMPLES_MPS,
+            n_chains=self.N_CHAINS,
+            burn_in=self.BURN_IN,
+            key=jax.random.key(self.SEED),
+            initial_configuration=model.random_physical_configuration(
+                jax.random.key(self.SEED + 1), n_samples=self.N_CHAINS
+            ),
+        )
         amps = _value(model, samples)
         local_energies = local_estimate(model, samples, hamiltonian, amps)
         chain_length = self.N_SAMPLES_MPS // self.N_CHAINS
@@ -107,7 +116,16 @@ class FullSumBenchmarkTest(unittest.TestCase):
         )
         fs_state = nk.vqs.FullSumState(hi, model)
 
-        samples = sequential_sample(model, n_samples=self.N_SAMPLES_PEPS, n_chains=self.N_CHAINS, burn_in=self.BURN_IN, key=jax.random.key(self.SEED))
+        samples = sequential_sample(
+            model,
+            n_samples=self.N_SAMPLES_PEPS,
+            n_chains=self.N_CHAINS,
+            burn_in=self.BURN_IN,
+            key=jax.random.key(self.SEED),
+            initial_configuration=model.random_physical_configuration(
+                jax.random.key(self.SEED + 1), n_samples=self.N_CHAINS
+            ),
+        )
         amps = _value(model, samples)
         local_energies = local_estimate(model, samples, local_operator, amps)
         chain_length = self.N_SAMPLES_PEPS // self.N_CHAINS

@@ -18,6 +18,7 @@ from vmc.core import _value, _value_and_grad
 from vmc.drivers import DynamicsDriver, ImaginaryTimeUnit
 from vmc.models.mps import MPS
 from vmc.models.peps import NoTruncation, PEPS
+from vmc.utils.utils import spin_to_occupancy
 from vmc.utils.vmc_utils import local_estimate
 
 logger = logging.getLogger(__name__)
@@ -31,7 +32,7 @@ def _kron_all(mats: list[np.ndarray]) -> np.ndarray:
 
 
 def _exact_sampler_with_gradients(
-    states: jax.Array,
+    states_spin: jax.Array,
     model,
     operator,
     *,
@@ -40,6 +41,8 @@ def _exact_sampler_with_gradients(
     initial_configuration: jax.Array | None = None,
 ):
     del (initial_configuration, n_samples)
+    # Convert spin format (±1) to occupancy format (0/1) for model evaluation
+    states = spin_to_occupancy(states_spin)
     amps_full = _value(model, states)
     mask = jnp.abs(amps_full) > 1e-12
     samples = states[mask]
@@ -47,6 +50,7 @@ def _exact_sampler_with_gradients(
         model, samples, full_gradient=True
     )
     o = grads / amps[:, None]
+    # local_estimate expects occupancy samples (converts to spin internally for operator)
     local_energies = local_estimate(model, samples, operator, amps)
     return samples, o, None, key, None, amps, local_energies
 
@@ -96,14 +100,17 @@ class ExactSRPreconditioner:
 
 def _exact_energy_from_samples(
     model,
-    states: jax.Array,
+    states_spin: jax.Array,
     operator: nk.operator.AbstractOperator,
 ) -> jax.Array:
+    # Convert spin format (±1) to occupancy format (0/1) for model evaluation
+    states = spin_to_occupancy(states_spin)
     amps = _value(model, states)
     probs = jnp.abs(amps) ** 2
     mask = probs > 1e-12
     probs = probs[mask]
     probs = probs / jnp.sum(probs)
+    # local_estimate expects occupancy samples (converts to spin internally for operator)
     local = local_estimate(model, states[mask], operator, amps[mask])
     return jnp.sum(probs * local)
 

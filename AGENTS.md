@@ -27,6 +27,7 @@ Use a **hybrid approach**: ABCs for type hierarchies + plum `@dispatch` for mult
 - **Let it crash.** Avoid defensive parameter checks (e.g., `if _value_and_grad is None`); assume correct wiring and let errors surface.
 - **Sampling gradients.** When a sampler records gradients, compute value+Jacobian for each proposal together and keep gradients only for accepted proposals.
 - **Uncertain correctness.** Implementation might be totally incorrect; for uncertain behavior, refer to notes or ask the user.
+- **Occupancy format by default.** Use occupancy (0/1) internally. Only convert to spin (±1) when interacting with NetKet's API (e.g., `get_conn_padded`, matching NetKet's results). Think twice about format conversions at API boundaries.
 - **Think twice.** For complicated or important algorithms, think twice before implementing.
 - **Julia-style defaults (IMPORTANT).** Put defaults in function signature, not body. Use `def foo(x, y=10):` not `def foo(x, y=None): y = y or 10`.
 - **No unnecessary intermediate variables.** Return directly: `return expr` not `result = expr; return result`.

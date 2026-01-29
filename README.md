@@ -2,7 +2,7 @@
 
 # VMC
 
-> **Note:** This project is under active development and not ready for use.
+> **Note:** This repo is under active development and not ready for use.
 
 Variational Monte Carlo dynamics for tensor-network states (MPS/PEPS), implemented with [JAX] primitives and [NetKet] interfaces.
 

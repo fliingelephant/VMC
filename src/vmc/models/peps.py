@@ -16,6 +16,8 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
+from plum import dispatch
+
 from vmc.utils.utils import random_tensor, spin_to_occupancy
 
 if TYPE_CHECKING:
@@ -28,6 +30,11 @@ __all__ = [
     "NoTruncation",
     "ZipUp",
     "DensityMatrix",
+    # Dispatched API functions
+    "bottom_envs",
+    "grads_and_energy",
+    "sweep",
+    "_metropolis_ratio",
     # Internal functions exposed for external use
     "_apply_mpo_from_below",
     "_build_row_mpo",
@@ -35,13 +42,18 @@ __all__ = [
     "_compute_all_row_gradients",
     "_compute_all_env_grads_and_energy",
     "_compute_right_envs",
+    "_compute_right_envs_2row",
     "_compute_2site_horizontal_env",
     "_compute_single_gradient",
     "_contract_bottom",
     "_contract_column_transfer",
+    "_contract_column_transfer_2row",
     "_contract_left_partial",
+    "_contract_left_partial_2row",
     "_contract_right_partial",
+    "_contract_right_partial_2row",
     "_compute_row_pair_vertical_amps",
+    "_compute_row_pair_vertical_energy",
     "_forward_with_cache",
 ]
 
@@ -439,13 +451,14 @@ def _compute_all_env_grads_and_energy(
     amp: jax.Array,
     shape: tuple[int, int],
     strategy: ContractionStrategy,
+    bottom_envs: list[tuple],
     *,
     diagonal_terms: list,
     one_site_terms: list[list[list]],
     horizontal_terms: list[list[list]],
     vertical_terms: list[list[list]],
     collect_grads: bool = True,
-) -> tuple[list[list[jax.Array]], jax.Array, list[tuple]]:
+) -> tuple[list[list[jax.Array]], jax.Array]:
     """Compute gradients and local energy for a PEPS sample."""
     n_rows, n_cols = shape
     dtype = jnp.asarray(tensors[0][0]).dtype
@@ -456,19 +469,12 @@ def _compute_all_env_grads_and_energy(
         if collect_grads
         else []
     )
-    bottom_envs = [None for _ in range(n_rows)]
     energy = jnp.zeros((), dtype=amp.dtype)
     for term in diagonal_terms:
         idx = jnp.asarray(0, dtype=jnp.int32)
         for row, col in term.sites:
             idx = idx * phys_dim + spins[row, col]
         energy = energy + term.diag[idx]
-
-    bottom_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
-    for row in range(n_rows - 1, -1, -1):
-        bottom_envs[row] = bottom_env
-        mpo = _build_row_mpo(tensors, spins[row], row, n_cols)
-        bottom_env = _apply_mpo_from_below(bottom_env, mpo, strategy)
 
     top_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
     mpo = _build_row_mpo(tensors, spins[0], 0, n_cols)
@@ -537,7 +543,7 @@ def _compute_all_env_grads_and_energy(
         if row < n_rows - 1:
             mpo = mpo_next
 
-    return env_grads, energy, bottom_envs
+    return env_grads, energy
 
 
 def _compute_2site_horizontal_env(
@@ -664,6 +670,173 @@ def _peps_apply_bwd(shape, strategy, residuals, g):
 _peps_apply.defvjp(_peps_apply_fwd, _peps_apply_bwd)
 
 
+# =============================================================================
+# Dispatched API Functions (for unified sampler)
+# =============================================================================
+
+
+@dispatch
+def bottom_envs(model: "PEPS", sample: jax.Array) -> list[tuple]:
+    """Compute bottom boundary environments for PEPS.
+
+    Args:
+        model: PEPS model
+        sample: flat sample array (occupancy indices), reshaped to (n_rows, n_cols)
+
+    Returns:
+        List of bottom environments, one per row.
+    """
+    indices = sample.reshape(model.shape)
+    tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
+    n_rows, n_cols = model.shape
+    dtype = tensors[0][0].dtype
+    envs = [None] * n_rows
+    env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
+    for row in range(n_rows - 1, -1, -1):
+        envs[row] = env
+        mpo = _build_row_mpo(tensors, indices[row], row, n_cols)
+        env = _apply_mpo_from_below(env, mpo, model.strategy)
+    return envs
+
+
+@dispatch
+def grads_and_energy(
+    model: "PEPS",
+    sample: jax.Array,
+    amp: jax.Array,
+    operator: Any,
+    envs: list[tuple],
+) -> tuple[list[list[jax.Array]], jax.Array]:
+    """Compute environment gradients and local energy for PEPS.
+
+    Args:
+        model: PEPS model
+        sample: flat sample array (occupancy indices)
+        amp: amplitude for this configuration
+        operator: LocalHamiltonian with terms
+        envs: bottom environments (computed via bottom_envs())
+
+    Returns:
+        (env_grads, energy)
+    """
+    from vmc.operators.local_terms import bucket_terms
+
+    indices = sample.reshape(model.shape)
+    tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
+    diagonal_terms, one_site_terms, horizontal_terms, vertical_terms, _ = bucket_terms(
+        operator.terms, model.shape
+    )
+    return _compute_all_env_grads_and_energy(
+        tensors,
+        indices,
+        amp,
+        model.shape,
+        model.strategy,
+        envs,
+        diagonal_terms=diagonal_terms,
+        one_site_terms=one_site_terms,
+        horizontal_terms=horizontal_terms,
+        vertical_terms=vertical_terms,
+        collect_grads=True,
+    )
+
+
+def _metropolis_ratio(weight_cur: jax.Array, weight_flip: jax.Array) -> jax.Array:
+    """Compute Metropolis acceptance ratio with proper handling of zero weights."""
+    return jnp.where(
+        weight_cur > 0.0,
+        weight_flip / weight_cur,
+        jnp.where(weight_flip > 0.0, jnp.inf, 0.0),
+    )
+
+
+@dispatch
+def sweep(
+    model: "PEPS",
+    sample: jax.Array,
+    key: jax.Array,
+    envs: list[tuple],
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Single Metropolis sweep for PEPS.
+
+    Args:
+        model: PEPS model
+        sample: flat sample array (occupancy indices)
+        key: PRNG key
+        envs: bottom environments from previous iteration
+
+    Returns:
+        (new_sample, key, amp) - flat sample array after sweep
+    """
+    indices = sample.reshape(model.shape)
+    tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
+    n_rows, n_cols = model.shape
+    dtype = tensors[0][0].dtype
+
+    top_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
+    for row in range(n_rows):
+        bottom_env = envs[row]
+        mpo_row = _build_row_mpo(tensors, indices[row], row, n_cols)
+        transfers = [
+            _contract_column_transfer(top_env[col], mpo_row[col], bottom_env[col])
+            for col in range(n_cols)
+        ]
+        right_envs = _compute_right_envs(transfers, dtype)
+        left_env = jnp.ones((1, 1, 1), dtype=dtype)
+        updated_row = []
+        for col in range(n_cols):
+            site_tensor = tensors[row][col]
+            phys_dim = int(site_tensor.shape[0])
+            cur_idx = indices[row, col]
+            if phys_dim == 1:
+                flip_idx = cur_idx
+            elif phys_dim == 2:
+                flip_idx = 1 - cur_idx
+            else:
+                key, flip_key = jax.random.split(key)
+                delta = jax.random.randint(flip_key, (), 1, phys_dim, dtype=jnp.int32)
+                flip_idx = (cur_idx + delta) % phys_dim
+            mpo_flip = jnp.transpose(site_tensor[flip_idx], (2, 3, 0, 1))
+            transfer_cur = transfers[col]
+            transfer_flip = _contract_column_transfer(
+                top_env[col], mpo_flip, bottom_env[col]
+            )
+            amp_cur = jnp.einsum(
+                "ace,abcdef,bdf->", left_env, transfer_cur, right_envs[col]
+            )
+            amp_flip = jnp.einsum(
+                "ace,abcdef,bdf->", left_env, transfer_flip, right_envs[col]
+            )
+            weight_cur = jnp.abs(amp_cur) ** 2
+            weight_flip = jnp.abs(amp_flip) ** 2
+            ratio = _metropolis_ratio(weight_cur, weight_flip)
+
+            key, accept_key = jax.random.split(key)
+            accept = jax.random.uniform(accept_key) < jnp.minimum(1.0, ratio)
+            new_idx = jnp.where(accept, flip_idx, cur_idx)
+            indices = indices.at[row, col].set(new_idx)
+
+            mpo_sel = jax.lax.cond(
+                accept,
+                lambda _: mpo_flip,
+                lambda _: mpo_row[col],
+                operand=None,
+            )
+            transfer = jax.lax.cond(
+                accept,
+                lambda _: transfer_flip,
+                lambda _: transfer_cur,
+                operand=None,
+            )
+            updated_row.append(mpo_sel)
+            left_env = _contract_left_partial(left_env, transfer)
+
+        top_env = model.strategy.apply(top_env, tuple(updated_row))
+
+    amp = _contract_bottom(top_env)
+    return indices.reshape(-1), key, amp
+
+
 class PEPS(nnx.Module):
     """Open-boundary PEPS on a rectangular grid contracted with a boundary MPS.
 
@@ -737,6 +910,11 @@ class PEPS(nnx.Module):
         ]
 
     apply = staticmethod(_peps_apply)
+
+    @staticmethod
+    def unflatten_sample(sample: jax.Array, shape: tuple[int, int]) -> jax.Array:
+        """Unflatten sample to (n_rows, n_cols) indices."""
+        return sample.reshape(shape)
 
     @nnx.jit
     def __call__(self, x: jax.Array) -> jax.Array:

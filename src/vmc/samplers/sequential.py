@@ -15,14 +15,6 @@ from vmc.models.mps import MPS
 from vmc.models.peps import (
     ContractionStrategy,
     PEPS,
-    _apply_mpo_from_below,
-    _build_row_mpo,
-    _compute_all_env_grads_and_energy,
-    _compute_right_envs,
-    _contract_bottom,
-    _contract_column_transfer,
-    _contract_left_partial,
-    _contract_right_partial,
     bottom_envs,
     grads_and_energy,
     sweep,
@@ -38,16 +30,6 @@ __all__ = [
     "peps_sequential_sweep",
 ]
 logger = logging.getLogger(__name__)
-
-def _run_sweeps(sweep_fn, state: jax.Array, key: jax.Array, count: int):
-    def step(carry, _):
-        state, key = carry
-        state, key = sweep_fn(state, key)
-        return (state, key), None
-
-    (state, key), _ = jax.lax.scan(step, (state, key), xs=None, length=count)
-    return state, key
-
 
 def _collect_steps(step_fn, carry, count: int, desc: str):
     if logger.isEnabledFor(logging.INFO):
@@ -76,10 +58,17 @@ def _collect_samples(
     chain_length: int,
     sample_view,
 ):
-    state, chain_keys = _run_sweeps(
-        sweep_batched, state, chain_keys, num_burn_in
+    # Burn-in sweeps (inline _run_sweeps)
+    def burn_step(carry, _):
+        state, key = carry
+        state, key = sweep_batched(state, key)
+        return (state, key), None
+
+    (state, chain_keys), _ = jax.lax.scan(
+        burn_step, (state, chain_keys), xs=None, length=num_burn_in
     )
 
+    # Collect samples
     def sample_step(carry, _):
         state, chain_keys = carry
         state, chain_keys = sweep_batched(state, chain_keys)
@@ -238,6 +227,7 @@ def _sequential_mps_sweep(
     return indices, key
 
 
+@functools.partial(jax.jit, static_argnames=("n_samples", "n_chains", "burn_in"))
 @dispatch
 def sequential_sample(
     model: MPS,
@@ -282,6 +272,7 @@ def sequential_sample(
     return samples
 
 
+@functools.partial(jax.jit, static_argnames=("n_samples", "n_chains", "burn_in"))
 @dispatch
 def sequential_sample(
     model: PEPS,
@@ -339,6 +330,10 @@ def sequential_sample(
     return samples_out
 
 
+@functools.partial(
+    jax.jit,
+    static_argnames=("n_samples", "n_chains", "burn_in", "full_gradient"),
+)
 @dispatch
 def sequential_sample_with_gradients(
     model: MPS,

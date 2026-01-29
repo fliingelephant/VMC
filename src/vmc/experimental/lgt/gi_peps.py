@@ -92,12 +92,19 @@ class GIPEPS(nnx.Module):
         self.dtype = config.dtype
         self.strategy = contraction_strategy
 
+        n_rows, n_cols = self.shape
         tensors: list[list[nnx.Param]] = []
-        for r in range(self.shape[0]):
+        for r in range(n_rows):
             row = []
-            for c in range(self.shape[1]):
-                nc = _site_nc(self.config, r, c)
-                mu_u, mu_d, mu_l, mu_r = _site_mu_dims(self.config, r, c)
+            for c in range(n_cols):
+                # Compute nc (number of gauge-invariant configurations)
+                num_links = int(r > 0) + int(r < n_rows - 1) + int(c > 0) + int(c < n_cols - 1)
+                nc = int(config.N ** max(num_links - 1, 0))
+                # Compute boundary-aware bond dims
+                mu_u = config.dmax if r > 0 else 1
+                mu_d = config.dmax if r < n_rows - 1 else 1
+                mu_l = config.dmax if c > 0 else 1
+                mu_r = config.dmax if c < n_cols - 1 else 1
                 tensor_val = random_tensor(
                     rngs,
                     (self.phys_dim, nc, mu_u, mu_d, mu_l, mu_r),
@@ -373,21 +380,6 @@ def _peps_apply_occupancy_bwd(shape, strategy, residuals, g):
 _peps_apply_occupancy.defvjp(_peps_apply_occupancy_fwd, _peps_apply_occupancy_bwd)
 
 
-def _site_mu_dims(config: GIPEPSConfig, r: int, c: int) -> tuple[int, int, int, int]:
-    n_rows, n_cols = config.shape
-    mu_u = config.dmax if r > 0 else 1
-    mu_d = config.dmax if r < n_rows - 1 else 1
-    mu_l = config.dmax if c > 0 else 1
-    mu_r = config.dmax if c < n_cols - 1 else 1
-    return mu_u, mu_d, mu_l, mu_r
-
-
-def _site_nc(config: GIPEPSConfig, r: int, c: int) -> int:
-    n_rows, n_cols = config.shape
-    num_links = int(r > 0) + int(r < n_rows - 1) + int(c > 0) + int(c < n_cols - 1)
-    return int(config.N ** max(num_links - 1, 0))
-
-
 # =============================================================================
 # GI-PEPS specific helpers
 # =============================================================================
@@ -551,15 +543,13 @@ def grads_and_energy(
         row_has_plaquette = row < n_rows - 1 and any(
             plaquette_terms[row][c] for c in range(n_cols - 1)
         )
-        need_1row_envs = row_has_one_site or row_has_horizontal or True  # Always need for grads
 
-        # 1-row transfers and envs (for gradient + single-site + horizontal)
-        if need_1row_envs:
-            transfers = [
-                _contract_column_transfer(top_env[c], row_mpo[c], bottom_env[c])
-                for c in range(n_cols)
-            ]
-            right_envs = _compute_right_envs(transfers, dtype)
+        # 1-row transfers and envs (always needed for gradients)
+        transfers = [
+            _contract_column_transfer(top_env[c], row_mpo[c], bottom_env[c])
+            for c in range(n_cols)
+        ]
+        right_envs = _compute_right_envs(transfers, dtype)
 
         # Assemble effective tensors if needed
         eff_row = None
@@ -575,50 +565,49 @@ def grads_and_energy(
                 for c in range(n_cols)
             ]
 
-        # Column iteration for 1-row terms
-        if need_1row_envs:
-            left_env = jnp.ones((1, 1, 1), dtype=dtype)
-            for c in range(n_cols):
-                # Gradient
-                env_grad = _compute_single_gradient(
-                    left_env, right_envs[c], top_env[c], bottom_env[c]
-                )
-                env_grads[row][c] = env_grad
+        # Column iteration for gradients + 1-row terms
+        left_env = jnp.ones((1, 1, 1), dtype=dtype)
+        for c in range(n_cols):
+            # Gradient
+            env_grad = _compute_single_gradient(
+                left_env, right_envs[c], top_env[c], bottom_env[c]
+            )
+            env_grads[row][c] = env_grad
 
-                # Single-site energy
-                site_terms = one_site_terms[row][c]
-                if site_terms:
-                    amps_site = jnp.einsum("pudlr,udlr->p", eff_row[c], env_grad)
-                    spin_idx = sites[row, c]
-                    for term in site_terms:
-                        energy = energy + jnp.dot(term.op[:, spin_idx], amps_site) / amp
+            # Single-site energy
+            site_terms = one_site_terms[row][c]
+            if site_terms:
+                amps_site = jnp.einsum("pudlr,udlr->p", eff_row[c], env_grad)
+                spin_idx = sites[row, c]
+                for term in site_terms:
+                    energy = energy + jnp.dot(term.op[:, spin_idx], amps_site) / amp
 
-                # Horizontal energy
-                if c < n_cols - 1:
-                    edge_terms = horizontal_terms[row][c]
-                    if edge_terms:
-                        env_2site = _compute_2site_horizontal_env(
-                            left_env,
-                            right_envs[c + 1],
-                            top_env[c],
-                            bottom_env[c],
-                            top_env[c + 1],
-                            bottom_env[c + 1],
-                        )
-                        amps_edge = jnp.einsum(
-                            "pudlr,qverx,udlvex->pq",
-                            eff_row[c],
-                            eff_row[c + 1],
-                            env_2site,
-                        )
-                        spin0 = sites[row, c]
-                        spin1 = sites[row, c + 1]
-                        col_idx = spin0 * phys_dim + spin1
-                        amps_flat = amps_edge.reshape(-1)
-                        for term in edge_terms:
-                            energy = energy + jnp.dot(term.op[:, col_idx], amps_flat) / amp
+            # Horizontal energy
+            if c < n_cols - 1:
+                edge_terms = horizontal_terms[row][c]
+                if edge_terms:
+                    env_2site = _compute_2site_horizontal_env(
+                        left_env,
+                        right_envs[c + 1],
+                        top_env[c],
+                        bottom_env[c],
+                        top_env[c + 1],
+                        bottom_env[c + 1],
+                    )
+                    amps_edge = jnp.einsum(
+                        "pudlr,qverx,udlvex->pq",
+                        eff_row[c],
+                        eff_row[c + 1],
+                        env_2site,
+                    )
+                    spin0 = sites[row, c]
+                    spin1 = sites[row, c + 1]
+                    col_idx = spin0 * phys_dim + spin1
+                    amps_flat = amps_edge.reshape(-1)
+                    for term in edge_terms:
+                        energy = energy + jnp.dot(term.op[:, col_idx], amps_flat) / amp
 
-                left_env = _contract_left_partial(left_env, transfers[c])
+            left_env = _contract_left_partial(left_env, transfers[c])
 
         # 2-row terms (vertical + plaquette)
         if row < n_rows - 1:

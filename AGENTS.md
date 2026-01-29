@@ -11,7 +11,9 @@ Use a **hybrid approach**: ABCs for type hierarchies + plum `@dispatch` for mult
 - **Single-type dispatch** → ABC with `@abstractmethod`.
 - **Multi-type dispatch** → `@dispatch` functions (when behavior depends on multiple argument types).
 - **Extending library functions** → `@library.func.dispatch`.
+- **Adding overloads** → Define base with `@dispatch`, add overloads with `@base_func.dispatch`.
 - **NO strings for dispatching.** Use typed objects.
+- **NO aliased imports for dispatch.** Import the dispatched function directly (`from module import func`), never alias (`from module import func as type_func`). Dispatch handles routing by type.
 - **Minimize helper functions.** Inline short logic; only extract when reused 3+ times or significantly improves readability.
 
 ## Design Decisions
@@ -34,6 +36,7 @@ Use a **hybrid approach**: ABCs for type hierarchies + plum `@dispatch` for mult
 
 - **Use `jax.lax.scan`** over Python loops for operations on sequences. Use `jax.lax.scan` only when the loop body is shape-uniform; for open-boundary MPS/PEPS where edge contractions differ from bulk, keep explicit loops or split into separate scans.
 - **Use `jax.vmap`** over nested Python loops for batch operations.
+- **Single vmap over entire pipeline.** Fuse multiple operations into one function and vmap that, rather than separate vmaps for each step. This enables better XLA fusion and lower memory. Example: `jax.vmap(mc_sweep)` where `mc_sweep` combines sweep + envs + grads + flatten, NOT separate `jax.vmap(sweep)` then `jax.vmap(grads_and_energy)`.
 - **No `jax.block_until_ready` in hot paths.** It breaks XLA fusion.
 - **Configurable dtype** with `jnp.complex128` as default.
 

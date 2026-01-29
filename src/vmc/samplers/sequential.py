@@ -60,12 +60,6 @@ def _sample_counts(n_samples: int, n_chains: int, burn_in: int) -> tuple[int, in
     return n_samples, n_chains, burn_in, chain_length, chain_length * n_chains
 
 
-def _random_occupancy(key: jax.Array, n_chains: int, shape: tuple[int, ...]) -> jax.Array:
-    return jax.vmap(lambda k: jax.random.bernoulli(k, 0.5, shape=shape).astype(jnp.int32))(
-        jax.random.split(key, n_chains)
-    )
-
-
 def _trim_samples(samples: jax.Array, total_samples: int, num_samples: int) -> jax.Array:
     return samples.reshape((total_samples,) + samples.shape[2:])[:num_samples]
 
@@ -131,8 +125,9 @@ def _metropolis_ratio(weight_cur: jax.Array, weight_flip: jax.Array) -> jax.Arra
 
 def _pad_mps_tensors(tensors: list[jax.Array], bond_dim: int) -> jax.Array:
     """Pad MPS tensors to a uniform bond dimension for JAX scans."""
+    phys_dim = int(tensors[0].shape[0])
     def pad_tensor(tensor):
-        block = jnp.zeros((2, bond_dim, bond_dim), dtype=tensor.dtype)
+        block = jnp.zeros((phys_dim, bond_dim, bond_dim), dtype=tensor.dtype)
         return block.at[:, :tensor.shape[1], :tensor.shape[2]].set(tensor)
     return jnp.stack([pad_tensor(t) for t in tensors], axis=0)
 
@@ -170,6 +165,7 @@ def _sequential_mps_sweep_with_envs(
     collect_left_envs: bool,
 ):
     """Run a sequential Metropolis sweep with fixed site order."""
+    phys_dim = int(tensors.shape[1])
     left_env0 = right_envs[-1]
     site_ids = jnp.arange(n_sites)
 
@@ -178,7 +174,14 @@ def _sequential_mps_sweep_with_envs(
         left_env_before = left_env
         right_env = right_envs[site + 1]
         cur_idx = indices[site]
-        flip_idx = 1 - cur_idx
+        if phys_dim == 1:
+            flip_idx = cur_idx
+        elif phys_dim == 2:
+            flip_idx = 1 - cur_idx
+        else:
+            key, flip_key = jax.random.split(key)
+            delta = jax.random.randint(flip_key, (), 1, phys_dim, dtype=jnp.int32)
+            flip_idx = (cur_idx + delta) % phys_dim
         tensor_cur = tensors[site, cur_idx]
         tensor_flip = tensors[site, flip_idx]
         amp_cur = jnp.einsum("i,ij,j->", left_env, tensor_cur, right_env)
@@ -187,8 +190,8 @@ def _sequential_mps_sweep_with_envs(
         weight_flip = jnp.abs(amp_flip) ** 2
         ratio = _metropolis_ratio(weight_cur, weight_flip)
 
-        key, subkey = jax.random.split(key)
-        accept = jax.random.uniform(subkey) < jnp.minimum(1.0, ratio)
+        key, accept_key = jax.random.split(key)
+        accept = jax.random.uniform(accept_key) < jnp.minimum(1.0, ratio)
         new_idx = jnp.where(accept, flip_idx, cur_idx)
         indices = indices.at[site].set(new_idx)
 
@@ -717,8 +720,16 @@ def _peps_sequential_sweep_with_envs(
         updated_row = []  # Track updated MPOs to avoid rebuilding the row.
         for col in range(n_cols):
             site_tensor = tensors[row][col]
+            phys_dim = int(site_tensor.shape[0])
             cur_idx = spins[row, col]
-            flip_idx = 1 - cur_idx
+            if phys_dim == 1:
+                flip_idx = cur_idx
+            elif phys_dim == 2:
+                flip_idx = 1 - cur_idx
+            else:
+                key, flip_key = jax.random.split(key)
+                delta = jax.random.randint(flip_key, (), 1, phys_dim, dtype=jnp.int32)
+                flip_idx = (cur_idx + delta) % phys_dim
             mpo_flip = jnp.transpose(site_tensor[flip_idx], (2, 3, 0, 1))
             transfer_cur = transfers[col]
             transfer_flip = _contract_column_transfer(
@@ -734,8 +745,8 @@ def _peps_sequential_sweep_with_envs(
             weight_flip = jnp.abs(amp_flip) ** 2
             ratio = _metropolis_ratio(weight_cur, weight_flip)
 
-            key, subkey = jax.random.split(key)
-            accept = jax.random.uniform(subkey) < jnp.minimum(1.0, ratio)
+            key, accept_key = jax.random.split(key)
+            accept = jax.random.uniform(accept_key) < jnp.minimum(1.0, ratio)
             new_idx = jnp.where(accept, flip_idx, cur_idx)
             spins = spins.at[row, col].set(new_idx)
 

@@ -71,7 +71,7 @@ def batched_eval(
 def model_params(model) -> dict[str, Any]:
     """Extract model parameters as plain arrays."""
     _, params, _ = nnx.split(model, nnx.Param, ...)
-    return params.to_pure_dict()
+    return nnx.to_pure_dict(params)
 
 
 @functools.partial(jax.jit, static_argnames=("apply_fun", "holomorphic"))

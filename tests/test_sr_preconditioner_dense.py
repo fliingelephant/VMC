@@ -52,7 +52,7 @@ class SRPreconditionerDenseTest(unittest.TestCase):
         _, params, _ = nnx.split(model, nnx.Param, ...)
         updates = preconditioner.apply(
             model,
-            params.to_pure_dict(),
+            nnx.to_pure_dict(params),
             samples,
             grads_sliced / amps[:, None],
             p,

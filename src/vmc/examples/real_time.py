@@ -74,7 +74,7 @@ def random_bitstring(key, n_sites: int):
 def reset_product_state_mps(model: MPS, spins: jnp.ndarray) -> MPS:
     eps = 1e-3
     graphdef, params, model_state = nnx.split(model, nnx.Param, ...)
-    params = params.to_pure_dict()
+    params = nnx.to_pure_dict(params)
     tensors = params["tensors"]
     tensor_keys = sorted(tensors.keys())
     for site, key in enumerate(tensor_keys):
@@ -82,14 +82,14 @@ def reset_product_state_mps(model: MPS, spins: jnp.ndarray) -> MPS:
         arr = jnp.ones_like(tensors[key]) * eps
         tensors[key] = arr.at[phys_idx, 0, 0].set(1.0)
     params["tensors"] = tensors
-    return nnx.merge(graphdef, params, model_state.to_pure_dict())
+    return nnx.merge(graphdef, params, nnx.to_pure_dict(model_state))
 
 
 def reset_product_state_peps(model: PEPS, spins: jnp.ndarray) -> PEPS:
     idx = 0
     eps = 1e-3
     graphdef, params, model_state = nnx.split(model, nnx.Param, ...)
-    params = params.to_pure_dict()
+    params = nnx.to_pure_dict(params)
     tensors = params["tensors"]
     row_keys = sorted(tensors.keys())
     for r_key in row_keys:
@@ -102,7 +102,7 @@ def reset_product_state_peps(model: PEPS, spins: jnp.ndarray) -> PEPS:
             idx += 1
         tensors[r_key] = row
     params["tensors"] = tensors
-    return nnx.merge(graphdef, params, model_state.to_pure_dict())
+    return nnx.merge(graphdef, params, nnx.to_pure_dict(model_state))
 
 
 def align_phase(reference: jax.Array, target: jax.Array):

@@ -167,8 +167,8 @@ class DynamicsDriver:
         self._loss_stats = None
         self._sampler_configuration = None
         self._graphdef, params, model_state = nnx.split(self.model, nnx.Param, ...)
-        self._params = params.to_pure_dict()
-        self._model_state = model_state.to_pure_dict()
+        self._params = nnx.to_pure_dict(params)
+        self._model_state = nnx.to_pure_dict(model_state)
 
         self.time_unit = time_unit
         self.integrator = integrator or self.time_unit.default_integrator()

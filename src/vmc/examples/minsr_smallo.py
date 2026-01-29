@@ -32,8 +32,14 @@ def minsr_demo_mps(
                 length, bond_dim, n_samples)
 
     model = MPS(rngs=nnx.Rngs(seed), n_sites=length, bond_dim=bond_dim)
-    key = jax.random.key(seed)
-    samples = sequential_sample(model, n_samples=n_samples, key=key)
+    samples = sequential_sample(
+        model,
+        n_samples=n_samples,
+        key=jax.random.key(seed),
+        initial_configuration=model.random_physical_configuration(
+            jax.random.key(seed + 1), n_samples=1
+        ),
+    )
 
     # Build QGT from sliced Jacobian
     jac = SlicedJacobian.from_samples(model, samples)
@@ -67,8 +73,14 @@ def minsr_demo_peps(
         bond_dim=bond_dim,
         contraction_strategy=ZipUp(bond_dim ** 2),
     )
-    key = jax.random.key(seed)
-    samples = sequential_sample(model, n_samples=n_samples, key=key)
+    samples = sequential_sample(
+        model,
+        n_samples=n_samples,
+        key=jax.random.key(seed),
+        initial_configuration=model.random_physical_configuration(
+            jax.random.key(seed + 1), n_samples=1
+        ),
+    )
 
     # Build QGT with site ordering
     pps = tuple(params_per_site(model))

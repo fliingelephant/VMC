@@ -22,7 +22,14 @@ class QGTTest(unittest.TestCase):
     def test_full_vs_sliced_sample_space(self):
         """Full and sliced Jacobian should produce same OO†."""
         model = MPS(rngs=nnx.Rngs(0), n_sites=6, bond_dim=3)
-        samples = sequential_sample(model, n_samples=128, key=jax.random.key(0))
+        samples = sequential_sample(
+            model,
+            n_samples=128,
+            key=jax.random.key(0),
+            initial_configuration=model.random_physical_configuration(
+                jax.random.key(1), n_samples=1
+            ),
+        )
         samples_flat = flatten_samples(samples)
 
         amps, grads_full, _ = _value_and_grad(model, samples_flat, full_gradient=True)
@@ -37,7 +44,14 @@ class QGTTest(unittest.TestCase):
     def test_full_vs_sliced_parameter_space(self):
         """Full and sliced Jacobian should produce same O†O via to_dense()."""
         model = MPS(rngs=nnx.Rngs(0), n_sites=6, bond_dim=3)
-        samples = sequential_sample(model, n_samples=128, key=jax.random.key(0))
+        samples = sequential_sample(
+            model,
+            n_samples=128,
+            key=jax.random.key(0),
+            initial_configuration=model.random_physical_configuration(
+                jax.random.key(1), n_samples=1
+            ),
+        )
         samples_flat = flatten_samples(samples)
 
         amps, grads_full, _ = _value_and_grad(model, samples_flat, full_gradient=True)
@@ -56,7 +70,14 @@ class QGTTest(unittest.TestCase):
     def test_ordering_equivalence(self):
         """PhysicalOrdering and SiteOrdering should produce same QGT."""
         model = MPS(rngs=nnx.Rngs(0), n_sites=6, bond_dim=3)
-        samples = sequential_sample(model, n_samples=128, key=jax.random.key(0))
+        samples = sequential_sample(
+            model,
+            n_samples=128,
+            key=jax.random.key(0),
+            initial_configuration=model.random_physical_configuration(
+                jax.random.key(1), n_samples=1
+            ),
+        )
         samples_flat = flatten_samples(samples)
 
         amps, grads, p = _value_and_grad(model, samples_flat, full_gradient=False)
@@ -72,7 +93,14 @@ class QGTTest(unittest.TestCase):
     def test_solve_residual_parameter_space(self):
         """Solve residual should be small for parameter space."""
         model = MPS(rngs=nnx.Rngs(0), n_sites=8, bond_dim=4)
-        samples = sequential_sample(model, n_samples=512, key=jax.random.key(0))
+        samples = sequential_sample(
+            model,
+            n_samples=512,
+            key=jax.random.key(0),
+            initial_configuration=model.random_physical_configuration(
+                jax.random.key(1), n_samples=1
+            ),
+        )
         samples_flat = flatten_samples(samples)
         diag_shift = 1e-4
 
@@ -93,7 +121,14 @@ class QGTTest(unittest.TestCase):
     def test_solve_residual_sample_space(self):
         """Solve residual should be small for sample space."""
         model = MPS(rngs=nnx.Rngs(0), n_sites=8, bond_dim=4)
-        samples = sequential_sample(model, n_samples=512, key=jax.random.key(0))
+        samples = sequential_sample(
+            model,
+            n_samples=512,
+            key=jax.random.key(0),
+            initial_configuration=model.random_physical_configuration(
+                jax.random.key(1), n_samples=1
+            ),
+        )
         samples_flat = flatten_samples(samples)
         diag_shift = 1e-4
 
@@ -114,7 +149,14 @@ class QGTTest(unittest.TestCase):
     def test_matvec_vs_to_dense(self):
         """Matvec should match explicit matrix multiplication."""
         model = MPS(rngs=nnx.Rngs(0), n_sites=6, bond_dim=3)
-        samples = sequential_sample(model, n_samples=128, key=jax.random.key(0))
+        samples = sequential_sample(
+            model,
+            n_samples=128,
+            key=jax.random.key(0),
+            initial_configuration=model.random_physical_configuration(
+                jax.random.key(1), n_samples=1
+            ),
+        )
         samples_flat = flatten_samples(samples)
 
         amps, grads, p = _value_and_grad(model, samples_flat, full_gradient=False)

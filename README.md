@@ -7,9 +7,10 @@ Variational Monte Carlo dynamics for tensor-network states (MPS/PEPS), implement
 ## Features (for tensor-network states)
 
 - Sequential sampling [^1]
-- Efficient energy evaluation
-- Gauge removal for better stability [^2]
-- Sliced/sparse gradients for balance between efficiency and memory use
+- Efficient energy and gradient evaluation with environment reuse
+- Gauge-invariant PEPS for finite Abelian lattice gauge theory ($Z_N$ groups) [^3]
+- Sliced gradients for memory-efficient stochastic reconfiguration
+- Gauge removal for improved numerical stability [^2]
 
 [^1]: W.-Y. Liu, Y.-Z. Huang, S.-S. Gong, and Z.-C. Gu. **Accurate Simulation for Finite Projected Entangled Pair States in Two Dimensions**. *Physical Review B* 103(23):235155, 2021. https://doi.org/10.1103/PhysRevB.103.235155
 

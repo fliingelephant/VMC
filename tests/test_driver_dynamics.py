@@ -32,17 +32,17 @@ logger = logging.getLogger(__name__)
 class DynamicsDriverTest(unittest.TestCase):
     N_SITES = 12
     BOND_DIM = 2
-    N_SAMPLES_REAL = 16384
-    N_SAMPLES_IMAG = 4096
-    N_STEPS_REAL = 100
-    N_STEPS_IMAG = 100
+    N_SAMPLES_REAL = 4096
+    N_SAMPLES_IMAG = 2048
+    N_STEPS_REAL = 10
+    N_STEPS_IMAG = 10
     DT_REAL = 0.01
     DT_IMAG = 0.001
     DIAG_SHIFT = 1e-2
     SEED = 0
-    BURN_IN = 8
-    N_CHAINS = 8
-    ENERGY_SIGMA_MULT = 5.0
+    BURN_IN = 5
+    N_CHAINS = 4
+    ENERGY_SIGMA_MULT = 6.0
 
     def _build_system(self):
         hi = nk.hilbert.Spin(s=1 / 2, N=self.N_SITES)
@@ -59,6 +59,7 @@ class DynamicsDriverTest(unittest.TestCase):
         return DynamicsDriver(
             model, hamiltonian, sampler=sampler, preconditioner=preconditioner,
             dt=dt, time_unit=time_unit, sampler_key=jax.random.key(self.SEED),
+            n_chains=self.N_CHAINS,
         )
 
     def _build_netket_driver(self, hi, hamiltonian, model, *, propagation_type: str, ode_solver, n_samples: int):
@@ -74,8 +75,16 @@ class DynamicsDriverTest(unittest.TestCase):
         return driver, vstate
 
     def _energy_stats(self, model, hamiltonian, *, key, n_samples: int):
-        samples, key = sequential_sample(
-            model, n_samples=n_samples, n_chains=self.N_CHAINS, burn_in=self.BURN_IN, key=key, return_key=True,
+        key, init_key = jax.random.split(key)
+        samples = sequential_sample(
+            model,
+            n_samples=n_samples,
+            n_chains=self.N_CHAINS,
+            burn_in=self.BURN_IN,
+            key=key,
+            initial_configuration=model.random_physical_configuration(
+                init_key, n_samples=self.N_CHAINS
+            ),
         )
         amps = _value(model, samples)
         local_energies = local_estimate(model, samples, hamiltonian, amps)

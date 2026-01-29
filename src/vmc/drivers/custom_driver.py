@@ -155,6 +155,7 @@ class DynamicsDriver:
         time_unit: TimeUnit = RealTimeUnit(),
         integrator: Integrator | None = None,
         sampler_key: jax.Array = jax.random.key(0),
+        n_chains: int = 1,
     ):
         self.model = model
         self.operator = operator
@@ -166,12 +167,17 @@ class DynamicsDriver:
         self._loss_stats = None
         self._sampler_configuration = None
         self._graphdef, params, model_state = nnx.split(self.model, nnx.Param, ...)
-        self._params = params.to_pure_dict()
-        self._model_state = model_state.to_pure_dict()
+        self._params = nnx.to_pure_dict(params)
+        self._model_state = nnx.to_pure_dict(model_state)
 
         self.time_unit = time_unit
         self.integrator = integrator or self.time_unit.default_integrator()
         self._sampler_key = sampler_key
+
+        self._sampler_key, init_key = jax.random.split(self._sampler_key)
+        self._sampler_configuration = self.model.random_physical_configuration(
+            init_key, n_samples=n_chains
+        )
 
         self.diag_shift_error: float | None = None
         self.residual_error: float | None = None

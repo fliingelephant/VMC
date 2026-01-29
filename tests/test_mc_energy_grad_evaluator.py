@@ -15,6 +15,7 @@ from vmc.core import _value_and_grad
 from vmc.models.mps import MPS
 from vmc.models.peps import NoTruncation, PEPS
 from vmc.samplers.sequential import sequential_sample
+from vmc.utils.utils import spin_to_occupancy
 from vmc.utils.vmc_utils import local_estimate
 
 logger = logging.getLogger(__name__)
@@ -25,12 +26,14 @@ def _exact_energy_and_grad(
     states: jax.Array,
     operator: nk.operator.AbstractOperator,
 ) -> tuple[jax.Array, jax.Array]:
-    amps, grads, _ = _value_and_grad(model, states, full_gradient=True)
+    # Convert from NetKet spin format (-1/+1) to occupancy format (0/1)
+    states_occ = spin_to_occupancy(states)
+    amps, grads, _ = _value_and_grad(model, states_occ, full_gradient=True)
     weights = jnp.abs(amps) ** 2
     mask = weights > 1e-12
     weights = weights[mask]
     weights = weights / jnp.sum(weights)
-    local = local_estimate(model, states[mask], operator, amps[mask])
+    local = local_estimate(model, states_occ[mask], operator, amps[mask])
     energy = jnp.sum(weights * local)
     o = grads[mask] / amps[mask, None]
     grad = jnp.sum(
@@ -48,12 +51,16 @@ def _mc_energy_and_grad(
     burn_in: int,
     key: jax.Array,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    key, init_key = jax.random.split(key)
     samples = sequential_sample(
         model,
         n_samples=n_samples,
         n_chains=n_chains,
         burn_in=burn_in,
         key=key,
+        initial_configuration=model.random_physical_configuration(
+            init_key, n_samples=n_chains
+        ),
     )
     amps, grads, _ = _value_and_grad(model, samples, full_gradient=True)
     local = local_estimate(model, samples, operator, amps)

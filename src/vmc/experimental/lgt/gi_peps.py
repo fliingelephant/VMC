@@ -599,6 +599,7 @@ def grads_and_energy(
                         eff_row[c],
                         eff_row[c + 1],
                         env_2site,
+                        optimize=True,
                     )
                     spin0 = sites[row, c]
                     spin1 = sites[row, c + 1]
@@ -786,7 +787,7 @@ def _plaquette_sweep_row_pair(
 
     for c in range(n_cols - 1):
         key, subkey = jax.random.split(key)
-        delta = jnp.where(jax.random.bernoulli(subkey), jnp.int32(1), jnp.int32(-1))
+        delta = jax.random.randint(subkey, (), 1, config.N, dtype=jnp.int32)
 
         left_partial = _contract_left_partial_2row(left_env, transfers[c])
         tmp = _contract_left_partial_2row(left_partial, transfers[c + 1])
@@ -857,11 +858,12 @@ def _horizontal_link_sweep_row(
 
     for c in range(n_cols - 1):
         key, subkey = jax.random.split(key)
-        delta = jnp.where(jax.random.bernoulli(subkey), jnp.int32(1), jnp.int32(-1))
+        delta = jax.random.randint(subkey, (), 1, config.N, dtype=jnp.int32)
 
         left_partial = _contract_left_partial(left_env, transfers[c])
         amp_cur = jnp.einsum(
-            "ace,abcdef,bdf->", left_partial, transfers[c + 1], right_envs[c + 1]
+            "ace,abcdef,bdf->", left_partial, transfers[c + 1], right_envs[c + 1],
+            optimize=True,
         )
 
         h_prop = h_links.at[r, c].set((h_links[r, c] + delta) % n)
@@ -888,7 +890,8 @@ def _horizontal_link_sweep_row(
         trans1 = _contract_column_transfer(top_env[c + 1], mpo1, bottom_env[c + 1])
         left_partial_prop = _contract_left_partial(left_env, trans0)
         amp_prop = jnp.einsum(
-            "ace,abcdef,bdf->", left_partial_prop, trans1, right_envs[c + 1]
+            "ace,abcdef,bdf->", left_partial_prop, trans1, right_envs[c + 1],
+            optimize=True,
         )
         ratio = _metropolis_ratio(jnp.abs(amp_cur) ** 2, jnp.abs(amp_prop) ** 2)
         prop_ratio = (charge_deg[q_left_new] * charge_deg[q_right_new]) / (
@@ -948,7 +951,7 @@ def _vertical_link_sweep_row_pair(
 
     for c in range(n_cols):
         key, subkey = jax.random.split(key)
-        delta = jnp.where(jax.random.bernoulli(subkey), jnp.int32(1), jnp.int32(-1))
+        delta = jax.random.randint(subkey, (), 1, config.N, dtype=jnp.int32)
 
         left_partial = _contract_left_partial_2row(left_env, transfers[c])
         amp_cur = jnp.einsum("aceg,aceg->", left_partial, right_envs[c])

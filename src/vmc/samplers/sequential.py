@@ -13,8 +13,8 @@ from plum import dispatch
 
 from vmc.models.mps import MPS
 from vmc.models.peps import (
-    ContractionStrategy,
     PEPS,
+    _metropolis_ratio,
     bottom_envs,
     grads_and_energy,
     sweep,
@@ -27,7 +27,6 @@ from vmc.utils.vmc_utils import local_estimate
 __all__ = [
     "sequential_sample",
     "sequential_sample_with_gradients",
-    "peps_sequential_sweep",
 ]
 logger = logging.getLogger(__name__)
 
@@ -106,15 +105,6 @@ def _run_burn_in_with_envs(
     return state, chain_keys, cached_envs
 
 
-def _metropolis_ratio(weight_cur: jax.Array, weight_flip: jax.Array) -> jax.Array:
-    """Compute Metropolis acceptance ratio with proper handling of zero weights."""
-    return jnp.where(
-        weight_cur > 0.0,
-        weight_flip / weight_cur,
-        jnp.where(weight_flip > 0.0, jnp.inf, 0.0),
-    )
-
-
 def _pad_mps_tensors(tensors: list[jax.Array], bond_dim: int) -> jax.Array:
     """Pad MPS tensors to a uniform bond dimension for JAX scans."""
     phys_dim = int(tensors[0].shape[0])
@@ -176,8 +166,8 @@ def _sequential_mps_sweep_with_envs(
             flip_idx = (cur_idx + delta) % phys_dim
         tensor_cur = tensors[site, cur_idx]
         tensor_flip = tensors[site, flip_idx]
-        amp_cur = jnp.einsum("i,ij,j->", left_env, tensor_cur, right_env)
-        amp_flip = jnp.einsum("i,ij,j->", left_env, tensor_flip, right_env)
+        amp_cur = jnp.einsum("i,ij,j->", left_env, tensor_cur, right_env, optimize=True)
+        amp_flip = jnp.einsum("i,ij,j->", left_env, tensor_flip, right_env, optimize=True)
         weight_cur = jnp.abs(amp_cur) ** 2
         weight_flip = jnp.abs(amp_flip) ** 2
         ratio = _metropolis_ratio(weight_cur, weight_flip)
@@ -538,25 +528,23 @@ def sequential_sample_with_gradients(
     envs = jax.vmap(lambda s: bottom_envs(model, s))(samples_flat)
 
     def flatten_full_gradients(env_grads, sample, amp):
-        spins = sample.reshape(shape)
+        indices = sample.reshape(shape)
         grad_parts = []
         for row in range(n_rows):
             for col in range(n_cols):
                 grad_full = jnp.zeros_like(tensors[row][col])
-                phys_idx = spins[row, col]
-                grad_full = grad_full.at[phys_idx].set(env_grads[row][col])
+                grad_full = grad_full.at[indices[row, col]].set(env_grads[row][col])
                 grad_parts.append(grad_full.ravel())
         return jnp.concatenate(grad_parts) / amp, jnp.zeros((0,), dtype=jnp.int8)
 
     def flatten_sliced_gradients(env_grads, sample, amp):
-        spins = sample.reshape(shape)
         grad_parts = [
             env_grads[row][col].reshape(-1)
             for row in range(n_rows)
             for col in range(n_cols)
         ]
         p_parts = [
-            jnp.full((params_per_site[site],), spins.reshape(-1)[site], dtype=jnp.int8)
+            jnp.full((params_per_site[site],), sample[site], dtype=jnp.int8)
             for site in range(n_sites)
         ]
         return jnp.concatenate(grad_parts) / amp, jnp.concatenate(p_parts)
@@ -618,25 +606,3 @@ def sequential_sample_with_gradients(
     return samples_out, grads, p, key, final_samples, amps, local_energies
 
 
-def peps_sequential_sweep(
-    tensors: list[list[jax.Array]],
-    spins: jax.Array,
-    shape: tuple[int, int],
-    strategy: ContractionStrategy,
-    key: jax.Array,
-):
-    """Public API for single PEPS sweep (backward compatible)."""
-    from vmc.models.peps import PEPS
-
-    # Create a minimal model-like object for dispatched sweep
-    class _MockPEPS:
-        def __init__(self):
-            self.shape = shape
-            self.strategy = strategy
-            self.tensors = tensors
-
-    mock = _MockPEPS()
-    sample = spins.reshape(-1)
-    envs = bottom_envs(mock, sample)
-    sample, key, _ = sweep(mock, sample, key, envs)
-    return sample.reshape(shape), key

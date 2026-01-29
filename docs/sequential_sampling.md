@@ -16,8 +16,8 @@ The goal is to reuse environments aggressively while keeping the transition kern
   - Update the left environment immediately after acceptance so later sites reuse the cache.
   - Tensors are padded to a uniform bond dimension so the sweep can run inside a JAX scan.
 
-- **PEPS**: `peps_sequential_sweep` in `VMC/samplers/sequential.py` performs one sweep.
-  `sequential_sample` wraps burn-in and sampling loops via plum dispatch.
+- **PEPS**: `sequential_sample` in `VMC/samplers/sequential.py` wraps burn-in and sampling
+  loops via plum dispatch, using internal dispatched `sweep` and `bottom_envs` functions.
   Recorded samples are taken once per sweep.
   `n_samples` controls how many sweeps are recorded; total samples are `n_samples`
   (burn-in sweeps are not recorded).

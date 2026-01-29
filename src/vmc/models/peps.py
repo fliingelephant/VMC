@@ -52,7 +52,6 @@ __all__ = [
     "_contract_left_partial_2row",
     "_contract_right_partial",
     "_contract_right_partial_2row",
-    "_compute_row_pair_vertical_amps",
     "_compute_row_pair_vertical_energy",
     "_forward_with_cache",
 ]
@@ -248,8 +247,9 @@ def _contract_column_transfer(
     bot_tensor: jax.Array,
 ) -> jax.Array:
     """Contract column into transfer tensor with shape (tL, tR, mL, mR, bL, bR)."""
-    top_mpo = jnp.einsum("aub,cduv->abcdv", top_tensor, mpo_tensor)
-    return jnp.einsum("abcdv,evf->abcdef", top_mpo, bot_tensor)
+    return jnp.einsum(
+        "aub,cduv,evf->abcdef", top_tensor, mpo_tensor, bot_tensor, optimize=True
+    )
 
 
 def _contract_left_partial(left_env: jax.Array, transfer: jax.Array) -> jax.Array:
@@ -269,9 +269,11 @@ def _contract_column_transfer_2row(
     bot_tensor: jax.Array,
 ) -> jax.Array:
     """Contract two-row column transfer with shape (tL, tR, m0L, m0R, m1L, m1R, bL, bR)."""
-    tmp = jnp.einsum("aub,lruv->alrbv", top_tensor, mpo0)
-    tmp = jnp.einsum("alrbv,xyvw->alrbxyw", tmp, mpo1)
-    tmp = jnp.einsum("alrbxyw,ewf->alrbxyef", tmp, bot_tensor)
+    tmp = jnp.einsum(
+        "aub,lruv,xyvw,ewf->alrbxyef",
+        top_tensor, mpo0, mpo1, bot_tensor,
+        optimize=True,
+    )
     return jnp.transpose(tmp, (0, 3, 1, 2, 4, 5, 6, 7))
 
 
@@ -298,9 +300,11 @@ def _contract_column_transfer_2row_open(
     bot_tensor: jax.Array,
 ) -> jax.Array:
     """Contract two rows leaving physical indices open."""
-    tmp = jnp.einsum("aub,puvlr->apbvlr", top_tensor, tensor0)
-    tmp = jnp.einsum("apbvlr,qvdmn->apbqlrdmn", tmp, tensor1)
-    tmp = jnp.einsum("apbqlrdmn,edf->apbqlrmnef", tmp, bot_tensor)
+    tmp = jnp.einsum(
+        "aub,puvlr,qvdmn,edf->apbqlrmnef",
+        top_tensor, tensor0, tensor1, bot_tensor,
+        optimize=True,
+    )
     return jnp.transpose(tmp, (0, 2, 4, 5, 6, 7, 8, 9, 1, 3))
 
 
@@ -315,41 +319,6 @@ def _compute_right_envs_2row(
     for c in range(n_cols - 2, -1, -1):
         right_envs[c] = _contract_right_partial_2row(transfers[c + 1], right_envs[c + 1])
     return right_envs
-
-
-def _compute_row_pair_vertical_amps(
-    top_mps: tuple,
-    bottom_mps: tuple,
-    mpo0: tuple,
-    mpo1: tuple,
-    tensors_row0: list[jax.Array],
-    tensors_row1: list[jax.Array],
-) -> list[jax.Array]:
-    """Compute vertical 2-site amplitudes between adjacent rows."""
-    n_cols = len(mpo0)
-    dtype = mpo0[0].dtype
-    transfers = [
-        _contract_column_transfer_2row(top_mps[c], mpo0[c], mpo1[c], bottom_mps[c])
-        for c in range(n_cols)
-    ]
-    right_envs = _compute_right_envs_2row(transfers, dtype)
-
-    left_env = jnp.ones((1, 1, 1, 1), dtype=dtype)
-    amps_v2site = []
-    for c in range(n_cols):
-        transfer_open = _contract_column_transfer_2row_open(
-            top_mps[c], tensors_row0[c], tensors_row1[c], bottom_mps[c]
-        )
-        amps_v2site.append(
-            jnp.einsum(
-                "aceg,abcdefghpq,bdfh->pq",
-                left_env,
-                transfer_open,
-                right_envs[c],
-            )
-        )
-        left_env = _contract_left_partial_2row(left_env, transfers[c])
-    return amps_v2site
 
 
 def _compute_row_pair_vertical_energy(
@@ -397,6 +366,7 @@ def _compute_row_pair_vertical_energy(
                 left_env,
                 transfer_open,
                 right_envs_2row[c],
+                optimize=True,
             )
             spin0 = spins_row0[c]
             spin1 = spins_row1[c]
@@ -516,6 +486,7 @@ def _compute_all_env_grads_and_energy(
                         tensors[row][c],
                         tensors[row][c + 1],
                         env_2site,
+                        optimize=True,
                     )
                     spin0 = spins[row, c]
                     spin1 = spins[row, c + 1]
@@ -564,20 +535,11 @@ def _compute_2site_horizontal_env(
 
     Returns tensor with shape (up0, down0, mL, up1, down1, mR).
     """
-    # Contract left side: left_env with top0 and bot0
-    # left_env (a,c,e) @ top0 (a,u,b) -> (c,e,u,b) = (mL, bL, up0, t01)
-    tmp_left = jnp.einsum("ace,aub->ceub", left_env, top0)
-    # (c,e,u,b) @ bot0 (e,d,f) -> (c,u,b,d,f) = (mL, up0, t01, down0, b01)
-    tmp_left = jnp.einsum("ceub,edf->cubdf", tmp_left, bot0)
-
-    # Contract right side: top1 and bot1 with right_env
-    # top1 (b,v,g) @ right_env (g,h,i) -> (b,v,h,i) = (t01, up1, mR, bR)
-    tmp_right = jnp.einsum("bvg,ghi->bvhi", top1, right_env)
-    # (b,v,h,i) @ bot1 (f,w,i) -> (b,v,h,f,w) = (t01, up1, mR, b01, down1)
-    tmp_right = jnp.einsum("bvhi,fwi->bvhfw", tmp_right, bot1)
-
-    # Contract left and right: connect t01 and b01
-    # (c,u,b,d,f) @ (b,v,h,f,w) -> (c,u,d,v,h,w) = (mL, up0, down0, up1, mR, down1)
+    # Contract left side: left_env (a,c,e) @ top0 (a,u,b) @ bot0 (e,d,f) -> (c,u,b,d,f)
+    tmp_left = jnp.einsum("ace,aub,edf->cubdf", left_env, top0, bot0, optimize=True)
+    # Contract right side: top1 (b,v,g) @ right_env (g,h,i) @ bot1 (f,w,i) -> (b,v,h,f,w)
+    tmp_right = jnp.einsum("bvg,ghi,fwi->bvhfw", top1, right_env, bot1, optimize=True)
+    # Contract left and right: (c,u,b,d,f) @ (b,v,h,f,w) -> (c,u,d,v,h,w)
     env = jnp.einsum("cubdf,bvhfw->cudvhw", tmp_left, tmp_right)
     # Transpose to (up0, down0, mL, up1, down1, mR)
     return jnp.transpose(env, (1, 2, 0, 3, 5, 4))
@@ -593,9 +555,10 @@ def _compute_single_gradient(
 
     Returns gradient tensor with shape (up, down, mL, mR).
     """
-    tmp_top = jnp.einsum("ace,aub->ceub", left_env, top_tensor)
-    tmp_bot = jnp.einsum("evf,bdf->ebdv", bot_tensor, right_env)
-    grad = jnp.einsum("ceub,ebdv->cuvd", tmp_top, tmp_bot)
+    grad = jnp.einsum(
+        "ace,aub,evf,bdf->cuvd", left_env, top_tensor, bot_tensor, right_env,
+        optimize=True,
+    )
     return jnp.transpose(grad, (1, 2, 0, 3))
 
 
@@ -802,10 +765,12 @@ def sweep(
                 top_env[col], mpo_flip, bottom_env[col]
             )
             amp_cur = jnp.einsum(
-                "ace,abcdef,bdf->", left_env, transfer_cur, right_envs[col]
+                "ace,abcdef,bdf->", left_env, transfer_cur, right_envs[col],
+                optimize=True,
             )
             amp_flip = jnp.einsum(
-                "ace,abcdef,bdf->", left_env, transfer_flip, right_envs[col]
+                "ace,abcdef,bdf->", left_env, transfer_flip, right_envs[col],
+                optimize=True,
             )
             weight_cur = jnp.abs(amp_cur) ** 2
             weight_flip = jnp.abs(amp_flip) ** 2

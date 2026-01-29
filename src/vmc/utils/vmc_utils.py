@@ -21,9 +21,10 @@ from vmc.models.peps import (
     PEPS,
     _build_row_mpo,
     _compute_all_env_grads_and_energy,
+    bottom_envs,
 )
 from vmc.operators.local_terms import LocalHamiltonian, bucket_terms
-from vmc.utils.utils import spin_to_occupancy
+from vmc.utils.utils import occupancy_to_spin, spin_to_occupancy
 
 __all__ = [
     "flatten_samples",
@@ -144,12 +145,14 @@ def local_estimate(
     tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
     def per_sample(sample, amp):
         spins = spin_to_occupancy(sample).reshape(shape)
-        _, energy, _ = _compute_all_env_grads_and_energy(
+        envs = bottom_envs(model, sample)
+        _, energy = _compute_all_env_grads_and_energy(
             tensors,
             spins,
             amp,
             shape,
             model.strategy,
+            envs,
             diagonal_terms=diagonal_terms,
             one_site_terms=one_site_terms,
             horizontal_terms=horizontal_terms,
@@ -172,7 +175,7 @@ def local_estimate(
 
     Args:
         model: Variational model (MPS/PEPS).
-        samples: Spin configurations with shape (n_samples, n_sites).
+        samples: Spin configurations with shape (n_samples, n_sites), occupancy format (0/1).
         operator: Operator providing ``get_conn_padded``.
         amps: Pre-computed amplitudes for samples.
 
@@ -180,7 +183,9 @@ def local_estimate(
         Local energy estimates with shape (n_samples,).
     """
     samples = jnp.asarray(samples)
-    sigma_p, mels = operator.get_conn_padded(samples)
+    # Convert to spin format for NetKet operator
+    samples_spin = occupancy_to_spin(samples)
+    sigma_p, mels = operator.get_conn_padded(samples_spin)
     sigma_p = jnp.asarray(sigma_p)
     mels = jnp.asarray(mels)
 
@@ -188,7 +193,8 @@ def local_estimate(
         sigma_p = sigma_p.reshape(samples.shape[0], -1, samples.shape[-1])
         mels = mels.reshape(sigma_p.shape[:2])
 
-    flat_sigma_p = sigma_p.reshape(-1, sigma_p.shape[-1])
+    # Convert connected configs back to occupancy for model evaluation
+    flat_sigma_p = spin_to_occupancy(sigma_p.reshape(-1, sigma_p.shape[-1]))
     amps_sigma_p = jax.vmap(_value, in_axes=(None, 0))(model, flat_sigma_p).reshape(
         sigma_p.shape[:-1]
     )

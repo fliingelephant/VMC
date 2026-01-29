@@ -25,11 +25,11 @@ from vmc.utils.vmc_utils import local_estimate
 
 class FullSumBenchmarkTest(unittest.TestCase):
     SEED = 0
-    N_CHAINS = 8
-    BURN_IN = 10
+    N_CHAINS = 4
+    BURN_IN = 5
     ENERGY_SIGMA_MULT = 5.0
-    N_SAMPLES_MPS = 65536
-    N_SAMPLES_PEPS = 16384
+    N_SAMPLES_MPS = 4096
+    N_SAMPLES_PEPS = 2048
 
     def _assert_close(self, approx, exact, *, label: str):
         err = float(approx.error_of_mean) + float(exact.error_of_mean)

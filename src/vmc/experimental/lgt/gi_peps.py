@@ -1,4 +1,15 @@
-"""Gauge-invariant PEPS (experimental, ZN matter + gauge)."""
+"""Gauge-invariant PEPS (experimental, ZN matter + gauge).
+
+This implements a gauge-invariant PEPS in a gauge-canonical-form style: gauge
+degrees of freedom are represented by link configurations in the Monte Carlo
+sample, and the PEPS tensors only store the matter (vertex) variational
+parameters.
+
+Following Wu & Liu (2025), each physical configuration selects a single charge
+sector. We avoid a redundant "mask + slice" parameterization by storing only
+the feasible local link configurations in an Nc axis and selecting entries by
+slicing.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -36,7 +47,7 @@ class GIPEPSConfig:
 
 
 class GIPEPS(nnx.Module):
-    """Gauge-invariant PEPS with charge-axis tensors."""
+    """Gauge-invariant PEPS with Nc-sliced tensors (no masking)."""
 
     tensors: list[list[nnx.Param]] = nnx.data()
 
@@ -70,27 +81,12 @@ class GIPEPS(nnx.Module):
         for r in range(self.shape[0]):
             row = []
             for c in range(self.shape[1]):
-                ku_dim, mu_u_dim, kd_dim, md_dim, kl_dim, ml_dim, kr_dim, mr_dim = _site_dims(
-                    self.config, r, c
-                )
-                shape = (
-                    self.phys_dim,
-                    ku_dim,
-                    mu_u_dim,
-                    kd_dim,
-                    md_dim,
-                    kl_dim,
-                    ml_dim,
-                    kr_dim,
-                    mr_dim,
-                )
-                tensor_val = random_tensor(rngs, shape, self.dtype)
-                tensor_val = _apply_gauss_mask(
-                    tensor_val,
-                    self.N,
-                    self.Qx,
-                    self.degeneracy_per_charge,
-                    self.charge_of_site,
+                nc = _site_nc(self.config, r, c)
+                mu_u, mu_d, mu_l, mu_r = _site_mu_dims(self.config, r, c)
+                tensor_val = random_tensor(
+                    rngs,
+                    (self.phys_dim, nc, mu_u, mu_d, mu_l, mu_r),
+                    self.dtype,
                 )
                 row.append(nnx.Param(tensor_val, dtype=self.dtype))
             tensors.append(row)
@@ -189,7 +185,7 @@ def _build_charge_index_map(
     padded = jnp.full((N, max_deg), -1, dtype=jnp.int32)
 
     def fill_charge(c, buf):
-        idx = jnp.where(charges == c, size=max_deg, fill_value=-1)[0]
+        idx = jnp.where(charges == c, size=max_deg, fill_value=-1)[0].astype(jnp.int32)
         return buf.at[c].set(idx)
 
     charge_to_indices = jax.lax.fori_loop(0, N, lambda c, buf: fill_charge(c, buf), padded)
@@ -205,42 +201,6 @@ def _sample_site_index_for_charge(
     count = charge_deg[charge]
     k = jnp.floor(jax.random.uniform(key) * count).astype(jnp.int32)
     return charge_to_indices[charge, k]
-
-
-@functools.partial(
-    jax.jit,
-    static_argnames=("N", "Qx", "degeneracy_per_charge", "charge_of_site"),
-)
-def _apply_gauss_mask(
-    tensor: jax.Array,
-    N: int,
-    Qx: int,
-    degeneracy_per_charge: tuple[int, ...],
-    charge_of_site: tuple[int, ...],
-) -> jax.Array:
-    phys_dim, ku_dim, mu_u_dim, kd_dim, md_dim, kl_dim, ml_dim, kr_dim, mr_dim = tensor.shape
-    dmax = int(max(degeneracy_per_charge))
-
-    def k_vals(dim: int) -> jax.Array:
-        return jnp.arange(dim, dtype=jnp.int32) if dim > 1 else jnp.zeros((1,), jnp.int32)
-
-    ku_vals, kd_vals, kl_vals, kr_vals = k_vals(ku_dim), k_vals(kd_dim), k_vals(kl_dim), k_vals(kr_dim)
-    ku, kd, kl, kr = jnp.meshgrid(ku_vals, kd_vals, kl_vals, kr_vals, indexing="ij")
-    charge = jnp.asarray(charge_of_site, dtype=jnp.int32) % N
-    gauss = (kl + ku - kr - kd + charge[:, None, None, None, None] - Qx) % N
-    base = (gauss == 0).astype(tensor.dtype)
-
-    mu_mask = jnp.asarray([jnp.arange(dmax) < d for d in degeneracy_per_charge], dtype=tensor.dtype)
-
-    def get_mu_mask(k_vals: jax.Array, mu_dim: int, k_dim: int) -> jax.Array:
-        return jnp.ones((k_dim, 1), dtype=tensor.dtype) if mu_dim == 1 else mu_mask[k_vals]
-
-    mu_u = get_mu_mask(ku_vals, mu_u_dim, ku_dim)[None, :, :, None, None, None, None, None, None]
-    mu_d = get_mu_mask(kd_vals, md_dim, kd_dim)[None, None, None, :, :, None, None, None, None]
-    mu_l = get_mu_mask(kl_vals, ml_dim, kl_dim)[None, None, None, None, None, :, :, None, None]
-    mu_r = get_mu_mask(kr_vals, mr_dim, kr_dim)[None, None, None, None, None, None, None, :, :]
-
-    return tensor * base[:, :, None, :, None, :, None, :, None] * mu_u * mu_d * mu_l * mu_r
 
 
 @functools.partial(jax.jit, static_argnames=("direction",))
@@ -283,7 +243,6 @@ def _link_value_or_zero(
     raise ValueError(f"Unknown direction: {direction}")
 
 
-@functools.partial(jax.jit, static_argnames=("config",))
 def assemble_tensors(
     tensors: list[list[jax.Array]],
     h_links: jax.Array,
@@ -295,11 +254,7 @@ def assemble_tensors(
     for r in range(n_rows):
         row = []
         for c in range(n_cols):
-            k_l = _link_value_or_zero(h_links, v_links, r, c, direction="left")
-            k_r = _link_value_or_zero(h_links, v_links, r, c, direction="right")
-            k_u = _link_value_or_zero(h_links, v_links, r, c, direction="up")
-            k_d = _link_value_or_zero(h_links, v_links, r, c, direction="down")
-            row.append(tensors[r][c][:, k_u, :, k_d, :, k_l, :, k_r, :])
+            row.append(_assemble_site(tensors, h_links, v_links, config, r, c))
         eff.append(row)
     return eff
 
@@ -308,6 +263,7 @@ def _assemble_site(
     tensors: list[list[jax.Array]],
     h_links: jax.Array,
     v_links: jax.Array,
+    config: GIPEPSConfig,
     r: int,
     c: int,
 ) -> jax.Array:
@@ -315,7 +271,48 @@ def _assemble_site(
     k_r = _link_value_or_zero(h_links, v_links, r, c, direction="right")
     k_u = _link_value_or_zero(h_links, v_links, r, c, direction="up")
     k_d = _link_value_or_zero(h_links, v_links, r, c, direction="down")
-    return tensors[r][c][:, k_u, :, k_d, :, k_l, :, k_r, :]
+    cfg_idx = _site_cfg_index(
+        config, k_l=k_l, k_u=k_u, k_r=k_r, k_d=k_d, r=r, c=c
+    )
+    return tensors[r][c][:, cfg_idx, :, :, :, :]
+
+
+def _site_cfg_index(
+    config: GIPEPSConfig,
+    *,
+    k_l: jax.Array,
+    k_u: jax.Array,
+    k_r: jax.Array,
+    k_d: jax.Array,
+    r: int,
+    c: int,
+) -> jax.Array:
+    """Map local link charges to a config index (Nc axis).
+
+    For a physical configuration, Gauss law fixes one adjacent link value given
+    the other links and the matter charge. The Nc axis stores only the feasible
+    configurations (one per choice of the independent link charges).
+    """
+    n_rows, n_cols = config.shape
+    active = {
+        "left": c > 0,
+        "right": c < n_cols - 1,
+        "up": r > 0,
+        "down": r < n_rows - 1,
+    }
+    dependent = None
+    for direction in ("right", "down", "up", "left"):
+        if active[direction]:
+            dependent = direction
+            break
+
+    cfg_idx = jnp.zeros((), dtype=jnp.int32)
+    for direction in ("left", "up", "down", "right"):
+        if not active[direction] or direction == dependent:
+            continue
+        k = {"left": k_l, "up": k_u, "down": k_d, "right": k_r}[direction]
+        cfg_idx = cfg_idx * jnp.asarray(config.N, dtype=jnp.int32) + k.astype(jnp.int32)
+    return cfg_idx
 
 
 @functools.partial(jax.custom_vjp, nondiff_argnums=(2, 3))
@@ -361,14 +358,16 @@ def _peps_apply_occupancy_bwd(shape, strategy, residuals, g):
 _peps_apply_occupancy.defvjp(_peps_apply_occupancy_fwd, _peps_apply_occupancy_bwd)
 
 
-def _site_dims(config: GIPEPSConfig, r: int, c: int) -> tuple[int, int, int, int, int, int, int, int]:
+def _site_mu_dims(config: GIPEPSConfig, r: int, c: int) -> tuple[int, int, int, int]:
     n_rows, n_cols = config.shape
-    ku_dim = config.N if r > 0 else 1
-    kd_dim = config.N if r < n_rows - 1 else 1
-    kl_dim = config.N if c > 0 else 1
-    kr_dim = config.N if c < n_cols - 1 else 1
-    mu_u_dim = config.dmax if r > 0 else 1
-    md_dim = config.dmax if r < n_rows - 1 else 1
-    ml_dim = config.dmax if c > 0 else 1
-    mr_dim = config.dmax if c < n_cols - 1 else 1
-    return ku_dim, mu_u_dim, kd_dim, md_dim, kl_dim, ml_dim, kr_dim, mr_dim
+    mu_u = config.dmax if r > 0 else 1
+    mu_d = config.dmax if r < n_rows - 1 else 1
+    mu_l = config.dmax if c > 0 else 1
+    mu_r = config.dmax if c < n_cols - 1 else 1
+    return mu_u, mu_d, mu_l, mu_r
+
+
+def _site_nc(config: GIPEPSConfig, r: int, c: int) -> int:
+    n_rows, n_cols = config.shape
+    num_links = int(r > 0) + int(r < n_rows - 1) + int(c > 0) + int(c < n_cols - 1)
+    return int(config.N ** max(num_links - 1, 0))

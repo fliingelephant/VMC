@@ -5,7 +5,7 @@ import jax.numpy as jnp
 from flax import nnx
 
 from vmc.experimental.lgt.gi_local_terms import GILocalHamiltonian, build_electric_terms
-from vmc.experimental.lgt.gi_peps import GIPEPS, GIPEPSConfig, _apply_gauss_mask
+from vmc.experimental.lgt.gi_peps import GIPEPS, GIPEPSConfig
 from vmc.experimental.lgt.gi_sampler import sequential_sample_with_gradients
 from vmc.models.peps import DensityMatrix, NoTruncation, ZipUp
 from vmc.operators import PlaquetteTerm
@@ -29,28 +29,6 @@ class GIPEPSTest(unittest.TestCase):
         gauss = (nl + nu - nr - nd + charge - config.Qx) % config.N
         ok = jax.device_get(jnp.all(gauss == 0))
         self.assertTrue(bool(ok))
-
-    def test_gauss_mask(self):
-        N = 2
-        phys_dim = 2
-        Qx = 0
-        degeneracy = (2, 2)
-        charge_of_site = (0, 1)
-        dmax = max(degeneracy)
-        tensor = jnp.ones((phys_dim, N, dmax, N, dmax, N, dmax, N, dmax), dtype=jnp.complex128)
-        masked = _apply_gauss_mask(tensor, N, Qx, degeneracy, charge_of_site)
-        for phys in range(phys_dim):
-            for ku in range(N):
-                for kd in range(N):
-                    for kl in range(N):
-                        for kr in range(N):
-                            charge = charge_of_site[phys]
-                            valid = (kl + ku - kr - kd + charge - Qx) % N == 0
-                            block = masked[phys, ku, :, kd, :, kl, :, kr, :]
-                            if valid:
-                                self.assertTrue(bool(jax.device_get(jnp.any(block != 0))))
-                            else:
-                                self.assertTrue(bool(jax.device_get(jnp.all(block == 0))))
 
     def test_flatten_roundtrip(self):
         sites = jnp.asarray(
@@ -100,6 +78,21 @@ class GIPEPSTest(unittest.TestCase):
                         rngs=nnx.Rngs(idx),
                         config=config,
                         contraction_strategy=strategy,
+                    )
+                    bulk = jnp.asarray(model.tensors[1][1])
+                    edge = jnp.asarray(model.tensors[0][1])
+                    corner = jnp.asarray(model.tensors[0][0])
+                    self.assertEqual(
+                        bulk.shape,
+                        (config.phys_dim, config.N**3, config.dmax, config.dmax, config.dmax, config.dmax),
+                    )
+                    self.assertEqual(
+                        edge.shape,
+                        (config.phys_dim, config.N**2, 1, config.dmax, config.dmax, config.dmax),
+                    )
+                    self.assertEqual(
+                        corner.shape,
+                        (config.phys_dim, config.N, 1, config.dmax, 1, config.dmax),
                     )
                     key = jax.random.key(idx)
                     key, init_key = jax.random.split(key)

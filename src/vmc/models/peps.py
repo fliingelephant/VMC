@@ -146,8 +146,6 @@ def _apply_mpo_zip_up(
             break
 
         mat = theta.reshape(left_dim * phys_dim, Dr * wr)
-        svd_eps = jnp.array(1e-7, dtype=mat.dtype)
-        mat = mat + svd_eps * jnp.eye(mat.shape[0], mat.shape[1], dtype=mat.dtype)
         U, S, Vh = jnp.linalg.svd(mat, full_matrices=False)
         k = min(truncate_bond_dimension, S.shape[0])
 

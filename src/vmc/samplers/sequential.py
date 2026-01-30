@@ -21,7 +21,6 @@ from vmc.models.peps import (
 )
 from vmc.operators import LocalHamiltonian, bucket_terms
 from vmc.utils.smallo import params_per_site as params_per_site_fn
-from vmc.utils.utils import occupancy_to_spin
 from vmc.utils.vmc_utils import local_estimate
 
 __all__ = [
@@ -468,9 +467,7 @@ def sequential_sample_with_gradients(
     else:
         p = _trim_samples(p, total_samples, num_samples)
 
-    local_energies = local_estimate(
-        model, occupancy_to_spin(samples), operator, amps
-    )
+    local_energies = local_estimate(model, samples, operator, amps)
     return samples, grads, p, key, final_configurations, amps, local_energies
 
 

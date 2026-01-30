@@ -62,42 +62,48 @@ def _params_per_site(ordering: PhysicalOrdering, o: jax.Array) -> tuple[int, ...
 def _iter_sliced_blocks(
     o: jax.Array,
     p: jax.Array,
-    phys_dim: int,
+    sliced_dims: tuple[int, ...],
     pps: tuple[int, ...],
 ):
+    """Iterate over sliced gradient blocks.
+
+    For SiteOrdering: sliced_dims has one entry per site.
+    For PhysicalOrdering: sliced_dims has one entry, pps has one entry (all params).
+    """
     i = 0
-    for n in pps:
-        for k in range(phys_dim):
+    for site_idx, n in enumerate(pps):
+        sliced_dim = sliced_dims[min(site_idx, len(sliced_dims) - 1)]
+        for k in range(sliced_dim):
             ok = jnp.where(p[:, i : i + n] == k, o[:, i : i + n], 0)
             yield ok, n
         i += n
 
 
 def _sliced_forward_matvec(jac: SlicedJacobian, v: jax.Array) -> jax.Array:
-    o, p, d = jac.o, jac.p, jac.phys_dim
+    o, p = jac.o, jac.p
     pps = _params_per_site(jac.ordering, o)
     result = jnp.zeros((o.shape[0],), dtype=o.dtype)
     offset = 0
-    for ok, n in _iter_sliced_blocks(o, p, d, pps):
+    for ok, n in _iter_sliced_blocks(o, p, jac.sliced_dims, pps):
         result = result + ok @ v[offset : offset + n]
         offset += n
     return result
 
 
 def _sliced_adjoint_matvec(jac: SlicedJacobian, v: jax.Array) -> jax.Array:
-    o, p, d = jac.o, jac.p, jac.phys_dim
+    o, p = jac.o, jac.p
     pps = _params_per_site(jac.ordering, o)
-    parts = [ok.conj().T @ v for ok, _ in _iter_sliced_blocks(o, p, d, pps)]
+    parts = [ok.conj().T @ v for ok, _ in _iter_sliced_blocks(o, p, jac.sliced_dims, pps)]
     return jnp.concatenate(parts, axis=0)
 
 
 def _sliced_dense_blocks(
     o: jax.Array,
     p: jax.Array,
-    phys_dim: int,
+    sliced_dims: tuple[int, ...],
     pps: tuple[int, ...],
 ) -> jax.Array:
-    blocks = [ok for ok, _ in _iter_sliced_blocks(o, p, phys_dim, pps)]
+    blocks = [ok for ok, _ in _iter_sliced_blocks(o, p, sliced_dims, pps)]
     return jnp.concatenate(blocks, axis=1)
 
 
@@ -142,10 +148,10 @@ def _matvec(jac: SlicedJacobian, space: ParameterSpace, v):
 
 @dispatch
 def _matvec(jac: SlicedJacobian, space: SampleSpace, v):
-    o, p, d = jac.o, jac.p, jac.phys_dim
+    o, p = jac.o, jac.p
     pps = _params_per_site(jac.ordering, o)
     result = jnp.zeros_like(v, dtype=o.dtype)
-    for ok, _ in _iter_sliced_blocks(o, p, d, pps):
+    for ok, _ in _iter_sliced_blocks(o, p, jac.sliced_dims, pps):
         result = result + ok @ (ok.conj().T @ v)
     scale = 1.0 / o.shape[0]
     result = result * scale
@@ -190,9 +196,9 @@ def _to_dense(jac: Jacobian, space: SampleSpace):
 
 @dispatch
 def _to_dense(jac: SlicedJacobian, space: ParameterSpace):
-    o, p, d = jac.o, jac.p, jac.phys_dim
+    o, p = jac.o, jac.p
     pps = _params_per_site(jac.ordering, o)
-    O = _sliced_dense_blocks(o, p, d, pps)
+    O = _sliced_dense_blocks(o, p, jac.sliced_dims, pps)
     scale = 1.0 / o.shape[0]
     S = (O.conj().T @ O) * scale
     mean = jacobian_mean(jac)
@@ -202,10 +208,10 @@ def _to_dense(jac: SlicedJacobian, space: ParameterSpace):
 
 @dispatch
 def _to_dense(jac: SlicedJacobian, space: SampleSpace):
-    o, p, d = jac.o, jac.p, jac.phys_dim
+    o, p = jac.o, jac.p
     pps = _params_per_site(jac.ordering, o)
     G = jnp.zeros((o.shape[0], o.shape[0]), dtype=o.dtype)
-    for ok, _ in _iter_sliced_blocks(o, p, d, pps):
+    for ok, _ in _iter_sliced_blocks(o, p, jac.sliced_dims, pps):
         G = G + ok @ ok.conj().T
     scale = 1.0 / o.shape[0]
     G = G * scale

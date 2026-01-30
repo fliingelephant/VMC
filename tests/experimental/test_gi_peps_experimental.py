@@ -465,6 +465,106 @@ class GIPEPSTest(unittest.TestCase):
                 f"Sample {i}: Reconstructed gradient should match full gradient",
             )
 
+    def test_gipeps_sliced_dims(self):
+        """Verify sliced_dims dispatch returns correct per-site values."""
+        from vmc.utils.smallo import sliced_dims
+
+        config = GIPEPSConfig(
+            shape=(3, 3),
+            N=2,
+            phys_dim=2,
+            Qx=0,
+            degeneracy_per_charge=(2, 2),
+            charge_of_site=(0, 1),
+        )
+        model = GIPEPS(rngs=nnx.Rngs(0), config=config, contraction_strategy=NoTruncation())
+
+        sd = sliced_dims(model)
+        n_rows, n_cols = config.shape
+
+        # Verify we have one sliced_dim per site
+        self.assertEqual(len(sd), n_rows * n_cols)
+
+        # Verify values: sliced_dim = phys_dim * nc
+        # nc = N^(num_links - 1) for num_links > 0
+        idx = 0
+        for r in range(n_rows):
+            for c in range(n_cols):
+                num_links = int(r > 0) + int(r < n_rows - 1) + int(c > 0) + int(c < n_cols - 1)
+                expected_nc = config.N ** max(num_links - 1, 0)
+                expected_sliced_dim = config.phys_dim * expected_nc
+                self.assertEqual(
+                    sd[idx],
+                    expected_sliced_dim,
+                    f"Site ({r},{c}): expected sliced_dim={expected_sliced_dim}, got {sd[idx]}",
+                )
+                idx += 1
+
+    def test_sliced_jacobian_qgt_matches_full(self):
+        """Verify SlicedJacobian QGT matches full Jacobian QGT for GIPEPS."""
+        from vmc.qgt import QGT, Jacobian, SlicedJacobian, SiteOrdering
+        from vmc.utils.smallo import params_per_site, sliced_dims
+
+        config = GIPEPSConfig(
+            shape=(2, 2),
+            N=2,
+            phys_dim=2,
+            Qx=0,
+            degeneracy_per_charge=(2, 2),
+            charge_of_site=(0, 1),
+        )
+        model = GIPEPS(rngs=nnx.Rngs(123), config=config, contraction_strategy=NoTruncation())
+        electric_terms = build_electric_terms(config.shape, coeff=0.1, N=config.N)
+        plaquette_terms = self._plaquette_terms(config.shape, coeff=0.2)
+        operator = GILocalHamiltonian(
+            shape=config.shape,
+            terms=electric_terms + plaquette_terms,
+        )
+
+        key = jax.random.key(123)
+        key, init_key = jax.random.split(key)
+        init_cfg = model.random_physical_configuration(init_key, n_samples=1)
+
+        # Get full gradients
+        _, grads_full, _, _, _, amps, _ = sequential_sample_with_gradients(
+            model,
+            operator,
+            n_samples=8,
+            n_chains=1,
+            key=key,
+            initial_configuration=init_cfg,
+            burn_in=1,
+            full_gradient=True,
+        )
+
+        # Get sliced gradients
+        _, grads_sliced, p, _, _, _, _ = sequential_sample_with_gradients(
+            model,
+            operator,
+            n_samples=8,
+            n_chains=1,
+            key=key,
+            initial_configuration=init_cfg,
+            burn_in=1,
+            full_gradient=False,
+        )
+
+        # Build Jacobians
+        o_full = grads_full / amps[:, None]
+        o_sliced = grads_sliced / amps[:, None]
+
+        pps = tuple(params_per_site(model))
+        jac_full = Jacobian(o_full)
+        jac_sliced = SlicedJacobian(
+            o_sliced, p, sliced_dims(model), SiteOrdering(pps)
+        )
+
+        # Compare QGT dense matrices
+        qgt_full = QGT(jac_full).to_dense()
+        qgt_sliced = QGT(jac_sliced).to_dense()
+
+        match = jax.device_get(jnp.allclose(qgt_full, qgt_sliced, rtol=1e-5, atol=1e-6))
+        self.assertTrue(match, "SlicedJacobian QGT should match full Jacobian QGT")
 
 
 if __name__ == "__main__":

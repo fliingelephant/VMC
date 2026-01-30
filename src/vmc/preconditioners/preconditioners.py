@@ -18,7 +18,7 @@ from vmc.qgt import QGT, Jacobian, ParameterSpace, SampleSpace, SlicedJacobian
 from vmc.qgt.jacobian import PhysicalOrdering, SiteOrdering, jacobian_mean
 from vmc.qgt.qgt import _params_per_site
 from vmc.qgt.solvers import solve_cg, solve_cholesky, solve_svd
-from vmc.utils.smallo import params_per_site
+from vmc.utils.smallo import params_per_site, sliced_dims
 
 if TYPE_CHECKING:
     from vmc.gauge import GaugeConfig
@@ -96,9 +96,9 @@ def _adjoint_matvec(jac: Jacobian, v: jax.Array) -> jax.Array:
 def _adjoint_matvec(jac: SlicedJacobian, v: jax.Array) -> jax.Array:
     from vmc.qgt.qgt import _iter_sliced_blocks
 
-    o, p, d = jac.o, jac.p, jac.phys_dim
+    o, p = jac.o, jac.p
     pps = _params_per_site(jac.ordering, o)
-    parts = [ok.conj().T @ v for ok, _ in _iter_sliced_blocks(o, p, d, pps)]
+    parts = [ok.conj().T @ v for ok, _ in _iter_sliced_blocks(o, p, jac.sliced_dims, pps)]
     result = jnp.concatenate(parts, axis=0)
     mean = jacobian_mean(jac)
     return result - mean.conj() * jnp.sum(v)
@@ -273,6 +273,7 @@ class SRPreconditioner:
 
         params = jax.tree_util.tree_map(jnp.asarray, params)
         pps = tuple(params_per_site(model)) if p is not None else None
+        sd = sliced_dims(model)
         Q = None
         if self.gauge_config is not None:
             Q, _ = compute_gauge_projection(
@@ -283,7 +284,7 @@ class SRPreconditioner:
             else:
                 from vmc.qgt.qgt import _iter_sliced_blocks
 
-                blocks = [ok for ok, _ in _iter_sliced_blocks(o, p, model.phys_dim, pps)]
+                blocks = [ok for ok, _ in _iter_sliced_blocks(o, p, sd, pps)]
                 o_eff = jnp.concatenate(blocks, axis=1) @ Q
             jac = Jacobian(o_eff)
         elif p is None:
@@ -292,7 +293,7 @@ class SRPreconditioner:
             jac = SlicedJacobian(
                 o,
                 p,
-                model.phys_dim,
+                sd,
                 self.ordering,
             )
 
@@ -303,8 +304,9 @@ class SRPreconditioner:
 
         updates_flat = Q @ updates_red if Q is not None else updates_red
         if Q is None and p is not None:
+            max_sliced_dim = max(sd)
             updates_flat = _reorder_updates(
-                self.ordering, updates_flat, pps, model.phys_dim
+                self.ordering, updates_flat, pps, max_sliced_dim
             )
         _, unravel = ravel_pytree(params)
         updates = unravel(updates_flat)

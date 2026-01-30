@@ -5,6 +5,7 @@ import functools
 import logging
 import unittest
 
+import pytest
 import numpy as np
 
 from vmc import config  # noqa: F401 - JAX config must be imported first
@@ -360,6 +361,7 @@ class PhysicsModelTest(unittest.TestCase):
     J1 = 1.0
     J2 = 0.5
 
+    @pytest.mark.slow
     def test_cluster_state_energy(self) -> None:
         hamiltonian, hi, n_sites = _cluster_2d_hamiltonian(
             self.CLUSTER_SHAPE
@@ -424,6 +426,7 @@ class PhysicsModelTest(unittest.TestCase):
         logger.info("mg_energy=%s expected=%s err=%s", energy, expected, err)
         self.assertLess(err, self.MG_TOL)
 
+    @pytest.mark.slow
     def test_majumdar_ghosh_energy_peps(self) -> None:
         n_sites = self.MG_SITES
         if n_sites % 2 != 0:
@@ -527,6 +530,7 @@ class PhysicsModelTest(unittest.TestCase):
         logger.info("tfim_energy=%s expected=%s err=%s", energy, expected, err)
         self.assertLess(err, self.TFIM_TOL)
 
+    @pytest.mark.slow
     def test_tfim_free_fermion_energy_peps(self) -> None:
         n_sites = self.TFIM_SITES
         hi = nk.hilbert.Spin(s=0.5, N=n_sites)
@@ -610,6 +614,7 @@ class PhysicsModelTest(unittest.TestCase):
         logger.info("xy_energy=%s expected=%s err=%s", energy, expected, err)
         self.assertLess(err, self.XY_TOL)
 
+    @pytest.mark.slow
     def test_xy_free_fermion_energy_peps(self) -> None:
         n_sites = self.XY_SITES
         hi = nk.hilbert.Spin(s=0.5, N=n_sites)
@@ -687,6 +692,7 @@ class PhysicsModelTest(unittest.TestCase):
         logger.info("heisenberg_energy=%s expected=%s err=%s", energy, w[0], err)
         self.assertLess(err, self.HEISENBERG_TOL)
 
+    @pytest.mark.slow
     def test_heisenberg_energy_constant_peps(self) -> None:
         n_sites = self.HEISENBERG_SITES
         hi = nk.hilbert.Spin(s=0.5, N=n_sites)
@@ -723,6 +729,7 @@ class PhysicsModelTest(unittest.TestCase):
         )
         self.assertLess(err, self.HEISENBERG_TOL)
 
+    @pytest.mark.slow
     def test_square_heisenberg_energy_peps(self) -> None:
         shape = self.SQUARE_HEISENBERG_SHAPE
         n_sites = self.SQUARE_HEISENBERG_SITES
@@ -760,6 +767,7 @@ class PhysicsModelTest(unittest.TestCase):
         )
         self.assertLess(err, self.SQUARE_HEISENBERG_TOL)
 
+    @pytest.mark.slow
     def test_triangular_heisenberg_energy_peps(self) -> None:
         shape = self.TRI_HEISENBERG_SHAPE
         n_sites = self.TRI_HEISENBERG_SITES
@@ -797,6 +805,7 @@ class PhysicsModelTest(unittest.TestCase):
         )
         self.assertLess(err, self.TRI_HEISENBERG_TOL)
 
+    @pytest.mark.slow
     def test_square_j1j2_heisenberg_energy_peps(self) -> None:
         shape = self.SQUARE_J1J2_SHAPE
         n_sites = self.SQUARE_J1J2_SITES

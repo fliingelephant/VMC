@@ -52,7 +52,7 @@ GIPEPS overloads in `gi_peps.py` use `@bottom_envs.dispatch`, `@grads_and_energy
 - Stateful sampling threads `(final_configurations, key)` for reproducible chains.
 
 ## QGT
-- `Jacobian` / `SlicedJacobian` with `PhysicalOrdering` / `SiteOrdering`.
+- `Jacobian` / `SlicedJacobian` with `SliceOrdering` / `SiteOrdering`.
 - `QGT`: lazy matvec in parameter or sample space.
 - `QGTOperator` / `DenseSR`: NetKet compatibility wrappers.
 
@@ -70,7 +70,7 @@ classDiagram
         phys_dim: int
         ordering: Ordering
     }
-    class PhysicalOrdering
+    class SliceOrdering
     class SiteOrdering {
         params_per_site: tuple
     }
@@ -97,7 +97,7 @@ classDiagram
         lhs_constructor(vstate) QGTOperator
     }
 
-    SlicedJacobian --> PhysicalOrdering
+    SlicedJacobian --> SliceOrdering
     SlicedJacobian --> SiteOrdering
     QGT --> Jacobian
     QGT --> SlicedJacobian
@@ -124,7 +124,7 @@ classDiagram
         strategy: DirectSolve | QRSolve
         diag_shift: float
         gauge_config: GaugeConfig | None
-        ordering: PhysicalOrdering | SiteOrdering
+        ordering: SliceOrdering | SiteOrdering
         apply(model, samples, o, p, local_energies) dict
     }
 

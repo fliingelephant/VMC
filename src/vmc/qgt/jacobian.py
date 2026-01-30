@@ -10,7 +10,7 @@ from plum import dispatch
 from vmc import config  # noqa: F401
 
 __all__ = [
-    "PhysicalOrdering",
+    "SliceOrdering",
     "SiteOrdering",
     "Jacobian",
     "SlicedJacobian",
@@ -19,15 +19,29 @@ __all__ = [
 
 
 @dataclass(frozen=True)
-class PhysicalOrdering:
-    """Loop over physical indices first."""
+class SliceOrdering:
+    """Outer loop over slice indices k, process all sites together.
+
+    For the small-o trick: ∑_k ∑_sites
+    - PEPS: k = physical state σ ∈ {0, ..., d-1}
+    - GIPEPS: k = combined index σ * nc + cfg_idx
+
+    Memory: O(n_samples × n_params / max_sliced_dim)
+    GEMMs: max(sliced_dims) calls of size (Ns, Np) × (Np, Ns)
+    """
 
     pass
 
 
 @dataclass(frozen=True)
 class SiteOrdering:
-    """Loop over sites first."""
+    """Outer loop over sites, iterate slice indices per site.
+
+    For the small-o trick: ∑_sites ∑_k  (Wu 2025 "∑_x first")
+
+    Memory: O(n_samples × n_params / n_sites)
+    GEMMs: n_sites × sliced_dim[site] calls of smaller size
+    """
 
     params_per_site: tuple[int, ...]
 
@@ -54,7 +68,7 @@ class SlicedJacobian:
     o: jax.Array  # shape: (n_samples, sum(params_per_site))
     p: jax.Array  # shape: (n_samples, n_sites), active slice index per site
     sliced_dims: tuple[int, ...]  # number of slices per site
-    ordering: PhysicalOrdering | SiteOrdering = PhysicalOrdering()
+    ordering: SliceOrdering | SiteOrdering = SliceOrdering()
 
     @property
     def phys_dim(self) -> int:
@@ -66,7 +80,7 @@ class SlicedJacobian:
         cls,
         model,
         samples: jax.Array,
-        ordering: PhysicalOrdering | SiteOrdering = PhysicalOrdering(),
+        ordering: SliceOrdering | SiteOrdering = SliceOrdering(),
     ):
         """Construct from model and samples."""
         from vmc.core import _value_and_grad
@@ -115,7 +129,7 @@ def _sliced_mean(
 
 @dispatch
 def _sliced_mean(
-    ordering: PhysicalOrdering,
+    ordering: SliceOrdering,
     o: jax.Array,
     p: jax.Array,
     sliced_dims: tuple[int, ...],

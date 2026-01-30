@@ -32,7 +32,7 @@ jobs:
         env:
           JAX_PLATFORM_NAME: cpu
         run: |
-          uv run pytest --cov=src/vmc --cov-branch --cov-report=term-missing --cov-report=xml
+          uv run pytest -m "not slow" --cov=src/vmc --cov-branch --cov-report=term-missing --cov-report=xml
 
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v5

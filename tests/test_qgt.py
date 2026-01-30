@@ -11,8 +11,8 @@ from flax import nnx
 
 from vmc.models.mps import MPS
 from vmc.core import _value_and_grad
-from vmc.qgt import QGT, Jacobian, SlicedJacobian, PhysicalOrdering, SiteOrdering, ParameterSpace, SampleSpace, solve_cholesky
-from vmc.utils.smallo import params_per_site
+from vmc.qgt import QGT, Jacobian, SlicedJacobian, SliceOrdering, SiteOrdering, ParameterSpace, SampleSpace, solve_cholesky
+from vmc.utils.smallo import params_per_site, sliced_dims
 from vmc.utils.vmc_utils import flatten_samples
 from vmc.samplers.sequential import sequential_sample
 
@@ -36,7 +36,7 @@ class QGTTest(unittest.TestCase):
         qgt_full = QGT(Jacobian(grads_full / amps[:, None]), space=SampleSpace())
 
         amps, grads, p = _value_and_grad(model, samples_flat, full_gradient=False)
-        qgt_sliced = QGT(SlicedJacobian(grads / amps[:, None], p, model.phys_dim), space=SampleSpace())
+        qgt_sliced = QGT(SlicedJacobian(grads / amps[:, None], p, sliced_dims(model)), space=SampleSpace())
 
         err = float(jnp.linalg.norm(qgt_full.to_dense() - qgt_sliced.to_dense()) / jnp.linalg.norm(qgt_full.to_dense()))
         self.assertLess(err, 1e-10)
@@ -60,7 +60,7 @@ class QGTTest(unittest.TestCase):
         amps, grads, p = _value_and_grad(model, samples_flat, full_gradient=False)
         pps = tuple(params_per_site(model))
         qgt_sliced = QGT(
-            SlicedJacobian(grads / amps[:, None], p, model.phys_dim, SiteOrdering(pps)),
+            SlicedJacobian(grads / amps[:, None], p, sliced_dims(model), SiteOrdering(pps)),
             space=ParameterSpace(),
         )
 
@@ -68,7 +68,7 @@ class QGTTest(unittest.TestCase):
         self.assertLess(err, 1e-10)
 
     def test_ordering_equivalence(self):
-        """PhysicalOrdering and SiteOrdering should produce same QGT."""
+        """SliceOrdering and SiteOrdering should produce same QGT."""
         model = MPS(rngs=nnx.Rngs(0), n_sites=6, bond_dim=3)
         samples = sequential_sample(
             model,
@@ -83,9 +83,10 @@ class QGTTest(unittest.TestCase):
         amps, grads, p = _value_and_grad(model, samples_flat, full_gradient=False)
         o = grads / amps[:, None]
 
-        qgt_phys = QGT(SlicedJacobian(o, p, model.phys_dim, PhysicalOrdering()), space=SampleSpace())
+        sd = sliced_dims(model)
+        qgt_phys = QGT(SlicedJacobian(o, p, sd, SliceOrdering()), space=SampleSpace())
         pps = tuple(params_per_site(model))
-        qgt_site = QGT(SlicedJacobian(o, p, model.phys_dim, SiteOrdering(pps)), space=SampleSpace())
+        qgt_site = QGT(SlicedJacobian(o, p, sd, SiteOrdering(pps)), space=SampleSpace())
 
         err = float(jnp.linalg.norm(qgt_phys.to_dense() - qgt_site.to_dense()) / jnp.linalg.norm(qgt_phys.to_dense()))
         self.assertLess(err, 1e-10)
@@ -106,7 +107,7 @@ class QGTTest(unittest.TestCase):
 
         amps, grads, p = _value_and_grad(model, samples_flat, full_gradient=False)
         o = grads / amps[:, None]
-        jac = SlicedJacobian(o, p, model.phys_dim)
+        jac = SlicedJacobian(o, p, sliced_dims(model))
         qgt = QGT(jac, space=ParameterSpace())
 
         S = qgt.to_dense()
@@ -134,7 +135,7 @@ class QGTTest(unittest.TestCase):
 
         amps, grads, p = _value_and_grad(model, samples_flat, full_gradient=False)
         o = grads / amps[:, None]
-        jac = SlicedJacobian(o, p, model.phys_dim)
+        jac = SlicedJacobian(o, p, sliced_dims(model))
         qgt = QGT(jac, space=SampleSpace())
 
         S = qgt.to_dense()
@@ -161,7 +162,7 @@ class QGTTest(unittest.TestCase):
 
         amps, grads, p = _value_and_grad(model, samples_flat, full_gradient=False)
         o = grads / amps[:, None]
-        jac = SlicedJacobian(o, p, model.phys_dim)
+        jac = SlicedJacobian(o, p, sliced_dims(model))
 
         # Test physical space
         qgt_phys = QGT(jac, space=ParameterSpace())

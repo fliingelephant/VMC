@@ -12,7 +12,7 @@ from flax import nnx
 from vmc.core import _value_and_grad
 from vmc.models.mps import MPS
 from vmc.models.peps import PEPS, ZipUp
-from vmc.qgt import QGT, Jacobian, SlicedJacobian, PhysicalOrdering, SiteOrdering
+from vmc.qgt import QGT, Jacobian, SlicedJacobian, SliceOrdering, SiteOrdering
 from vmc.samplers.sequential import sequential_sample
 from vmc.utils.smallo import params_per_site
 from vmc.utils.vmc_utils import flatten_samples

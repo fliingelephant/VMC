@@ -15,7 +15,7 @@ from netket.jax import tree_cast
 from plum import dispatch
 
 from vmc.qgt import QGT, Jacobian, ParameterSpace, SampleSpace, SlicedJacobian
-from vmc.qgt.jacobian import PhysicalOrdering, SiteOrdering, jacobian_mean
+from vmc.qgt.jacobian import SliceOrdering, SiteOrdering, jacobian_mean
 from vmc.qgt.qgt import _params_per_site
 from vmc.qgt.solvers import solve_cg, solve_cholesky, solve_svd
 from vmc.utils.smallo import params_per_site, sliced_dims
@@ -60,7 +60,7 @@ class QRSolve:
 
 @dispatch
 def _reorder_updates(
-    ordering: PhysicalOrdering,
+    ordering: SliceOrdering,
     updates_flat: jax.Array,
     pps: tuple[int, ...],
     phys_dim: int,
@@ -97,8 +97,7 @@ def _adjoint_matvec(jac: SlicedJacobian, v: jax.Array) -> jax.Array:
     from vmc.qgt.qgt import _iter_sliced_blocks
 
     o, p = jac.o, jac.p
-    pps = _params_per_site(jac.ordering, o)
-    parts = [ok.conj().T @ v for ok, _ in _iter_sliced_blocks(o, p, jac.sliced_dims, pps)]
+    parts = [ok.conj().T @ v for ok, _ in _iter_sliced_blocks(o, p, jac.sliced_dims, jac.ordering)]
     result = jnp.concatenate(parts, axis=0)
     mean = jacobian_mean(jac)
     return result - mean.conj() * jnp.sum(v)
@@ -240,7 +239,7 @@ class SRPreconditioner:
         strategy: DirectSolve | QRSolve = DirectSolve(),
         diag_shift: float = 1e-2,
         gauge_config: "GaugeConfig | None" = None,
-        ordering: PhysicalOrdering | SiteOrdering = PhysicalOrdering(),
+        ordering: SliceOrdering | SiteOrdering = SliceOrdering(),
     ):
         self.space = space
         self.strategy = strategy
@@ -284,7 +283,7 @@ class SRPreconditioner:
             else:
                 from vmc.qgt.qgt import _iter_sliced_blocks
 
-                blocks = [ok for ok, _ in _iter_sliced_blocks(o, p, sd, pps)]
+                blocks = [ok for ok, _ in _iter_sliced_blocks(o, p, sd, self.ordering)]
                 o_eff = jnp.concatenate(blocks, axis=1) @ Q
             jac = Jacobian(o_eff)
         elif p is None:

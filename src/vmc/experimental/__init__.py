@@ -5,10 +5,6 @@ from vmc.experimental.lgt.gi_sampler import sequential_sample_with_gradients
 from vmc.experimental.open_systems import (
     QuantumTrajectoryDriver,
     JumpOperator,
-    t1_jump_operator,
-    t1_jump_operators,
-    dephasing_jump_operator,
-    dephasing_jump_operators,
 )
 
 __all__ = [
@@ -20,8 +16,4 @@ __all__ = [
     # Open quantum systems
     "QuantumTrajectoryDriver",
     "JumpOperator",
-    "t1_jump_operator",
-    "t1_jump_operators",
-    "dephasing_jump_operator",
-    "dephasing_jump_operators",
 ]

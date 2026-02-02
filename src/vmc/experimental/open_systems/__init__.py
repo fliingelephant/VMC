@@ -9,15 +9,12 @@ ensemble of stochastic pure-state evolutions:
     2. Stochastic jumps |psi> -> L_k|psi> with probability dp_k = gamma_k dt <L_k^dag L_k>
 
 Example:
-    >>> from vmc.experimental.open_systems import (
-    ...     QuantumTrajectoryDriver,
-    ...     t1_jump_operators,
-    ...     dephasing_jump_operators,
-    ... )
+    >>> from vmc.experimental.open_systems import QuantumTrajectoryDriver, JumpOperator
     >>> # Create jump operators for all sites
-    >>> shape = (4, 4)
+    >>> n_rows, n_cols = 4, 4
     >>> T1, T_phi = 10.0, 20.0
-    >>> jumps = t1_jump_operators(shape, T1) + dephasing_jump_operators(shape, T_phi)
+    >>> jumps = [JumpOperator.t1(r, c, T1) for r in range(n_rows) for c in range(n_cols)]
+    >>> jumps += [JumpOperator.dephasing(r, c, T_phi) for r in range(n_rows) for c in range(n_cols)]
     >>> # Create driver
     >>> driver = QuantumTrajectoryDriver(
     ...     model=peps,
@@ -32,10 +29,6 @@ Example:
 
 from vmc.experimental.open_systems.jump_operators import (
     JumpOperator,
-    t1_jump_operator,
-    t1_jump_operators,
-    dephasing_jump_operator,
-    dephasing_jump_operators,
     SIGMA_MINUS,
     SIGMA_Z,
 )
@@ -44,10 +37,6 @@ from vmc.experimental.open_systems.trajectory_driver import QuantumTrajectoryDri
 __all__ = [
     "QuantumTrajectoryDriver",
     "JumpOperator",
-    "t1_jump_operator",
-    "t1_jump_operators",
-    "dephasing_jump_operator",
-    "dephasing_jump_operators",
     "SIGMA_MINUS",
     "SIGMA_Z",
 ]

@@ -15,8 +15,6 @@ from flax import nnx
 
 from vmc.experimental.open_systems import (
     QuantumTrajectoryDriver,
-    t1_jump_operators,
-    dephasing_jump_operators,
     JumpOperator,
     SIGMA_MINUS,
     SIGMA_Z,
@@ -129,7 +127,7 @@ class TestJumpOperators:
     def test_t1_jump_operator_structure(self):
         """Verify T1 jump operator has correct structure."""
         T1 = 5.0
-        jump = t1_jump_operators((2, 2), T1)[0]
+        jump = JumpOperator.t1(0, 0, T1)
 
         assert jump.rate == 1.0 / T1
         assert jump.site == (0, 0)
@@ -140,7 +138,7 @@ class TestJumpOperators:
     def test_dephasing_jump_operator_structure(self):
         """Verify dephasing jump operator has correct structure."""
         T_phi = 10.0
-        jump = dephasing_jump_operators((2, 2), T_phi)[0]
+        jump = JumpOperator.dephasing(0, 0, T_phi)
 
         assert jump.rate == 1.0 / T_phi
         assert jnp.allclose(jump.L.op, SIGMA_Z)
@@ -155,7 +153,7 @@ class TestHeffConstruction:
         """Verify H_eff = H - (i/2)Σγ L†L."""
         T1 = 2.0
         H = LocalHamiltonian(shape=(1, 1), terms=())
-        jump_ops = t1_jump_operators((1, 1), T1)
+        jump_ops = [JumpOperator.t1(0, 0, T1)]
 
         H_eff = QuantumTrajectoryDriver._build_effective_hamiltonian(H, jump_ops)
 
@@ -175,9 +173,9 @@ class TestJumpApplication:
         assert jnp.isclose(measure_occupation(peps), 1.0)
 
         # Apply σ⁻
-        jump_ops = t1_jump_operators((1, 1), T1=1.0)
+        jump_op = JumpOperator.t1(0, 0, T1=1.0)
         tensor = peps.tensors[0][0][...]
-        new_tensor = jnp.einsum("pq,qudlr->pudlr", jump_ops[0].L.op, tensor)
+        new_tensor = jnp.einsum("pq,qudlr->pudlr", jump_op.L.op, tensor)
         peps.tensors[0][0][...] = new_tensor
 
         # Should now be in |0⟩
@@ -189,9 +187,9 @@ class TestJumpApplication:
         assert jnp.isclose(measure_occupation(peps), 0.0)
 
         # Apply σ⁻
-        jump_ops = t1_jump_operators((1, 1), T1=1.0)
+        jump_op = JumpOperator.t1(0, 0, T1=1.0)
         tensor = peps.tensors[0][0][...]
-        new_tensor = jnp.einsum("pq,qudlr->pudlr", jump_ops[0].L.op, tensor)
+        new_tensor = jnp.einsum("pq,qudlr->pudlr", jump_op.L.op, tensor)
         peps.tensors[0][0][...] = new_tensor
 
         # Should be zero vector
@@ -208,7 +206,7 @@ class TestJumpProbability:
 
         peps = create_single_site_peps(seed=42, initial_state="up")
         H = LocalHamiltonian(shape=(1, 1), terms=())
-        jump_ops = t1_jump_operators((1, 1), T1)
+        jump_ops = [JumpOperator.t1(0, 0, T1)]
 
         driver = QuantumTrajectoryDriver(
             model=peps,
@@ -237,7 +235,7 @@ class TestJumpProbability:
 
         peps = create_single_site_peps(seed=42, initial_state="down")
         H = LocalHamiltonian(shape=(1, 1), terms=())
-        jump_ops = t1_jump_operators((1, 1), T1)
+        jump_ops = [JumpOperator.t1(0, 0, T1)]
 
         driver = QuantumTrajectoryDriver(
             model=peps,
@@ -345,7 +343,7 @@ class TestDriverIntegration:
         """Verify driver.step() executes without error."""
         peps = create_single_site_peps(seed=42, initial_state="up")
         H = LocalHamiltonian(shape=(1, 1), terms=())
-        jump_ops = t1_jump_operators((1, 1), T1=1.0)
+        jump_ops = [JumpOperator.t1(0, 0, T1=1.0)]
 
         driver = QuantumTrajectoryDriver(
             model=peps,
@@ -368,7 +366,7 @@ class TestDriverIntegration:
         peps = create_single_site_peps(seed=42, initial_state="up")
         H = LocalHamiltonian(shape=(1, 1), terms=())
         # Short T1 for more jumps
-        jump_ops = t1_jump_operators((1, 1), T1=0.1)
+        jump_ops = [JumpOperator.t1(0, 0, T1=0.1)]
 
         driver = QuantumTrajectoryDriver(
             model=peps,
@@ -498,9 +496,9 @@ class TestExactLindbladComparison:
                 key, subkey = jax.random.split(key)
                 if float(jax.random.uniform(subkey)) < dp:
                     # Apply σᶻ jump (just flips phase, doesn't change |amplitude|²)
-                    jump_ops = dephasing_jump_operators((1, 1), T_phi)
+                    jump_op = JumpOperator.dephasing(0, 0, T_phi)
                     tensor = peps.tensors[0][0][...]
-                    new_tensor = jnp.einsum("pq,qudlr->pudlr", jump_ops[0].L.op, tensor)
+                    new_tensor = jnp.einsum("pq,qudlr->pudlr", jump_op.L.op, tensor)
                     peps.tensors[0][0][...] = new_tensor
 
             final_occupations.append(measure_occupation(peps))

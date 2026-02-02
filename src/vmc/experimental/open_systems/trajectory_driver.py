@@ -116,20 +116,14 @@ class QuantumTrajectoryDriver(DynamicsDriver):
 
         The L_k^dag L_k terms are diagonal, so we add them as DiagonalTerm.
         """
-        # Collect all terms from original Hamiltonian
-        terms = list(hamiltonian.terms)
-
-        # Add -i/2 * gamma_k * L_k^dag L_k for each jump operator
-        for jump_op in jump_operators:
-            # L^dag L is stored in jump_op.LdagL as DiagonalTerm
-            # We need to multiply by -i/2 * gamma
-            coeff = -0.5j * jump_op.rate
-            new_diag = coeff * jump_op.LdagL.diag
-            terms.append(
-                DiagonalTerm(sites=jump_op.LdagL.sites, diag=new_diag)
-            )
-
-        return LocalHamiltonian(shape=hamiltonian.shape, terms=tuple(terms))
+        dissipative_terms = tuple(
+            DiagonalTerm(sites=j.LdagL.sites, diag=-0.5j * j.rate * j.LdagL.diag)
+            for j in jump_operators
+        )
+        return LocalHamiltonian(
+            shape=hamiltonian.shape,
+            terms=hamiltonian.terms + dissipative_terms,
+        )
 
     def _compute_jump_probabilities(
         self, sample: jax.Array, dt: float
@@ -176,6 +170,14 @@ class QuantumTrajectoryDriver(DynamicsDriver):
         self._graphdef, params, model_state = nnx.split(self.model, nnx.Param, ...)
         self._params = nnx.to_pure_dict(params)
         self._model_state = nnx.to_pure_dict(model_state)
+
+        # Update sample configuration to reflect the jump
+        # After L|s⟩, the new sample value is argmax(|L[:, old_sample]|)
+        # For T1 (σ⁻): |1⟩ → |0⟩; for dephasing (σ_z): sample unchanged
+        flat_idx = row * self.model.shape[1] + col
+        old_sample_val = int(self._sampler_configuration.reshape(-1, self._sampler_configuration.shape[-1])[0, flat_idx])
+        new_sample_val = int(jnp.argmax(jnp.abs(jump_op.L.op[:, old_sample_val])))
+        self._sampler_configuration = self._sampler_configuration.at[..., flat_idx].set(new_sample_val)
 
     def step(self, dt: float | None = None) -> dict[str, Any]:
         """Perform one quantum trajectory step.
@@ -256,9 +258,6 @@ class QuantumTrajectoryDriver(DynamicsDriver):
             Dict with run statistics.
         """
         from tqdm.auto import tqdm
-
-        if T <= 0:
-            return {"total_jumps": 0, "total_steps": 0}
 
         t_end = self.t + float(T)
         total_jumps = 0

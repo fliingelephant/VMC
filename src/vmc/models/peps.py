@@ -46,12 +46,6 @@ __all__ = [
     "_compute_2site_horizontal_env",
     "_compute_single_gradient",
     "_contract_bottom",
-    "_contract_column_transfer",
-    "_contract_column_transfer_2row",
-    "_contract_left_partial",
-    "_contract_left_partial_2row",
-    "_contract_right_partial",
-    "_contract_right_partial_2row",
     "_compute_row_pair_vertical_energy",
     "_forward_with_cache",
 ]
@@ -241,83 +235,26 @@ def _apply_mpo_from_below(
     return strategy.apply(bottom_mps, tuple(jnp.transpose(w, (0, 1, 3, 2)) for w in mpo))
 
 
-def _contract_column_transfer(
-    top_tensor: jax.Array,
-    mpo_tensor: jax.Array,
-    bot_tensor: jax.Array,
-) -> jax.Array:
-    """Contract column into transfer tensor with shape (tL, tR, mL, mR, bL, bR)."""
-    return jnp.einsum(
-        "aub,cduv,evf->abcdef", top_tensor, mpo_tensor, bot_tensor, optimize=True
-    )
-
-
-def _contract_left_partial(left_env: jax.Array, transfer: jax.Array) -> jax.Array:
-    """Contract left environment (tL, mL, bL) with transfer -> (tR, mR, bR)."""
-    return jnp.einsum("ace,abcdef->bdf", left_env, transfer)
-
-
-def _contract_right_partial(transfer: jax.Array, right_env: jax.Array) -> jax.Array:
-    """Contract transfer with right environment (tR, mR, bR) -> (tL, mL, bL)."""
-    return jnp.einsum("abcdef,bdf->ace", transfer, right_env)
-
-
-def _contract_column_transfer_2row(
-    top_tensor: jax.Array,
-    mpo0: jax.Array,
-    mpo1: jax.Array,
-    bot_tensor: jax.Array,
-) -> jax.Array:
-    """Contract two-row column transfer with shape (tL, tR, m0L, m0R, m1L, m1R, bL, bR)."""
-    tmp = jnp.einsum(
-        "aub,lruv,xyvw,ewf->alrbxyef",
-        top_tensor, mpo0, mpo1, bot_tensor,
-        optimize=True,
-    )
-    return jnp.transpose(tmp, (0, 3, 1, 2, 4, 5, 6, 7))
-
-
-def _contract_left_partial_2row(
-    left_env: jax.Array,
-    transfer: jax.Array,
-) -> jax.Array:
-    """Contract left environment (tL, m0L, m1L, bL) with transfer."""
-    return jnp.einsum("aceg,abcdefgh->bdfh", left_env, transfer)
-
-
-def _contract_right_partial_2row(
-    transfer: jax.Array,
-    right_env: jax.Array,
-) -> jax.Array:
-    """Contract transfer with right environment (tR, m0R, m1R, bR)."""
-    return jnp.einsum("abcdefgh,bdfh->aceg", transfer, right_env)
-
-
-def _contract_column_transfer_2row_open(
-    top_tensor: jax.Array,
-    tensor0: jax.Array,
-    tensor1: jax.Array,
-    bot_tensor: jax.Array,
-) -> jax.Array:
-    """Contract two rows leaving physical indices open."""
-    tmp = jnp.einsum(
-        "aub,puvlr,qvdmn,edf->apbqlrmnef",
-        top_tensor, tensor0, tensor1, bot_tensor,
-        optimize=True,
-    )
-    return jnp.transpose(tmp, (0, 2, 4, 5, 6, 7, 8, 9, 1, 3))
-
-
 def _compute_right_envs_2row(
-    transfers: list[jax.Array],
+    top_env: tuple,
+    mpo_row0: tuple,
+    mpo_row1: tuple,
+    bottom_env: tuple,
     dtype,
 ) -> list[jax.Array]:
-    """Compute right environments for 2-row contractions (backward pass)."""
-    n_cols = len(transfers)
+    """Compute right environments for 2-row contractions using direct einsum."""
+    n_cols = len(mpo_row0)
     right_envs = [None] * n_cols
     right_envs[n_cols - 1] = jnp.ones((1, 1, 1, 1), dtype=dtype)
     for c in range(n_cols - 2, -1, -1):
-        right_envs[c] = _contract_right_partial_2row(transfers[c + 1], right_envs[c + 1])
+        # Direct einsum: top @ mpo0 @ mpo1 @ bot @ right_env -> new_right_env
+        # top: (a, u, b), mpo0: (l, r, u, v), mpo1: (x, y, v, w), bot: (e, w, f)
+        # right_env: (b, r, y, f) -> output: (a, l, x, e)
+        right_envs[c] = jnp.einsum(
+            "aub,lruv,xyvw,ewf,bryf->alxe",
+            top_env[c + 1], mpo_row0[c + 1], mpo_row1[c + 1], bottom_env[c + 1], right_envs[c + 1],
+            optimize=[(0, 4), (0, 3), (0, 2), (0, 1)],
+        )
     return right_envs
 
 
@@ -334,39 +271,28 @@ def _compute_row_pair_vertical_energy(
     amp: jax.Array,
     phys_dim: int,
     *,
-    transfers_2row: list[jax.Array] | None = None,
     right_envs_2row: list[jax.Array] | None = None,
 ) -> jax.Array:
     """Compute vertical 2-site energy contributions for a row pair."""
     if not any(terms_row):
         return jnp.zeros((), dtype=amp.dtype)
     n_cols = len(mpo_row0)
-    if transfers_2row is None:
-        transfers_2row = [
-            _contract_column_transfer_2row(
-                top_mps[c], mpo_row0[c], mpo_row1[c], bottom_mps[c]
-            )
-            for c in range(n_cols)
-        ]
+    dtype = mpo_row0[0].dtype
     if right_envs_2row is None:
         right_envs_2row = _compute_right_envs_2row(
-            transfers_2row, transfers_2row[0].dtype
+            top_mps, mpo_row0, mpo_row1, bottom_mps, dtype
         )
-    dtype = transfers_2row[0].dtype
     left_env = jnp.ones((1, 1, 1, 1), dtype=dtype)
     energy = jnp.zeros((), dtype=amp.dtype)
     for c in range(n_cols):
         col_terms = terms_row[c]
         if col_terms:
-            transfer_open = _contract_column_transfer_2row_open(
-                top_mps[c], tensors_row0[c], tensors_row1[c], bottom_mps[c]
-            )
+            # Direct einsum: left_env @ top @ tensor0 @ tensor1 @ bot @ right_env -> (p, q)
+            # tensor0: (p, u, v, l, r), tensor1: (q, v, w, m, n)
             amps_edge = jnp.einsum(
-                "aceg,abcdefghpq,bdfh->pq",
-                left_env,
-                transfer_open,
-                right_envs_2row[c],
-                optimize=True,
+                "almg,aub,puvlr,qvwmn,gwf,brnf->pq",
+                left_env, top_mps[c], tensors_row0[c], tensors_row1[c], bottom_mps[c], right_envs_2row[c],
+                optimize=[(0, 1), (2, 3), (0, 2), (1, 2), (0, 1)],
             )
             spin0 = spins_row0[c]
             spin1 = spins_row1[c]
@@ -374,20 +300,33 @@ def _compute_row_pair_vertical_energy(
             amps_flat = amps_edge.reshape(-1)
             for term in col_terms:
                 energy = energy + jnp.dot(term.op[:, col_idx], amps_flat) / amp
-        left_env = _contract_left_partial_2row(left_env, transfers_2row[c])
+        # Direct einsum for left_env_2row update
+        left_env = jnp.einsum(
+            "alxe,aub,lruv,xyvw,ewf->bryf",
+            left_env, top_mps[c], mpo_row0[c], mpo_row1[c], bottom_mps[c],
+            optimize=[(0, 1), (0, 3), (0, 2), (0, 1)],
+        )
     return energy
 
 
 def _compute_right_envs(
-    transfers: list[jax.Array],
+    top_env: tuple,
+    mpo_row: tuple,
+    bottom_env: tuple,
     dtype,
 ) -> list[jax.Array]:
-    """Compute right environments from column transfers (backward pass)."""
-    n_cols = len(transfers)
+    """Compute right environments using direct einsum (no transfers)."""
+    n_cols = len(mpo_row)
     right_envs = [None] * n_cols
     right_envs[n_cols - 1] = jnp.ones((1, 1, 1), dtype=dtype)
     for c in range(n_cols - 2, -1, -1):
-        right_envs[c] = _contract_right_partial(transfers[c + 1], right_envs[c + 1])
+        # Direct einsum: top @ mpo @ bot @ right_env -> new_right_env
+        # top: (a, u, b), mpo: (c, d, u, v), bot: (e, v, f), right_env: (b, d, f) -> (a, c, e)
+        right_envs[c] = jnp.einsum(
+            "aub,cduv,evf,bdf->ace",
+            top_env[c + 1], mpo_row[c + 1], bottom_env[c + 1], right_envs[c + 1],
+            optimize=[(0, 3), (0, 2), (0, 1)],
+        )
     return right_envs
 
 
@@ -396,14 +335,10 @@ def _compute_all_row_gradients(
     bottom_mps: tuple,
     mpo: tuple,
 ) -> list[jax.Array]:
-    """Compute gradients for all tensors in a row using environment contraction."""
+    """Compute gradients for all tensors in a row using direct einsum."""
     n_cols = len(mpo)
     dtype = mpo[0].dtype
-    transfers = [
-        _contract_column_transfer(top_mps[c], mpo[c], bottom_mps[c])
-        for c in range(n_cols)
-    ]
-    right_envs = _compute_right_envs(transfers, dtype)
+    right_envs = _compute_right_envs(top_mps, mpo, bottom_mps, dtype)
 
     env_grads = []
     left_env = jnp.ones((1, 1, 1), dtype=dtype)
@@ -411,7 +346,12 @@ def _compute_all_row_gradients(
         env_grads.append(
             _compute_single_gradient(left_env, right_envs[c], top_mps[c], bottom_mps[c])
         )
-        left_env = _contract_left_partial(left_env, transfers[c])
+        # Direct einsum for left_env update: left_env @ top @ mpo @ bot -> new_left_env
+        left_env = jnp.einsum(
+            "ace,aub,cduv,evf->bdf",
+            left_env, top_mps[c], mpo[c], bottom_mps[c],
+            optimize=[(0, 1), (0, 2), (0, 1)],
+        )
     return env_grads
 
 
@@ -450,11 +390,7 @@ def _compute_all_env_grads_and_energy(
     mpo = _build_row_mpo(tensors, spins[0], 0, n_cols)
     for row in range(n_rows):
         bottom_env = bottom_envs[row]
-        transfers = [
-            _contract_column_transfer(top_env[c], mpo[c], bottom_env[c])
-            for c in range(n_cols)
-        ]
-        right_envs = _compute_right_envs(transfers, dtype)
+        right_envs = _compute_right_envs(top_env, mpo, bottom_env, dtype)
         left_env = jnp.ones((1, 1, 1), dtype=dtype)
         for c in range(n_cols):
             site_terms = one_site_terms[row][c]
@@ -486,7 +422,7 @@ def _compute_all_env_grads_and_energy(
                         tensors[row][c],
                         tensors[row][c + 1],
                         env_2site,
-                        optimize=True,
+                        optimize=[(0, 2), (0, 1)],
                     )
                     spin0 = spins[row, c]
                     spin1 = spins[row, c + 1]
@@ -494,7 +430,12 @@ def _compute_all_env_grads_and_energy(
                     amps_flat = amps_edge.reshape(-1)
                     for term in edge_terms:
                         energy = energy + jnp.dot(term.op[:, col_idx], amps_flat) / amp
-            left_env = _contract_left_partial(left_env, transfers[c])
+            # Direct einsum for left_env update
+            left_env = jnp.einsum(
+                "ace,aub,cduv,evf->bdf",
+                left_env, top_env[c], mpo[c], bottom_env[c],
+                optimize=[(0, 1), (0, 2), (0, 1)],
+            )
         if row < n_rows - 1:
             mpo_next = _build_row_mpo(tensors, spins[row + 1], row + 1, n_cols)
             energy = energy + _compute_row_pair_vertical_energy(
@@ -536,11 +477,11 @@ def _compute_2site_horizontal_env(
     Returns tensor with shape (up0, down0, mL, up1, down1, mR).
     """
     # Contract left side: left_env (a,c,e) @ top0 (a,u,b) @ bot0 (e,d,f) -> (c,u,b,d,f)
-    tmp_left = jnp.einsum("ace,aub,edf->cubdf", left_env, top0, bot0, optimize=True)
+    tmp_left = jnp.einsum("ace,aub,edf->cubdf", left_env, top0, bot0, optimize=[(0, 1), (0, 1)])
     # Contract right side: top1 (b,v,g) @ right_env (g,h,i) @ bot1 (f,w,i) -> (b,v,h,f,w)
-    tmp_right = jnp.einsum("bvg,ghi,fwi->bvhfw", top1, right_env, bot1, optimize=True)
+    tmp_right = jnp.einsum("bvg,ghi,fwi->bvhfw", top1, right_env, bot1, optimize=[(0, 1), (0, 1)])
     # Contract left and right: (c,u,b,d,f) @ (b,v,h,f,w) -> (c,u,d,v,h,w)
-    env = jnp.einsum("cubdf,bvhfw->cudvhw", tmp_left, tmp_right)
+    env = jnp.einsum("cubdf,bvhfw->cudvhw", tmp_left, tmp_right, optimize=[(0, 1)])
     # Transpose to (up0, down0, mL, up1, down1, mR)
     return jnp.transpose(env, (1, 2, 0, 3, 5, 4))
 
@@ -557,7 +498,7 @@ def _compute_single_gradient(
     """
     grad = jnp.einsum(
         "ace,aub,evf,bdf->cuvd", left_env, top_tensor, bot_tensor, right_env,
-        optimize=True,
+        optimize=[(0, 1), (0, 1), (0, 1)],
     )
     return jnp.transpose(grad, (1, 2, 0, 3))
 
@@ -740,11 +681,7 @@ def sweep(
     for row in range(n_rows):
         bottom_env = envs[row]
         mpo_row = _build_row_mpo(tensors, indices[row], row, n_cols)
-        transfers = [
-            _contract_column_transfer(top_env[col], mpo_row[col], bottom_env[col])
-            for col in range(n_cols)
-        ]
-        right_envs = _compute_right_envs(transfers, dtype)
+        right_envs = _compute_right_envs(top_env, mpo_row, bottom_env, dtype)
         left_env = jnp.ones((1, 1, 1), dtype=dtype)
         updated_row = []
         for col in range(n_cols):
@@ -760,17 +697,17 @@ def sweep(
                 delta = jax.random.randint(flip_key, (), 1, phys_dim, dtype=jnp.int32)
                 flip_idx = (cur_idx + delta) % phys_dim
             mpo_flip = jnp.transpose(site_tensor[flip_idx], (2, 3, 0, 1))
-            transfer_cur = transfers[col]
-            transfer_flip = _contract_column_transfer(
-                top_env[col], mpo_flip, bottom_env[col]
-            )
+            mpo_cur = mpo_row[col]
+            # Direct einsum for amplitude computation (no transfer intermediate)
             amp_cur = jnp.einsum(
-                "ace,abcdef,bdf->", left_env, transfer_cur, right_envs[col],
-                optimize=True,
+                "ace,aub,cduv,evf,bdf->",
+                left_env, top_env[col], mpo_cur, bottom_env[col], right_envs[col],
+                optimize=[(0, 1), (1, 2), (1, 2), (0, 1)],
             )
             amp_flip = jnp.einsum(
-                "ace,abcdef,bdf->", left_env, transfer_flip, right_envs[col],
-                optimize=True,
+                "ace,aub,cduv,evf,bdf->",
+                left_env, top_env[col], mpo_flip, bottom_env[col], right_envs[col],
+                optimize=[(0, 1), (1, 2), (1, 2), (0, 1)],
             )
             weight_cur = jnp.abs(amp_cur) ** 2
             weight_flip = jnp.abs(amp_flip) ** 2
@@ -784,17 +721,16 @@ def sweep(
             mpo_sel = jax.lax.cond(
                 accept,
                 lambda _: mpo_flip,
-                lambda _: mpo_row[col],
-                operand=None,
-            )
-            transfer = jax.lax.cond(
-                accept,
-                lambda _: transfer_flip,
-                lambda _: transfer_cur,
+                lambda _: mpo_cur,
                 operand=None,
             )
             updated_row.append(mpo_sel)
-            left_env = _contract_left_partial(left_env, transfer)
+            # Direct einsum for left_env update
+            left_env = jnp.einsum(
+                "ace,aub,cduv,evf->bdf",
+                left_env, top_env[col], mpo_sel, bottom_env[col],
+                optimize=[(0, 1), (0, 2), (0, 1)],
+            )
 
         top_env = model.strategy.apply(top_env, tuple(updated_row))
 

@@ -15,10 +15,10 @@ from netket.jax import tree_cast
 from plum import dispatch
 
 from vmc.qgt import QGT, Jacobian, ParameterSpace, SampleSpace, SlicedJacobian
-from vmc.qgt.jacobian import PhysicalOrdering, SiteOrdering, jacobian_mean
+from vmc.qgt.jacobian import SliceOrdering, SiteOrdering, jacobian_mean
 from vmc.qgt.qgt import _params_per_site
 from vmc.qgt.solvers import solve_cg, solve_cholesky, solve_svd
-from vmc.utils.smallo import params_per_site
+from vmc.utils.smallo import params_per_site, sliced_dims
 
 if TYPE_CHECKING:
     from vmc.gauge import GaugeConfig
@@ -60,16 +60,26 @@ class QRSolve:
 
 @dispatch
 def _reorder_updates(
-    ordering: PhysicalOrdering,
+    ordering: SliceOrdering,
     updates_flat: jax.Array,
     pps: tuple[int, ...],
-    phys_dim: int,
+    sliced_dims: tuple[int, ...],
 ) -> jax.Array:
+    """Permute updates from k-major to site-major order.
+
+    SliceOrdering produces the expanded Jacobian with columns ordered as:
+        [k=0 all sites] [k=1 all sites] ... [k=max all sites]
+    But the parameter tree expects site-major order:
+        [site0 all k] [site1 all k] ... [siteN all k]
+
+    This function builds a permutation that extracts entries in site-major order.
+    For non-uniform sliced_dims, only valid (site, k) pairs are included.
+    """
     total = sum(pps)
     perm = []
     site_offset = 0
-    for n in pps:
-        for k in range(phys_dim):
+    for site_idx, n in enumerate(pps):
+        for k in range(sliced_dims[site_idx]):
             base = k * total + site_offset
             perm.extend(range(base, base + n))
         site_offset += n
@@ -81,8 +91,9 @@ def _reorder_updates(
     ordering: SiteOrdering,
     updates_flat: jax.Array,
     pps: tuple[int, ...],
-    phys_dim: int,
+    sliced_dims: tuple[int, ...],
 ) -> jax.Array:
+    """SiteOrdering already produces site-major order, no reordering needed."""
     return updates_flat
 
 
@@ -96,9 +107,8 @@ def _adjoint_matvec(jac: Jacobian, v: jax.Array) -> jax.Array:
 def _adjoint_matvec(jac: SlicedJacobian, v: jax.Array) -> jax.Array:
     from vmc.qgt.qgt import _iter_sliced_blocks
 
-    o, p, d = jac.o, jac.p, jac.phys_dim
-    pps = _params_per_site(jac.ordering, o)
-    parts = [ok.conj().T @ v for ok, _ in _iter_sliced_blocks(o, p, d, pps)]
+    o, p = jac.o, jac.p
+    parts = [ok.conj().T @ v for ok, _ in _iter_sliced_blocks(o, p, jac.sliced_dims, jac.ordering)]
     result = jnp.concatenate(parts, axis=0)
     mean = jacobian_mean(jac)
     return result - mean.conj() * jnp.sum(v)
@@ -240,7 +250,7 @@ class SRPreconditioner:
         strategy: DirectSolve | QRSolve = DirectSolve(),
         diag_shift: float = 1e-2,
         gauge_config: "GaugeConfig | None" = None,
-        ordering: PhysicalOrdering | SiteOrdering = PhysicalOrdering(),
+        ordering: SliceOrdering | SiteOrdering = SliceOrdering(),
     ):
         self.space = space
         self.strategy = strategy
@@ -273,6 +283,7 @@ class SRPreconditioner:
 
         params = jax.tree_util.tree_map(jnp.asarray, params)
         pps = tuple(params_per_site(model)) if p is not None else None
+        sd = sliced_dims(model)
         Q = None
         if self.gauge_config is not None:
             Q, _ = compute_gauge_projection(
@@ -283,7 +294,7 @@ class SRPreconditioner:
             else:
                 from vmc.qgt.qgt import _iter_sliced_blocks
 
-                blocks = [ok for ok, _ in _iter_sliced_blocks(o, p, model.phys_dim, pps)]
+                blocks = [ok for ok, _ in _iter_sliced_blocks(o, p, sd, self.ordering)]
                 o_eff = jnp.concatenate(blocks, axis=1) @ Q
             jac = Jacobian(o_eff)
         elif p is None:
@@ -292,7 +303,7 @@ class SRPreconditioner:
             jac = SlicedJacobian(
                 o,
                 p,
-                model.phys_dim,
+                sd,
                 self.ordering,
             )
 
@@ -304,7 +315,7 @@ class SRPreconditioner:
         updates_flat = Q @ updates_red if Q is not None else updates_red
         if Q is None and p is not None:
             updates_flat = _reorder_updates(
-                self.ordering, updates_flat, pps, model.phys_dim
+                self.ordering, updates_flat, pps, sd
             )
         _, unravel = ravel_pytree(params)
         updates = unravel(updates_flat)

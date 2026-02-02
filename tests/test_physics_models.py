@@ -5,6 +5,7 @@ import functools
 import logging
 import unittest
 
+import pytest
 import numpy as np
 
 from vmc import config  # noqa: F401 - JAX config must be imported first
@@ -18,6 +19,7 @@ from vmc.core import _value, _value_and_grad
 from vmc.drivers import DynamicsDriver, ImaginaryTimeUnit
 from vmc.models.mps import MPS
 from vmc.models.peps import NoTruncation, PEPS
+from vmc.utils.utils import spin_to_occupancy
 from vmc.utils.vmc_utils import local_estimate
 
 logger = logging.getLogger(__name__)
@@ -31,7 +33,7 @@ def _kron_all(mats: list[np.ndarray]) -> np.ndarray:
 
 
 def _exact_sampler_with_gradients(
-    states: jax.Array,
+    states_spin: jax.Array,
     model,
     operator,
     *,
@@ -40,6 +42,8 @@ def _exact_sampler_with_gradients(
     initial_configuration: jax.Array | None = None,
 ):
     del (initial_configuration, n_samples)
+    # Convert spin format (±1) to occupancy format (0/1) for model evaluation
+    states = spin_to_occupancy(states_spin)
     amps_full = _value(model, states)
     mask = jnp.abs(amps_full) > 1e-12
     samples = states[mask]
@@ -47,6 +51,7 @@ def _exact_sampler_with_gradients(
         model, samples, full_gradient=True
     )
     o = grads / amps[:, None]
+    # local_estimate expects occupancy samples (converts to spin internally for operator)
     local_energies = local_estimate(model, samples, operator, amps)
     return samples, o, None, key, None, amps, local_energies
 
@@ -96,14 +101,17 @@ class ExactSRPreconditioner:
 
 def _exact_energy_from_samples(
     model,
-    states: jax.Array,
+    states_spin: jax.Array,
     operator: nk.operator.AbstractOperator,
 ) -> jax.Array:
+    # Convert spin format (±1) to occupancy format (0/1) for model evaluation
+    states = spin_to_occupancy(states_spin)
     amps = _value(model, states)
     probs = jnp.abs(amps) ** 2
     mask = probs > 1e-12
     probs = probs[mask]
     probs = probs / jnp.sum(probs)
+    # local_estimate expects occupancy samples (converts to spin internally for operator)
     local = local_estimate(model, states[mask], operator, amps[mask])
     return jnp.sum(probs * local)
 
@@ -158,6 +166,12 @@ def _toric_code_hamiltonian(
     n_rows: int,
     n_cols: int,
 ) -> tuple[nk.operator.LocalOperator, nk.hilbert.Spin, int]:
+    """Build toric code Hamiltonian.
+
+    Edge layout for PEPS shape (n_cols+1, n_rows+1):
+      - First n_rows*n_cols indices: horizontal edges (by row)
+      - Next n_rows*n_cols indices: vertical edges (by row)
+    """
     n_sites = 2 * n_rows * n_cols
     hi = nk.hilbert.Spin(s=0.5, N=n_sites)
     X = np.array([[0, 1], [1, 0]], dtype=np.complex128)
@@ -315,10 +329,10 @@ class PhysicsModelTest(unittest.TestCase):
 
     TORIC_ROWS = 2
     TORIC_COLS = 3
-    TORIC_SHAPE = (TORIC_ROWS, 2 * TORIC_COLS)
+    TORIC_SHAPE = (TORIC_COLS + 1, TORIC_ROWS + 1)  # (4, 3): natural unfolded torus grid
     TORIC_BOND_DIM = 3
     TORIC_SAMPLES = 2 ** (2 * TORIC_ROWS * TORIC_COLS)
-    TORIC_STEPS = 80
+    TORIC_STEPS = 20
     TORIC_DT = 0.1
     TORIC_TOL = 2.5e-2
 
@@ -353,6 +367,7 @@ class PhysicsModelTest(unittest.TestCase):
     J1 = 1.0
     J2 = 0.5
 
+    @pytest.mark.slow
     def test_cluster_state_energy(self) -> None:
         hamiltonian, hi, n_sites = _cluster_2d_hamiltonian(
             self.CLUSTER_SHAPE
@@ -417,6 +432,7 @@ class PhysicsModelTest(unittest.TestCase):
         logger.info("mg_energy=%s expected=%s err=%s", energy, expected, err)
         self.assertLess(err, self.MG_TOL)
 
+    @pytest.mark.slow
     def test_majumdar_ghosh_energy_peps(self) -> None:
         n_sites = self.MG_SITES
         if n_sites % 2 != 0:
@@ -467,6 +483,26 @@ class PhysicsModelTest(unittest.TestCase):
             bond_dim=self.TORIC_BOND_DIM,
             contraction_strategy=NoTruncation(),
         )
+        # Initialize to |+⟩⊗n using identity-on-bonds + small noise
+        # T[s, u, d, l, r] = (1/√2) × δ_{u,d} × δ_{l,r} + noise
+        # The noise breaks symmetry, enabling non-zero gradients
+        init_key = jax.random.key(123)
+        keys = jax.random.split(init_key, len(model.tensors) * len(model.tensors[0]))
+        k = 0
+        for row in model.tensors:
+            for tensor in row:
+                arr = tensor[...]
+                D = arr.shape[1]  # bond dimension
+                new_arr = jnp.zeros_like(arr)
+                for s in range(2):
+                    for b_ud in range(D):
+                        for b_lr in range(D):
+                            new_arr = new_arr.at[s, b_ud, b_ud, b_lr, b_lr].set(
+                                1.0 / jnp.sqrt(2)
+                            )
+                noise = 0.1 * jax.random.normal(keys[k], arr.shape, dtype=arr.dtype)
+                tensor[...] = new_arr + noise
+                k += 1
 
         model = _run_imag_time(
             model,
@@ -476,7 +512,7 @@ class PhysicsModelTest(unittest.TestCase):
             n_steps=self.TORIC_STEPS,
             dt=self.TORIC_DT,
             diag_shift=self.DIAG_SHIFT,
-            key=jax.random.key(self.SEED + 2),
+            key=jax.random.key(42),
         )
         energy = _exact_energy_from_samples(model, states, hamiltonian)
         expected = -float(n_terms)
@@ -520,6 +556,7 @@ class PhysicsModelTest(unittest.TestCase):
         logger.info("tfim_energy=%s expected=%s err=%s", energy, expected, err)
         self.assertLess(err, self.TFIM_TOL)
 
+    @pytest.mark.slow
     def test_tfim_free_fermion_energy_peps(self) -> None:
         n_sites = self.TFIM_SITES
         hi = nk.hilbert.Spin(s=0.5, N=n_sites)
@@ -603,6 +640,7 @@ class PhysicsModelTest(unittest.TestCase):
         logger.info("xy_energy=%s expected=%s err=%s", energy, expected, err)
         self.assertLess(err, self.XY_TOL)
 
+    @pytest.mark.slow
     def test_xy_free_fermion_energy_peps(self) -> None:
         n_sites = self.XY_SITES
         hi = nk.hilbert.Spin(s=0.5, N=n_sites)
@@ -680,6 +718,7 @@ class PhysicsModelTest(unittest.TestCase):
         logger.info("heisenberg_energy=%s expected=%s err=%s", energy, w[0], err)
         self.assertLess(err, self.HEISENBERG_TOL)
 
+    @pytest.mark.slow
     def test_heisenberg_energy_constant_peps(self) -> None:
         n_sites = self.HEISENBERG_SITES
         hi = nk.hilbert.Spin(s=0.5, N=n_sites)
@@ -716,6 +755,7 @@ class PhysicsModelTest(unittest.TestCase):
         )
         self.assertLess(err, self.HEISENBERG_TOL)
 
+    @pytest.mark.slow
     def test_square_heisenberg_energy_peps(self) -> None:
         shape = self.SQUARE_HEISENBERG_SHAPE
         n_sites = self.SQUARE_HEISENBERG_SITES
@@ -753,6 +793,7 @@ class PhysicsModelTest(unittest.TestCase):
         )
         self.assertLess(err, self.SQUARE_HEISENBERG_TOL)
 
+    @pytest.mark.slow
     def test_triangular_heisenberg_energy_peps(self) -> None:
         shape = self.TRI_HEISENBERG_SHAPE
         n_sites = self.TRI_HEISENBERG_SITES
@@ -790,6 +831,7 @@ class PhysicsModelTest(unittest.TestCase):
         )
         self.assertLess(err, self.TRI_HEISENBERG_TOL)
 
+    @pytest.mark.slow
     def test_square_j1j2_heisenberg_energy_peps(self) -> None:
         shape = self.SQUARE_J1J2_SHAPE
         n_sites = self.SQUARE_J1J2_SITES

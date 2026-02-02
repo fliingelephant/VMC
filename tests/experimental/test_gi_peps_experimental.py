@@ -227,6 +227,344 @@ class GIPEPSTest(unittest.TestCase):
             self.assertTrue(bool(amp_ok))
             self.assertTrue(bool(grad_ok))
 
+    def test_sliced_gradients_buggy_encoding_fails(self):
+        """Prove that the old buggy encoding (phys_idx only) fails reconstruction.
+        
+        This test demonstrates that encoding only phys_idx in p (without cfg_idx)
+        causes reconstruction to fail, proving the bug fix was necessary.
+        """
+        from vmc.experimental.lgt.gi_peps import _link_value_or_zero, _site_cfg_index
+
+        config = GIPEPSConfig(
+            shape=(3, 3),
+            N=2,
+            phys_dim=2,
+            Qx=0,
+            degeneracy_per_charge=(2, 2),
+            charge_of_site=(0, 1),
+        )
+        strategy = NoTruncation()
+        model = GIPEPS(rngs=nnx.Rngs(42), config=config, contraction_strategy=strategy)
+        electric_terms = build_electric_terms(config.shape, coeff=0.1, N=config.N)
+        plaquette_terms = self._plaquette_terms(config.shape, coeff=0.2)
+        operator = GILocalHamiltonian(
+            shape=config.shape,
+            terms=electric_terms + plaquette_terms,
+        )
+        key = jax.random.key(42)
+        key, init_key = jax.random.split(key)
+        init_cfg = model.random_physical_configuration(init_key, n_samples=1)
+
+        # Get full gradients as ground truth
+        samples_full, grads_full, _, _, _, _, _ = sequential_sample_with_gradients(
+            model,
+            operator,
+            n_samples=5,
+            n_chains=1,
+            key=key,
+            initial_configuration=init_cfg,
+            burn_in=1,
+            full_gradient=True,
+        )
+
+        # Get sliced gradients (with fixed encoding)
+        _, grads_sliced, p_fixed, _, _, _, _ = sequential_sample_with_gradients(
+            model,
+            operator,
+            n_samples=5,
+            n_chains=1,
+            key=key,
+            initial_configuration=init_cfg,
+            burn_in=1,
+            full_gradient=False,
+        )
+
+        tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
+        n_rows, n_cols = config.shape
+
+        def reconstruct_with_fixed_encoding(grads_sliced_i, p_i):
+            """Reconstruct using fixed encoding: p = phys_idx * nc + cfg_idx."""
+            grad_reconstructed = []
+            offset = 0
+            for r in range(n_rows):
+                for c in range(n_cols):
+                    t = tensors[r][c]
+                    phys_dim, nc = t.shape[0], t.shape[1]
+                    bond_size = t[0, 0].size
+
+                    sliced_grad = grads_sliced_i[offset : offset + bond_size]
+                    combined_idx = int(p_i[offset])
+                    phys_idx = combined_idx // nc
+                    cfg_idx = combined_idx % nc
+
+                    full_site = jnp.zeros(t.size, dtype=grads_sliced_i.dtype)
+                    start = (phys_idx * nc + cfg_idx) * bond_size
+                    full_site = full_site.at[start : start + bond_size].set(sliced_grad)
+                    grad_reconstructed.append(full_site)
+                    offset += bond_size
+            return jnp.concatenate(grad_reconstructed)
+
+        def reconstruct_with_buggy_encoding(grads_sliced_i, sample):
+            """Reconstruct using buggy encoding: p = phys_idx only (cfg_idx unknown).
+            
+            This simulates what would happen with the old buggy code:
+            We only know phys_idx, so we must guess cfg_idx (e.g., assume 0).
+            """
+            sites, _, _ = GIPEPS.unflatten_sample(sample, config.shape)
+            grad_reconstructed = []
+            offset = 0
+            for r in range(n_rows):
+                for c in range(n_cols):
+                    t = tensors[r][c]
+                    phys_dim, nc = t.shape[0], t.shape[1]
+                    bond_size = t[0, 0].size
+
+                    sliced_grad = grads_sliced_i[offset : offset + bond_size]
+                    phys_idx = int(sites[r, c])
+                    cfg_idx = 0  # BUGGY: we don't know cfg_idx, assume 0
+
+                    full_site = jnp.zeros(t.size, dtype=grads_sliced_i.dtype)
+                    start = (phys_idx * nc + cfg_idx) * bond_size
+                    full_site = full_site.at[start : start + bond_size].set(sliced_grad)
+                    grad_reconstructed.append(full_site)
+                    offset += bond_size
+            return jnp.concatenate(grad_reconstructed)
+
+        # Test reconstruction
+        fixed_matches = 0
+        buggy_matches = 0
+        for i in range(samples_full.shape[0]):
+            recon_fixed = reconstruct_with_fixed_encoding(grads_sliced[i], p_fixed[i])
+            recon_buggy = reconstruct_with_buggy_encoding(grads_sliced[i], samples_full[i])
+
+            fixed_ok = jax.device_get(
+                jnp.allclose(recon_fixed, grads_full[i], rtol=1e-5, atol=1e-6)
+            )
+            buggy_ok = jax.device_get(
+                jnp.allclose(recon_buggy, grads_full[i], rtol=1e-5, atol=1e-6)
+            )
+
+            if fixed_ok:
+                fixed_matches += 1
+            if buggy_ok:
+                buggy_matches += 1
+
+        # Fixed encoding should always work
+        self.assertEqual(
+            fixed_matches,
+            5,
+            "Fixed encoding (phys_idx * Nc + cfg_idx) should reconstruct all samples",
+        )
+        # Buggy encoding should fail for most samples (cfg_idx != 0)
+        self.assertLess(
+            buggy_matches,
+            5,
+            f"Buggy encoding (phys_idx only) should fail for samples with cfg_idx != 0, "
+            f"but {buggy_matches}/5 matched",
+        )
+
+    def test_sliced_gradients_reconstruct_to_full(self):
+        """Verify full_gradient=False produces gradients that reconstruct to full."""
+        config = GIPEPSConfig(
+            shape=(3, 3),
+            N=2,
+            phys_dim=2,
+            Qx=0,
+            degeneracy_per_charge=(2, 2),
+            charge_of_site=(0, 1),
+        )
+        strategy = NoTruncation()
+        model = GIPEPS(rngs=nnx.Rngs(42), config=config, contraction_strategy=strategy)
+        electric_terms = build_electric_terms(config.shape, coeff=0.1, N=config.N)
+        plaquette_terms = self._plaquette_terms(config.shape, coeff=0.2)
+        operator = GILocalHamiltonian(
+            shape=config.shape,
+            terms=electric_terms + plaquette_terms,
+        )
+        key = jax.random.key(42)
+        key, init_key = jax.random.split(key)
+        init_cfg = model.random_physical_configuration(init_key, n_samples=1)
+
+        # Get full gradients
+        key1, key2 = jax.random.split(key)
+        samples_full, grads_full, _, _, _, amps_full, _ = sequential_sample_with_gradients(
+            model,
+            operator,
+            n_samples=5,
+            n_chains=1,
+            key=key1,
+            initial_configuration=init_cfg,
+            burn_in=1,
+            full_gradient=True,
+        )
+
+        # Get sliced gradients with same key for same samples
+        samples_sliced, grads_sliced, p, _, _, amps_sliced, _ = sequential_sample_with_gradients(
+            model,
+            operator,
+            n_samples=5,
+            n_chains=1,
+            key=key1,
+            initial_configuration=init_cfg,
+            burn_in=1,
+            full_gradient=False,
+        )
+
+        # Verify samples match (same RNG key)
+        samples_match = jax.device_get(jnp.array_equal(samples_full, samples_sliced))
+        self.assertTrue(samples_match, "Samples should match with same RNG key")
+
+        # Reconstruct full gradients from sliced
+        tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
+        n_rows, n_cols = config.shape
+
+        for i in range(samples_full.shape[0]):
+            # Build param_sizes and nc_per_site for reconstruction
+            param_sizes = []
+            nc_per_site = []
+            for r in range(n_rows):
+                for c in range(n_cols):
+                    t = tensors[r][c]
+                    param_sizes.append(t.size)
+                    nc_per_site.append(t.shape[1])
+
+            # Reconstruct full gradient from sliced
+            grad_reconstructed = jnp.zeros_like(grads_full[i])
+            offset = 0
+            param_offset = 0
+            for site_idx in range(n_rows * n_cols):
+                r, c = divmod(site_idx, n_cols)
+                t = tensors[r][c]
+                phys_dim = t.shape[0]
+                nc = t.shape[1]
+                bond_size = t[0, 0].size  # size of (mu_u, mu_d, mu_l, mu_r)
+
+                # Extract this site's sliced gradient and p value
+                sliced_grad = grads_sliced[i, offset : offset + bond_size]
+                combined_idx = p[i, offset]  # all p values for this site are the same
+                phys_idx = combined_idx // nc
+                cfg_idx = combined_idx % nc
+
+                # Place in reconstructed array at correct position
+                # Full tensor layout: (phys_dim, nc, mu_u, mu_d, mu_l, mu_r).reshape(-1)
+                # Position = phys_idx * (nc * bond_size) + cfg_idx * bond_size
+                start_pos = param_offset + phys_idx * nc * bond_size + cfg_idx * bond_size
+                grad_reconstructed = grad_reconstructed.at[start_pos : start_pos + bond_size].set(
+                    sliced_grad
+                )
+
+                offset += bond_size
+                param_offset += phys_dim * nc * bond_size
+
+            # Compare reconstructed to full
+            match = jax.device_get(
+                jnp.allclose(grad_reconstructed, grads_full[i], rtol=1e-5, atol=1e-6)
+            )
+            self.assertTrue(
+                match,
+                f"Sample {i}: Reconstructed gradient should match full gradient",
+            )
+
+    def test_gipeps_sliced_dims(self):
+        """Verify sliced_dims dispatch returns correct per-site values."""
+        from vmc.utils.smallo import sliced_dims
+
+        config = GIPEPSConfig(
+            shape=(3, 3),
+            N=2,
+            phys_dim=2,
+            Qx=0,
+            degeneracy_per_charge=(2, 2),
+            charge_of_site=(0, 1),
+        )
+        model = GIPEPS(rngs=nnx.Rngs(0), config=config, contraction_strategy=NoTruncation())
+
+        sd = sliced_dims(model)
+        n_rows, n_cols = config.shape
+
+        # Verify we have one sliced_dim per site
+        self.assertEqual(len(sd), n_rows * n_cols)
+
+        # Verify values: sliced_dim = phys_dim * nc
+        # nc = N^(num_links - 1) for num_links > 0
+        idx = 0
+        for r in range(n_rows):
+            for c in range(n_cols):
+                num_links = int(r > 0) + int(r < n_rows - 1) + int(c > 0) + int(c < n_cols - 1)
+                expected_nc = config.N ** max(num_links - 1, 0)
+                expected_sliced_dim = config.phys_dim * expected_nc
+                self.assertEqual(
+                    sd[idx],
+                    expected_sliced_dim,
+                    f"Site ({r},{c}): expected sliced_dim={expected_sliced_dim}, got {sd[idx]}",
+                )
+                idx += 1
+
+    def test_sliced_jacobian_qgt_matches_full(self):
+        """Verify SlicedJacobian QGT matches full Jacobian QGT for GIPEPS."""
+        from vmc.qgt import QGT, Jacobian, SlicedJacobian, SiteOrdering
+        from vmc.utils.smallo import params_per_site, sliced_dims
+
+        config = GIPEPSConfig(
+            shape=(2, 2),
+            N=2,
+            phys_dim=2,
+            Qx=0,
+            degeneracy_per_charge=(2, 2),
+            charge_of_site=(0, 1),
+        )
+        model = GIPEPS(rngs=nnx.Rngs(123), config=config, contraction_strategy=NoTruncation())
+        electric_terms = build_electric_terms(config.shape, coeff=0.1, N=config.N)
+        plaquette_terms = self._plaquette_terms(config.shape, coeff=0.2)
+        operator = GILocalHamiltonian(
+            shape=config.shape,
+            terms=electric_terms + plaquette_terms,
+        )
+
+        key = jax.random.key(123)
+        key, init_key = jax.random.split(key)
+        init_cfg = model.random_physical_configuration(init_key, n_samples=1)
+
+        # Get full gradients
+        _, grads_full, _, _, _, amps, _ = sequential_sample_with_gradients(
+            model,
+            operator,
+            n_samples=8,
+            n_chains=1,
+            key=key,
+            initial_configuration=init_cfg,
+            burn_in=1,
+            full_gradient=True,
+        )
+
+        # Get sliced gradients
+        _, grads_sliced, p, _, _, _, _ = sequential_sample_with_gradients(
+            model,
+            operator,
+            n_samples=8,
+            n_chains=1,
+            key=key,
+            initial_configuration=init_cfg,
+            burn_in=1,
+            full_gradient=False,
+        )
+
+        # Build Jacobians
+        o_full = grads_full / amps[:, None]
+        o_sliced = grads_sliced / amps[:, None]
+
+        pps = tuple(params_per_site(model))
+        jac_full = Jacobian(o_full)
+        jac_sliced = SlicedJacobian(
+            o_sliced, p, sliced_dims(model), SiteOrdering(pps)
+        )
+
+        # Compare QGT dense matrices
+        qgt_full = QGT(jac_full).to_dense()
+        qgt_sliced = QGT(jac_sliced).to_dense()
+
+        match = jax.device_get(jnp.allclose(qgt_full, qgt_sliced, rtol=1e-5, atol=1e-6))
+        self.assertTrue(match, "SlicedJacobian QGT should match full Jacobian QGT")
 
 
 if __name__ == "__main__":

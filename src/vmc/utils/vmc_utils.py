@@ -14,6 +14,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 from flax import nnx
+from netket.operator import DiscreteOperator
 from plum import dispatch
 
 from vmc.core.eval import _value
@@ -114,7 +115,6 @@ def local_estimate(
     samples = jnp.asarray(samples)
     amps = jnp.asarray(amps)
     shape = model.shape
-    n_rows, n_cols = shape
     diagonal_terms, one_site_terms, horizontal_terms, vertical_terms, _ = bucket_terms(
         operator.terms, shape
     )
@@ -144,8 +144,9 @@ def local_estimate(
 
     tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
     def per_sample(sample, amp):
-        spins = spin_to_occupancy(sample).reshape(shape)
-        envs = bottom_envs(model, sample)
+        occupancy = spin_to_occupancy(sample)
+        spins = occupancy.reshape(shape)
+        envs = bottom_envs(model, occupancy)
         _, energy = _compute_all_env_grads_and_energy(
             tensors,
             spins,
@@ -168,15 +169,15 @@ def local_estimate(
 def local_estimate(
     model: object,
     samples: jax.Array,
-    operator: object,
+    operator: DiscreteOperator,
     amps: jax.Array,
 ) -> jax.Array:
-    """Compute local energy estimates for samples.
+    """Compute local energy estimates for samples using NetKet operator.
 
     Args:
         model: Variational model (MPS/PEPS).
         samples: Spin configurations with shape (n_samples, n_sites), occupancy format (0/1).
-        operator: Operator providing ``get_conn_padded``.
+        operator: NetKet DiscreteOperator providing ``get_conn_padded``.
         amps: Pre-computed amplitudes for samples.
 
     Returns:

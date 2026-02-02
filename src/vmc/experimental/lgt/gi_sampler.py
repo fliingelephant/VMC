@@ -76,8 +76,19 @@ def sequential_sample_with_gradients(
             for c in range(n_cols):
                 grad_parts.append(env_grads[r][c].reshape(-1))
                 params_per_site = env_grads[r][c].size
+                # Compute cfg_idx for this site's link configuration
+                k_l = _link_value_or_zero(h_links, v_links, r, c, direction="left")
+                k_r = _link_value_or_zero(h_links, v_links, r, c, direction="right")
+                k_u = _link_value_or_zero(h_links, v_links, r, c, direction="up")
+                k_d = _link_value_or_zero(h_links, v_links, r, c, direction="down")
+                cfg_idx = _site_cfg_index(
+                    config, k_l=k_l, k_u=k_u, k_r=k_r, k_d=k_d, r=r, c=c
+                )
+                # Encode combined index: phys_idx * Nc + cfg_idx
+                nc = tensors[r][c].shape[1]
+                combined_idx = sites[r, c] * nc + cfg_idx
                 p_parts.append(
-                    jnp.full((params_per_site,), sites[r, c], dtype=jnp.int8)
+                    jnp.full((params_per_site,), combined_idx, dtype=jnp.int16)
                 )
         return jnp.concatenate(grad_parts) / amp, jnp.concatenate(p_parts)
 

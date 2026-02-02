@@ -56,3 +56,4 @@ tpu_cache/
 *.fls
 *.fdb_latexmk
 *.synctex.gz
+.cursor/

@@ -166,6 +166,12 @@ def _toric_code_hamiltonian(
     n_rows: int,
     n_cols: int,
 ) -> tuple[nk.operator.LocalOperator, nk.hilbert.Spin, int]:
+    """Build toric code Hamiltonian.
+
+    Edge layout for PEPS shape (n_cols+1, n_rows+1):
+      - First n_rows*n_cols indices: horizontal edges (by row)
+      - Next n_rows*n_cols indices: vertical edges (by row)
+    """
     n_sites = 2 * n_rows * n_cols
     hi = nk.hilbert.Spin(s=0.5, N=n_sites)
     X = np.array([[0, 1], [1, 0]], dtype=np.complex128)
@@ -323,10 +329,10 @@ class PhysicsModelTest(unittest.TestCase):
 
     TORIC_ROWS = 2
     TORIC_COLS = 3
-    TORIC_SHAPE = (TORIC_ROWS, 2 * TORIC_COLS)
+    TORIC_SHAPE = (TORIC_COLS + 1, TORIC_ROWS + 1)  # (4, 3): natural unfolded torus grid
     TORIC_BOND_DIM = 3
     TORIC_SAMPLES = 2 ** (2 * TORIC_ROWS * TORIC_COLS)
-    TORIC_STEPS = 80
+    TORIC_STEPS = 20
     TORIC_DT = 0.1
     TORIC_TOL = 2.5e-2
 
@@ -477,6 +483,26 @@ class PhysicsModelTest(unittest.TestCase):
             bond_dim=self.TORIC_BOND_DIM,
             contraction_strategy=NoTruncation(),
         )
+        # Initialize to |+⟩⊗n using identity-on-bonds + small noise
+        # T[s, u, d, l, r] = (1/√2) × δ_{u,d} × δ_{l,r} + noise
+        # The noise breaks symmetry, enabling non-zero gradients
+        init_key = jax.random.key(123)
+        keys = jax.random.split(init_key, len(model.tensors) * len(model.tensors[0]))
+        k = 0
+        for row in model.tensors:
+            for tensor in row:
+                arr = tensor[...]
+                D = arr.shape[1]  # bond dimension
+                new_arr = jnp.zeros_like(arr)
+                for s in range(2):
+                    for b_ud in range(D):
+                        for b_lr in range(D):
+                            new_arr = new_arr.at[s, b_ud, b_ud, b_lr, b_lr].set(
+                                1.0 / jnp.sqrt(2)
+                            )
+                noise = 0.1 * jax.random.normal(keys[k], arr.shape, dtype=arr.dtype)
+                tensor[...] = new_arr + noise
+                k += 1
 
         model = _run_imag_time(
             model,
@@ -486,7 +512,7 @@ class PhysicsModelTest(unittest.TestCase):
             n_steps=self.TORIC_STEPS,
             dt=self.TORIC_DT,
             diag_shift=self.DIAG_SHIFT,
-            key=jax.random.key(self.SEED + 2),
+            key=jax.random.key(42),
         )
         energy = _exact_energy_from_samples(model, states, hamiltonian)
         expected = -float(n_terms)

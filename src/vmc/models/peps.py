@@ -30,6 +30,7 @@ __all__ = [
     "NoTruncation",
     "ZipUp",
     "DensityMatrix",
+    "Variational",
     # Dispatched API functions
     "bottom_envs",
     "grads_and_energy",
@@ -105,6 +106,27 @@ class DensityMatrix(ContractionStrategy):
 
     def apply(self, mps: tuple, mpo: tuple) -> tuple:
         return _apply_mpo_density_matrix(mps, mpo, self.truncate_bond_dimension)
+
+
+class Variational(ContractionStrategy):
+    """Variational MPS compression - iterative sweep optimization.
+
+    This strategy avoids direct SVD by using alternating least squares (ALS)
+    to compress the MPS-MPO product. Unlike ZipUp which uses batched SVD
+    (limited to 32x32 matrices on GPU), this uses tensor contractions and
+    QR decomposition which scale better under vmap.
+
+    Reference: Liu et al. 2021, Appendix B - "Boundary-MPS contraction scheme"
+    """
+
+    def __init__(self, truncate_bond_dimension: int, n_sweeps: int = 2):
+        super().__init__(truncate_bond_dimension=truncate_bond_dimension)
+        self.n_sweeps = n_sweeps
+
+    def apply(self, mps: tuple, mpo: tuple) -> tuple:
+        return _apply_mpo_variational(
+            mps, mpo, self.truncate_bond_dimension, self.n_sweeps
+        )
 
 
 def _contract_theta(m: jax.Array, w: jax.Array, carry: jax.Array | None) -> tuple:
@@ -186,6 +208,236 @@ def _apply_mpo_density_matrix(
         carry = vecs_k.conj().T.reshape(k, Dr, wr)
 
     return tuple(new)
+
+
+@functools.partial(jax.jit, static_argnums=(2, 3))
+def _apply_mpo_variational(
+    mps: tuple, mpo: tuple, truncate_bond_dimension: int, n_sweeps: int = 2
+) -> tuple:
+    """Apply MPO with variational MPS compression (iterative sweeping).
+
+    Implements variational MPS compression from Schollwöck (arXiv:1008.3477, Sec 4.5.2)
+    and Paeckel et al. (arXiv:1901.05824, Sec 2.6.2, 2.8.2).
+
+    Algorithm:
+    1. Form exact MPS-MPO product (bond dimension grows to D*w)
+    2. Initialize compressed MPS with target bond dimension Dc
+    3. Iterative sweeps: at each site compute optimal tensor M'[i] = L̃ @ M[i] @ R̃
+       where L̃, R̃ are overlap environments between result and target
+    4. QR maintains canonical form (no truncation needed - bond dim fixed by init)
+
+    This avoids SVD entirely, using only QR for canonical form maintenance.
+    """
+    n_sites = len(mps)
+    dtype = mps[0].dtype
+    Dc = truncate_bond_dimension
+
+    # Step 1: Form exact MPS-MPO product (bond dimension grows)
+    target = _apply_mpo_exact(mps, mpo)
+
+    # Step 2: Initialize compressed MPS with target bond dimension
+    # Use simple QR-based initialization (sweep left-to-right)
+    result = _init_compressed_mps(target, Dc, dtype)
+
+    # Step 3: Iterative refinement via variational sweeping
+    for _ in range(n_sweeps):
+        # Build all right environments first
+        right_envs = _build_right_envs(target, result, dtype)
+        # Left-to-right sweep with proper overlap environments
+        result = _variational_sweep_lr(target, result, right_envs, dtype)
+
+        # Build all left environments
+        left_envs = _build_left_envs(target, result, dtype)
+        # Right-to-left sweep with proper overlap environments
+        result = _variational_sweep_rl(target, result, left_envs, dtype)
+
+    return tuple(result)
+
+
+def _init_compressed_mps(
+    target: tuple, Dc: int, dtype: jnp.dtype
+) -> list[jax.Array]:
+    """Initialize compressed MPS with target bond dimension via QR."""
+    n_sites = len(target)
+    result = []
+    carry = None
+
+    for i in range(n_sites):
+        t = target[i]  # (left, phys, right)
+        left_dim, phys_dim, right_dim = t.shape
+
+        if carry is not None:
+            t = jnp.tensordot(carry, t, axes=[[1], [0]])
+            left_dim = t.shape[0]
+
+        if i == n_sites - 1:
+            result.append(t)
+            break
+
+        # Reshape for QR: (left * phys, right)
+        mat = t.reshape(left_dim * phys_dim, right_dim)
+
+        # QR decomposition
+        Q, R = jax.lax.linalg.qr(mat, full_matrices=False)
+
+        # Truncate to Dc columns (simple truncation for initialization)
+        k = min(Dc, Q.shape[1])
+        Q_trunc = Q[:, :k]
+        R_trunc = R[:k, :]
+
+        result.append(Q_trunc.reshape(left_dim, phys_dim, k))
+        carry = R_trunc
+
+    return result
+
+
+def _build_right_envs(
+    target: tuple, result: list, dtype: jnp.dtype
+) -> list[jax.Array]:
+    """Build all right overlap environments R̃[i] from right to left.
+
+    R̃[i] contracts target[i+1:] with result[i+1:].
+    Shape: R̃[i][target_bond, result_bond]
+    """
+    n_sites = len(target)
+    right_envs = [None] * n_sites
+
+    # R̃[n-1] = identity (no sites to the right of last site)
+    R = jnp.ones((1, 1), dtype=dtype)
+    right_envs[n_sites - 1] = R
+
+    for i in range(n_sites - 2, -1, -1):
+        t = target[i + 1]  # (tl, p, tr)
+        r = result[i + 1]  # (rl, p, rr)
+
+        # R̃_new[tl, rl] = sum_{p, tr, rr} t[tl, p, tr] * R̃[tr, rr] * r*[rl, p, rr]
+        # Contract target with R
+        tR = jnp.tensordot(t, R, axes=[[2], [0]])  # (tl, p, rr)
+        # Contract with result conjugate
+        R = jnp.tensordot(tR, r.conj(), axes=[[1, 2], [1, 2]])  # (tl, rl)
+        right_envs[i] = R
+
+    return right_envs
+
+
+def _build_left_envs(
+    target: tuple, result: list, dtype: jnp.dtype
+) -> list[jax.Array]:
+    """Build all left overlap environments L̃[i] from left to right.
+
+    L̃[i] contracts target[:i] with result[:i].
+    Shape: L̃[i][target_bond, result_bond]
+    """
+    n_sites = len(target)
+    left_envs = [None] * n_sites
+
+    # L̃[0] = identity (no sites to the left of first site)
+    L = jnp.ones((1, 1), dtype=dtype)
+    left_envs[0] = L
+
+    for i in range(1, n_sites):
+        t = target[i - 1]  # (tl, p, tr)
+        r = result[i - 1]  # (rl, p, rr)
+
+        # L̃_new[tr, rr] = sum_{tl, rl, p} L̃[tl, rl] * t[tl, p, tr] * r*[rl, p, rr]
+        # Contract L with target
+        Lt = jnp.tensordot(L, t, axes=[[0], [0]])  # (rl, p, tr)
+        # Contract with result conjugate
+        L = jnp.tensordot(Lt, r.conj(), axes=[[0, 1], [0, 1]])  # (tr, rr)
+        left_envs[i] = L
+
+    return left_envs
+
+
+def _variational_sweep_lr(
+    target: tuple, result: list, right_envs: list, dtype: jnp.dtype
+) -> list[jax.Array]:
+    """Left-to-right variational sweep with proper overlap environments.
+
+    At each site i, compute optimal tensor: M'[i] = L̃ @ M[i] @ R̃[i]
+    Then QR decompose to maintain left-canonical form.
+    """
+    n_sites = len(target)
+    new_result = []
+
+    # Left environment starts as identity
+    L = jnp.ones((1, 1), dtype=dtype)
+
+    for i in range(n_sites):
+        t = target[i]  # (tl, p, tr)
+        R = right_envs[i]  # (tr, rr)
+
+        # Compute optimal tensor: M'[rl, p, rr] = L̃[tl, rl] @ M[tl, p, tr] @ R̃[tr, rr]
+        # Step 1: Contract L with target
+        Lt = jnp.tensordot(L, t, axes=[[0], [0]])  # (rl, p, tr)
+        # Step 2: Contract with R
+        optimal = jnp.tensordot(Lt, R, axes=[[2], [0]])  # (rl, p, rr)
+
+        if i == n_sites - 1:
+            # Last site: just store the optimal tensor
+            new_result.append(optimal)
+            break
+
+        # QR decompose to maintain left-canonical form
+        left_dim, phys_dim, right_dim = optimal.shape
+        mat = optimal.reshape(left_dim * phys_dim, right_dim)
+        Q, remainder = jax.lax.linalg.qr(mat, full_matrices=False)
+
+        new_tensor = Q.reshape(left_dim, phys_dim, Q.shape[1])
+        new_result.append(new_tensor)
+
+        # Update left environment for next site
+        # L̃_new[tr, rr] = L̃[tl, rl] * t[tl, p, tr] * new_tensor*[rl, p, rr]
+        L = jnp.tensordot(Lt, new_tensor.conj(), axes=[[0, 1], [0, 1]])  # (tr, rr)
+
+    return new_result
+
+
+def _variational_sweep_rl(
+    target: tuple, result: list, left_envs: list, dtype: jnp.dtype
+) -> list[jax.Array]:
+    """Right-to-left variational sweep with proper overlap environments.
+
+    At each site i, compute optimal tensor: M'[i] = L̃[i] @ M[i] @ R̃
+    Then LQ decompose to maintain right-canonical form.
+    """
+    n_sites = len(target)
+    new_result = list(result)  # Copy
+
+    # Right environment starts as identity
+    R = jnp.ones((1, 1), dtype=dtype)
+
+    for i in range(n_sites - 1, -1, -1):
+        t = target[i]  # (tl, p, tr)
+        L = left_envs[i]  # (tl, rl)
+
+        # Compute optimal tensor: M'[rl, p, rr] = L̃[tl, rl] @ M[tl, p, tr] @ R̃[tr, rr]
+        # Step 1: Contract target with R
+        tR = jnp.tensordot(t, R, axes=[[2], [0]])  # (tl, p, rr)
+        # Step 2: Contract with L
+        optimal = jnp.tensordot(L, tR, axes=[[0], [0]])  # (rl, p, rr)
+
+        if i == 0:
+            # First site: just store the optimal tensor
+            new_result[i] = optimal
+            break
+
+        # LQ decompose to maintain right-canonical form
+        # LQ via QR on transpose: A = L @ Q, A.T = Q.T @ L.T
+        left_dim, phys_dim, right_dim = optimal.shape
+        mat = optimal.reshape(left_dim, phys_dim * right_dim)
+        Q_t, R_t = jax.lax.linalg.qr(mat.T, full_matrices=False)
+        # Q = Q_t.T has orthonormal rows, L = R_t.T
+        Q_mat = Q_t.T  # (k, phys * right)
+
+        new_tensor = Q_mat.reshape(Q_mat.shape[0], phys_dim, right_dim)
+        new_result[i] = new_tensor
+
+        # Update right environment for next site
+        # R̃_new[tl, rl] = t[tl, p, tr] * R̃[tr, rr] * new_tensor*[rl, p, rr]
+        R = jnp.tensordot(tR, new_tensor.conj(), axes=[[1, 2], [1, 2]])  # (tl, rl)
+
+    return new_result
 
 
 def _build_row_mpo(tensors, row_indices, row, n_cols):
@@ -718,12 +970,7 @@ def sweep(
             new_idx = jnp.where(accept, flip_idx, cur_idx)
             indices = indices.at[row, col].set(new_idx)
 
-            mpo_sel = jax.lax.cond(
-                accept,
-                lambda _: mpo_flip,
-                lambda _: mpo_cur,
-                operand=None,
-            )
+            mpo_sel = jnp.where(accept, mpo_flip, mpo_cur)
             updated_row.append(mpo_sel)
             # Direct einsum for left_env update
             left_env = jnp.einsum(

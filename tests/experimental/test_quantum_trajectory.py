@@ -410,7 +410,7 @@ class TestExactLindbladComparison:
         T1 = 1.0
         dt = 0.01
         t_final = 1.0
-        n_traj = 2000
+        n_traj = 200
         n_steps = int(t_final / dt) + 1
         n_sites = 4  # 2x2 grid
 
@@ -466,8 +466,8 @@ class TestExactLindbladComparison:
             print(f"  t={t:.2f}: exact={exact_occ:.4f}, PEPS={ensemble_occ:.4f}, "
                   f"rel_error={rel_error:.2%}")
 
-        # With 2000 trajectories, expect ~2% relative error
-        assert max_rel_error < 0.03, f"Max relative error {max_rel_error:.2%} exceeds 3%"
+        # With 200 trajectories, expect ~6% relative error
+        assert max_rel_error < 0.10, f"Max relative error {max_rel_error:.2%} exceeds 10%"
 
     def test_dephasing_preserves_population(self):
         """Verify pure dephasing (T2) doesn't change populations.

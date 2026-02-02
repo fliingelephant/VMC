@@ -165,8 +165,8 @@ def _sequential_mps_sweep_with_envs(
             flip_idx = (cur_idx + delta) % phys_dim
         tensor_cur = tensors[site, cur_idx]
         tensor_flip = tensors[site, flip_idx]
-        amp_cur = jnp.einsum("i,ij,j->", left_env, tensor_cur, right_env, optimize=True)
-        amp_flip = jnp.einsum("i,ij,j->", left_env, tensor_flip, right_env, optimize=True)
+        amp_cur = jnp.einsum("i,ij,j->", left_env, tensor_cur, right_env, optimize=[(0, 1), (0, 1)])
+        amp_flip = jnp.einsum("i,ij,j->", left_env, tensor_flip, right_env, optimize=[(0, 1), (0, 1)])
         weight_cur = jnp.abs(amp_cur) ** 2
         weight_flip = jnp.abs(amp_flip) ** 2
         ratio = _metropolis_ratio(weight_cur, weight_flip)

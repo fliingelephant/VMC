@@ -63,13 +63,23 @@ def _reorder_updates(
     ordering: SliceOrdering,
     updates_flat: jax.Array,
     pps: tuple[int, ...],
-    phys_dim: int,
+    sliced_dims: tuple[int, ...],
 ) -> jax.Array:
+    """Permute updates from k-major to site-major order.
+
+    SliceOrdering produces the expanded Jacobian with columns ordered as:
+        [k=0 all sites] [k=1 all sites] ... [k=max all sites]
+    But the parameter tree expects site-major order:
+        [site0 all k] [site1 all k] ... [siteN all k]
+
+    This function builds a permutation that extracts entries in site-major order.
+    For non-uniform sliced_dims, only valid (site, k) pairs are included.
+    """
     total = sum(pps)
     perm = []
     site_offset = 0
-    for n in pps:
-        for k in range(phys_dim):
+    for site_idx, n in enumerate(pps):
+        for k in range(sliced_dims[site_idx]):
             base = k * total + site_offset
             perm.extend(range(base, base + n))
         site_offset += n
@@ -81,8 +91,9 @@ def _reorder_updates(
     ordering: SiteOrdering,
     updates_flat: jax.Array,
     pps: tuple[int, ...],
-    phys_dim: int,
+    sliced_dims: tuple[int, ...],
 ) -> jax.Array:
+    """SiteOrdering already produces site-major order, no reordering needed."""
     return updates_flat
 
 
@@ -303,9 +314,8 @@ class SRPreconditioner:
 
         updates_flat = Q @ updates_red if Q is not None else updates_red
         if Q is None and p is not None:
-            max_sliced_dim = max(sd)
             updates_flat = _reorder_updates(
-                self.ordering, updates_flat, pps, max_sliced_dim
+                self.ordering, updates_flat, pps, sd
             )
         _, unravel = ravel_pytree(params)
         updates = unravel(updates_flat)

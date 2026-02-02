@@ -84,15 +84,13 @@ class SlicedJacobian:
     ):
         """Construct from model and samples."""
         from vmc.core import _value_and_grad
+        from vmc.utils.smallo import sliced_dims
         from vmc.utils.vmc_utils import flatten_samples
 
         samples = flatten_samples(samples)
         amps, grads, p = _value_and_grad(model, samples, full_gradient=False)
         o = grads / amps[:, None]
-        # Default: uniform phys_dim for all sites
-        n_sites = getattr(model, "n_sites", grads.shape[1])
-        sliced_dims = (model.phys_dim,) * n_sites
-        return cls(o, p, sliced_dims, ordering)
+        return cls(o, p, sliced_dims(model), ordering)
 
 
 @dispatch

@@ -12,7 +12,7 @@ import jax.numpy as jnp
 from flax import nnx
 
 from vmc.models.mps import MPS
-from vmc.models.peps import PEPS, ZipUp
+from vmc.models.peps import PEPS, Variational
 from vmc.utils import (
     DiscardBlockedSampler,
     IndependentSetSampler,
@@ -830,7 +830,7 @@ def main() -> None:
                 rngs=nnx.Rngs(seed),
                 shape=shape_full,
                 bond_dim=PEPS_BOND_DIM,
-                contraction_strategy=ZipUp(
+                contraction_strategy=Variational(
                     truncate_bond_dimension=PEPS_TRUNCATE_BOND_DIM
                 ),
                 dtype=DTYPE,
@@ -878,7 +878,7 @@ def main() -> None:
                 rngs=nnx.Rngs(seed),
                 shape=shape_fullsum,
                 bond_dim=PEPS_BOND_DIM,
-                contraction_strategy=ZipUp(
+                contraction_strategy=Variational(
                     truncate_bond_dimension=PEPS_TRUNCATE_BOND_DIM
                 ),
                 dtype=DTYPE,
@@ -908,7 +908,7 @@ def main() -> None:
                     rngs=nnx.Rngs(seed),
                     shape=cfg["shape"],
                     bond_dim=PEPS_BOND_DIM,
-                    contraction_strategy=ZipUp(
+                    contraction_strategy=Variational(
                         truncate_bond_dimension=PEPS_TRUNCATE_BOND_DIM
                     ),
                     dtype=DTYPE,

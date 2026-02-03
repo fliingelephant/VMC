@@ -9,13 +9,13 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from vmc.models.peps import DensityMatrix, NoTruncation, PEPS, ZipUp
+from vmc.models.peps import DensityMatrix, NoTruncation, PEPS, Variational, ZipUp
 
 
 class PEPSStrategyEquivalenceTest(unittest.TestCase):
     def test_strategies_match_no_truncation(self) -> None:
-        shape = (2, 3)
-        bond_dim = 2
+        shape = (3, 3)
+        bond_dim = 4
         model = PEPS(
             rngs=nnx.Rngs(0),
             shape=shape,
@@ -35,10 +35,10 @@ class PEPSStrategyEquivalenceTest(unittest.TestCase):
             )(samples)
 
         amps_ref = amps_for(NoTruncation())
-        for strategy in (ZipUp(64), DensityMatrix(64)):
+        for strategy in (ZipUp(16), DensityMatrix(16), Variational(16, n_sweeps=2)):
             amps = amps_for(strategy)
             max_diff = float(jnp.max(jnp.abs(amps - amps_ref)))
-            self.assertLess(max_diff, 1e-7)
+            self.assertLess(max_diff, 1e-7, f"{strategy} failed")
 
 
 if __name__ == "__main__":

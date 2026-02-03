@@ -30,6 +30,7 @@ __all__ = [
     "NoTruncation",
     "ZipUp",
     "DensityMatrix",
+    "Variational",
     # Dispatched API functions
     "bottom_envs",
     "grads_and_energy",
@@ -107,20 +108,42 @@ class DensityMatrix(ContractionStrategy):
         return _apply_mpo_density_matrix(mps, mpo, self.truncate_bond_dimension)
 
 
+class Variational(ContractionStrategy):
+    """Variational MPS compression - iterative sweep optimization.
+
+    This strategy avoids direct SVD by using alternating least squares (ALS)
+    to compress the MPS-MPO product. Unlike ZipUp which uses batched SVD
+    (limited to 32x32 matrices on GPU), this uses tensor contractions and
+    QR decomposition which scale better under vmap.
+
+    Reference: Liu et al. 2021, Appendix B - "Boundary-MPS contraction scheme"
+    """
+
+    def __init__(self, truncate_bond_dimension: int, n_sweeps: int = 2):
+        super().__init__(truncate_bond_dimension=truncate_bond_dimension)
+        self.n_sweeps = n_sweeps
+
+    def apply(self, mps: tuple, mpo: tuple) -> tuple:
+        return _apply_mpo_variational(
+            mps, mpo, self.truncate_bond_dimension, self.n_sweeps
+        )
+
+
 def _contract_theta(m: jax.Array, w: jax.Array, carry: jax.Array | None) -> tuple:
     """Contract MPS tensor with MPO tensor and optional carry from previous site.
 
     Returns (theta, left_dim, phys_dim, Dr, wr) where theta has shape
     (left_dim, phys_dim, Dr, wr).
     """
-    theta = jnp.tensordot(m, w, axes=[[1], [2]])  # (Dl, Dr, wl, wr, down)
-    theta = jnp.transpose(theta, (0, 2, 4, 1, 3))  # (Dl, wl, down, Dr, wr)
     if carry is not None:
-        theta = jnp.tensordot(carry, theta, axes=[[1, 2], [0, 1]])
-    if theta.ndim == 5:
-        Dl, wl, down, Dr, wr = theta.shape
-        theta = theta.reshape(Dl * wl, down, Dr, wr)
-    left_dim, phys_dim, Dr, wr = theta.shape
+        tmp = jnp.einsum("kdl,dpr->prkl", carry, m)
+        theta = jnp.einsum("prkl,lwpq->kqrw", tmp, w)
+        left_dim, phys_dim, Dr, wr = theta.shape
+        return theta, left_dim, phys_dim, Dr, wr
+    theta = jnp.einsum("dpr,lwpq->dlqrw", m, w)
+    Dl, wl, phys_dim, Dr, wr = theta.shape
+    theta = theta.reshape(Dl * wl, phys_dim, Dr, wr)
+    left_dim = Dl * wl
     return theta, left_dim, phys_dim, Dr, wr
 
 
@@ -186,6 +209,259 @@ def _apply_mpo_density_matrix(
         carry = vecs_k.conj().T.reshape(k, Dr, wr)
 
     return tuple(new)
+
+
+@functools.partial(jax.jit, static_argnums=(2, 3))
+def _apply_mpo_variational(
+    mps: tuple, mpo: tuple, truncate_bond_dimension: int, n_sweeps: int = 2
+) -> tuple:
+    """Apply MPO with variational MPS compression (iterative sweeping).
+
+    Implements variational MPS compression from Schollwöck (arXiv:1008.3477, Sec 4.5.2)
+    and Paeckel et al. (arXiv:1901.05824, Sec 2.6.2, 2.8.2).
+
+    Algorithm:
+    1. Initialize compressed MPS with target bond dimension Dc via QR sweep
+       without materializing the full MPO-MPS product.
+    2. Iterative sweeps: at each site compute optimal tensor M'[i] = L̃ @ M[i] @ R̃
+       where L̃, R̃ are overlap environments between result and the implicit target
+       defined by the MPO-MPS product.
+    3. QR maintains canonical form (no truncation needed - bond dim fixed by init)
+
+    This avoids SVD entirely, using only QR for canonical form maintenance.
+    """
+    n_sites = len(mps)
+    dtype = mps[0].dtype
+    Dc = truncate_bond_dimension
+
+    # Step 1: Initialize compressed MPS with target bond dimension
+    # Use QR-based initialization without materializing the full MPO-MPS product.
+    result = _init_compressed_mps(mps, mpo, Dc)
+
+    # Step 2: Iterative refinement via variational sweeping
+    # Initial right environments for the first left-to-right sweep.
+    right_envs = _build_right_envs(mps, mpo, result, dtype)
+    for _ in range(n_sweeps):
+        # Left-to-right sweep with proper overlap environments.
+        # This also builds left environments for the updated result.
+        result, left_envs = _variational_sweep_lr(
+            mps, mpo, result, right_envs, dtype
+        )
+        # Right-to-left sweep with proper overlap environments.
+        # This also builds right environments for the updated result.
+        result, right_envs = _variational_sweep_rl(
+            mps, mpo, result, left_envs, dtype
+        )
+
+    return tuple(result)
+
+
+def _init_compressed_mps(mps: tuple, mpo: tuple, Dc: int) -> list[jax.Array]:
+    """Initialize compressed MPS with target bond dimension via QR.
+
+    Creates a left-canonical MPS by sweeping left-to-right with QR on the
+    implicit MPO-MPS product, without materializing the full product.
+    Bond dimensions are capped at Dc.
+    """
+    n_sites = len(mps)
+    result = []
+    carry = None
+
+    for i, (m, w) in enumerate(zip(mps, mpo)):
+        theta, left_dim, phys_dim, Dr, wr = _contract_theta(m, w, carry)
+
+        if i == n_sites - 1:
+            result.append(theta.reshape(left_dim, phys_dim, Dr * wr))
+            break
+
+        # Reshape for QR: (left * phys, right)
+        mat = theta.reshape(left_dim * phys_dim, Dr * wr)
+
+        # QR decomposition
+        Q, R = jax.lax.linalg.qr(mat, full_matrices=False)
+
+        # Truncate to Dc columns
+        k = min(Dc, Q.shape[1])
+        Q_trunc = Q[:, :k]
+        R_trunc = R[:k, :]
+
+        result.append(Q_trunc.reshape(left_dim, phys_dim, k))
+        carry = R_trunc.reshape(k, Dr, wr)
+
+    return result
+
+
+def _build_right_envs(
+    mps: tuple, mpo: tuple, result: list, dtype: jnp.dtype
+) -> list[jax.Array]:
+    """Build all right overlap environments R̃[i] from right to left.
+
+    R̃[i] contracts sites i+1: with the implicit MPO-MPS product and result.
+    Shape: R̃[i][mps_right, mpo_right, result_right]
+    """
+    n_sites = len(mps)
+    right_envs = [None] * n_sites
+
+    # R̃[n-1] = identity (no sites to the right of last site)
+    R = jnp.ones((1, 1, 1), dtype=dtype)
+    right_envs[n_sites - 1] = R
+
+    for i in range(n_sites - 2, -1, -1):
+        m = mps[i + 1]  # (Dl, pin, Dr)
+        w = mpo[i + 1]  # (wl, wr, pin, pout)
+        r = result[i + 1]  # (rl, pout, rr)
+
+        # R̃_new[Dl, wl, rl] = sum_{Dr, wr, rr, pin, pout}
+        #   m[Dl, pin, Dr] * w[wl, wr, pin, pout] * r*[rl, pout, rr] * R̃[Dr, wr, rr]
+        R = jnp.einsum(
+            "aqb,rwb,lwpq,dpr->dla",
+            r.conj(),
+            R,
+            w,
+            m,
+            optimize=[(1, 0), (2, 0), (1, 0)],
+        )
+        right_envs[i] = R
+
+    return right_envs
+
+
+def _variational_sweep_lr(
+    mps: tuple, mpo: tuple, result: list, right_envs: list, dtype: jnp.dtype
+) -> tuple[list[jax.Array], list[jax.Array]]:
+    """Left-to-right variational sweep (one-site, QR only).
+
+    At each site j:
+    1. Compute optimal tensor: M'[j] = L̃ @ M[j] @ R̃[j]
+    2. QR decompose: M'[j] = A[j] @ C[j]
+    3. Absorb C[j] into result[j+1] for next iteration (Paeckel Sec 2.5)
+
+    Reference: Paeckel et al. arXiv:1901.05824, Sec 2.5-2.6.2, Alg 5
+    """
+    n_sites = len(mps)
+    new_result = list(result)  # Copy to allow absorbing C
+    left_envs = [None] * n_sites
+
+    # Left environment starts as identity
+    L = jnp.ones((1, 1, 1), dtype=dtype)
+
+    for i in range(n_sites):
+        left_envs[i] = L
+        m = mps[i]  # (Dl, pin, Dr)
+        w = mpo[i]  # (wl, wr, pin, pout)
+        R = right_envs[i]  # (Dr, wr, rr)
+
+        # Compute optimal tensor from implicit MPO-MPS product.
+        # M'[rl, pout, rr] = sum L[Dl, wl, rl] * m[Dl, pin, Dr]
+        #                     * w[wl, wr, pin, pout] * R[Dr, wr, rr]
+        optimal = jnp.einsum(
+            "dpr,dla,lwpq,rwb->aqb",
+            m,
+            L,
+            w,
+            R,
+            optimize=[(1, 0), (2, 0), (1, 0)],
+        )
+
+        if i == n_sites - 1:
+            new_result[i] = optimal
+            break
+
+        # QR decompose: optimal = A @ C (Paeckel Sec 2.5)
+        left_dim, phys_dim, right_dim = optimal.shape
+        mat = optimal.reshape(left_dim * phys_dim, right_dim)
+        A, C = jax.lax.linalg.qr(mat, full_matrices=False)
+
+        new_tensor = A.reshape(left_dim, phys_dim, A.shape[1])
+        new_result[i] = new_tensor
+
+        # Absorb C into next tensor: result[j+1] ← C @ result[j+1] (Paeckel Sec 2.5)
+        # This maintains state equivalence during the sweep
+        next_tensor = new_result[i + 1]  # (rl_next, p_next, rr_next)
+        new_result[i + 1] = jnp.einsum("ab,bpr->apr", C, next_tensor)
+
+        # Update left environment for next site using the new tensor
+        L = jnp.einsum(
+            "dpr,dla,lwpq,aqb->rwb",
+            m,
+            L,
+            w,
+            new_tensor.conj(),
+            optimize=[(1, 0), (2, 0), (1, 0)],
+        )
+
+    return new_result, left_envs
+
+
+def _variational_sweep_rl(
+    mps: tuple, mpo: tuple, result: list, left_envs: list, dtype: jnp.dtype
+) -> tuple[list[jax.Array], list[jax.Array]]:
+    """Right-to-left variational sweep (one-site, QR only).
+
+    At each site j:
+    1. Compute optimal tensor: M'[j] = L̃[j] @ M[j] @ R̃
+    2. LQ decompose: M'[j] = C[j-1] @ B[j]
+    3. Absorb C[j-1] into result[j-1] for next iteration (Paeckel Sec 2.5)
+
+    Reference: Paeckel et al. arXiv:1901.05824, Sec 2.5-2.6.2, Alg 5
+    """
+    n_sites = len(mps)
+    new_result = list(result)  # Copy to allow absorbing C
+    right_envs = [None] * n_sites
+
+    # Right environment starts as identity
+    R = jnp.ones((1, 1, 1), dtype=dtype)
+
+    for i in range(n_sites - 1, -1, -1):
+        right_envs[i] = R
+        m = mps[i]  # (Dl, pin, Dr)
+        w = mpo[i]  # (wl, wr, pin, pout)
+        L = left_envs[i]  # (Dl, wl, rl)
+
+        # Compute optimal tensor from implicit MPO-MPS product.
+        # M'[rl, pout, rr] = sum L[Dl, wl, rl] * m[Dl, pin, Dr]
+        #                     * w[wl, wr, pin, pout] * R[Dr, wr, rr]
+        optimal = jnp.einsum(
+            "dpr,dla,lwpq,rwb->aqb",
+            m,
+            L,
+            w,
+            R,
+            optimize=[(1, 0), (2, 0), (1, 0)],
+        )
+
+        if i == 0:
+            new_result[i] = optimal
+            break
+
+        # LQ decompose: optimal = C @ B (Paeckel Sec 2.5)
+        # LQ via QR on transpose: A = C @ B, A.T = B.T @ C.T
+        left_dim, phys_dim, right_dim = optimal.shape
+        mat = optimal.reshape(left_dim, phys_dim * right_dim)
+        Q_t, R_t = jax.lax.linalg.qr(mat.T, full_matrices=False)
+        # B = Q_t.T has orthonormal rows, C = R_t.T
+        B = Q_t.T  # (k, phys * right)
+        C = R_t.T  # (left, k)
+
+        new_tensor = B.reshape(B.shape[0], phys_dim, right_dim)
+        new_result[i] = new_tensor
+
+        # Absorb C into previous tensor: result[j-1] ← result[j-1] @ C (Paeckel Sec 2.5)
+        # This maintains state equivalence during the sweep
+        prev_tensor = new_result[i - 1]  # (rl_prev, p_prev, rr_prev)
+        new_result[i - 1] = jnp.einsum("lpr,rb->lpb", prev_tensor, C)
+
+        # Update right environment for next site using the new tensor
+        R = jnp.einsum(
+            "aqb,rwb,lwpq,dpr->dla",
+            new_tensor.conj(),
+            R,
+            w,
+            m,
+            optimize=[(1, 0), (2, 0), (1, 0)],
+        )
+
+    return new_result, right_envs
 
 
 def _build_row_mpo(tensors, row_indices, row, n_cols):
@@ -718,12 +994,7 @@ def sweep(
             new_idx = jnp.where(accept, flip_idx, cur_idx)
             indices = indices.at[row, col].set(new_idx)
 
-            mpo_sel = jax.lax.cond(
-                accept,
-                lambda _: mpo_flip,
-                lambda _: mpo_cur,
-                operand=None,
-            )
+            mpo_sel = jnp.where(accept, mpo_flip, mpo_cur)
             updated_row.append(mpo_sel)
             # Direct einsum for left_env update
             left_env = jnp.einsum(
@@ -743,8 +1014,8 @@ class PEPS(nnx.Module):
 
     Each site tensor has shape (phys_dim, up, down, left, right) with boundary
     bonds set to dimension 1. Truncation behavior is controlled by the
-    contraction strategy (for example, ZipUp(truncate_bond_dimension=...)).
-    The default strategy is ZipUp(truncate_bond_dimension=bond_dim**2).
+    contraction strategy (for example, Variational(truncate_bond_dimension=...)).
+    The default strategy is Variational(truncate_bond_dimension=bond_dim**2).
     """
 
     tensors: list[list[nnx.Param]] = nnx.data()
@@ -777,8 +1048,8 @@ class PEPS(nnx.Module):
             shape: Grid shape (n_rows, n_cols).
             bond_dim: Virtual bond dimension.
             phys_dim: Physical dimension (default 2 for spins).
-            contraction_strategy: Contraction strategy instance (default: ZipUp
-                with truncate_bond_dimension=bond_dim**2).
+            contraction_strategy: Contraction strategy instance (default:
+                Variational with truncate_bond_dimension=bond_dim**2).
             dtype: Data type for tensors (default: complex128).
         """
         self.shape = (int(shape[0]), int(shape[1]))
@@ -786,7 +1057,7 @@ class PEPS(nnx.Module):
         self.phys_dim = int(phys_dim)
         self.dtype = jnp.dtype(dtype)
         if contraction_strategy is None:
-            contraction_strategy = ZipUp(
+            contraction_strategy = Variational(
                 truncate_bond_dimension=self.bond_dim * self.bond_dim
             )
         self.strategy = contraction_strategy

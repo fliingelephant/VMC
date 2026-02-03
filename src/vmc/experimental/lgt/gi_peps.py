@@ -143,9 +143,26 @@ class GIPEPS(nnx.Module):
         strategy: Any,
     ) -> jax.Array:
         sites, h_links, v_links = GIPEPS.unflatten_sample(sample, shape)
-        eff_tensors = assemble_tensors(tensors, h_links, v_links, config)
-        spins = sites.reshape(-1)
-        return _peps_apply_occupancy(eff_tensors, spins, shape, strategy)
+        n = jnp.asarray(config.N, dtype=h_links.dtype)
+        nl = jnp.pad(h_links, ((0, 0), (1, 0)), constant_values=0)
+        nr = jnp.pad(h_links, ((0, 0), (0, 1)), constant_values=0)
+        nu = jnp.pad(v_links, ((1, 0), (0, 0)), constant_values=0)
+        nd = jnp.pad(v_links, ((0, 1), (0, 0)), constant_values=0)
+        div = (nl + nu - nr - nd) % n
+        charge_of_site = jnp.asarray(config.charge_of_site, dtype=sites.dtype)
+        charge = charge_of_site[sites]
+        valid = (div + charge) % n == jnp.asarray(config.Qx, dtype=div.dtype)
+        invalid = jnp.any(~valid)
+        dtype = jnp.asarray(tensors[0][0]).dtype
+
+        def _compute_amp(_):
+            eff_tensors = assemble_tensors(tensors, h_links, v_links, config)
+            spins = sites.reshape(-1)
+            return _peps_apply_occupancy(eff_tensors, spins, shape, strategy)
+
+        return jax.lax.cond(
+            invalid, lambda _: jnp.zeros((), dtype=dtype), _compute_amp, operand=None
+        )
 
     def random_physical_configuration(
         self,

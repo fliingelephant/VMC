@@ -136,8 +136,21 @@ class BlockadePEPS(nnx.Module):
     ) -> jax.Array:
         """Compute PEPS amplitude for a given configuration."""
         n_config = BlockadePEPS.unflatten_sample(sample, shape)
-        eff_tensors = assemble_tensors(tensors, n_config, config)
-        return _peps_apply_occupancy(eff_tensors, n_config, shape, strategy)
+        invalid_h = jnp.any(n_config[:, 1:] * n_config[:, :-1])
+        invalid_v = jnp.any(n_config[1:, :] * n_config[:-1, :])
+        invalid = invalid_h | invalid_v
+        dtype = jnp.asarray(tensors[0][0]).dtype
+
+        def _compute_amp(_):
+            eff_tensors = assemble_tensors(tensors, n_config, config)
+            return _peps_apply_occupancy(eff_tensors, n_config, shape, strategy)
+
+        return jax.lax.cond(
+            invalid,
+            lambda _: jnp.zeros((), dtype=dtype),
+            _compute_amp,
+            operand=None,
+        )
 
     def random_physical_configuration(
         self,
@@ -612,17 +625,30 @@ def _sweep_single_row(
                 optimize=[(0, 1), (0, 4), (0, 3), (0, 2), (2, 3), (0, 2), (0, 1)],
             )
 
-            # Flipped tensors: (r,c) changes, (r,c+1) changes due to kL
-            eff_flip = _assemble_site_with_n(tensors, config, peps_config, r, c, n_flip)
-            eff_c1_flip = _assemble_site_with_kL(tensors, config, peps_config, r, c + 1, n_flip)
-            mpo_c_flip = jnp.transpose(eff_flip[n_flip], (2, 3, 0, 1))
-            mpo_c1_flip = jnp.transpose(eff_c1_flip[config[r, c + 1]], (2, 3, 0, 1))
+            def _compute_flip(_):
+                eff_flip = _assemble_site_with_n(
+                    tensors, config, peps_config, r, c, n_flip
+                )
+                eff_c1_flip = _assemble_site_with_kL(
+                    tensors, config, peps_config, r, c + 1, n_flip
+                )
+                mpo_c_flip = jnp.transpose(eff_flip[n_flip], (2, 3, 0, 1))
+                mpo_c1_flip = jnp.transpose(
+                    eff_c1_flip[config[r, c + 1]], (2, 3, 0, 1)
+                )
+                amp_flip = jnp.einsum(
+                    "ace,aub,cduv,evf,bpg,dhpq,fqi,ghi->",
+                    left_env, top_env[c], mpo_c_flip, bottom_env[c],
+                    top_env[c + 1], mpo_c1_flip, bottom_env[c + 1], right_env,
+                    optimize=[(0, 1), (0, 4), (0, 3), (0, 2), (2, 3), (0, 2), (0, 1)],
+                )
+                return amp_flip, mpo_c_flip, mpo_c1_flip
 
-            amp_flip = jnp.einsum(
-                "ace,aub,cduv,evf,bpg,dhpq,fqi,ghi->",
-                left_env, top_env[c], mpo_c_flip, bottom_env[c],
-                top_env[c + 1], mpo_c1_flip, bottom_env[c + 1], right_env,
-                optimize=[(0, 1), (0, 4), (0, 3), (0, 2), (2, 3), (0, 2), (0, 1)],
+            def _no_flip(_):
+                return jnp.zeros((), dtype=amp_cur.dtype), mpo_c, mpo_c1
+
+            amp_flip, mpo_c_flip, mpo_c1_flip = jax.lax.cond(
+                can_flip, _compute_flip, _no_flip, operand=None
             )
         else:
             # Last column: single column window (no c+1 to worry about)
@@ -633,15 +659,24 @@ def _sweep_single_row(
                 optimize=[(0, 1), (1, 2), (1, 2), (0, 1)],
             )
 
-            eff_flip = _assemble_site_with_n(tensors, config, peps_config, r, c, n_flip)
-            mpo_c_flip = jnp.transpose(eff_flip[n_flip], (2, 3, 0, 1))
-            amp_flip = jnp.einsum(
-                "ace,aub,cduv,evf,bdf->",
-                left_env, top_env[c], mpo_c_flip, bottom_env[c], right_env,
-                optimize=[(0, 1), (1, 2), (1, 2), (0, 1)],
-            )
+            def _compute_flip(_):
+                eff_flip = _assemble_site_with_n(
+                    tensors, config, peps_config, r, c, n_flip
+                )
+                mpo_c_flip = jnp.transpose(eff_flip[n_flip], (2, 3, 0, 1))
+                amp_flip = jnp.einsum(
+                    "ace,aub,cduv,evf,bdf->",
+                    left_env, top_env[c], mpo_c_flip, bottom_env[c], right_env,
+                    optimize=[(0, 1), (1, 2), (1, 2), (0, 1)],
+                )
+                return amp_flip, mpo_c_flip
 
-        amp_flip = jnp.where(can_flip, amp_flip, jnp.zeros_like(amp_flip))
+            def _no_flip(_):
+                return jnp.zeros((), dtype=amp_cur.dtype), mpo_c
+
+            amp_flip, mpo_c_flip = jax.lax.cond(
+                can_flip, _compute_flip, _no_flip, operand=None
+            )
 
         # Metropolis
         ratio = _metropolis_ratio(jnp.abs(amp_cur) ** 2, jnp.abs(amp_flip) ** 2)
@@ -722,18 +757,35 @@ def _sweep_row_pair(
                 bottom_env, right_envs[c + 1], c
             )
 
-            # Flipped tensors: 3 change (r,c), (r+1,c), (r,c+1)
-            eff0_c_flip = _assemble_site_with_n(tensors, config, peps_config, r, c, n_flip)
-            eff1_c_flip = _assemble_site_with_kU(tensors, config, peps_config, r + 1, c, n_flip)
-            eff0_c1_flip = _assemble_site_with_kL(tensors, config, peps_config, r, c + 1, n_flip)
+            def _compute_flip(_):
+                eff0_c_flip = _assemble_site_with_n(
+                    tensors, config, peps_config, r, c, n_flip
+                )
+                eff1_c_flip = _assemble_site_with_kU(
+                    tensors, config, peps_config, r + 1, c, n_flip
+                )
+                eff0_c1_flip = _assemble_site_with_kL(
+                    tensors, config, peps_config, r, c + 1, n_flip
+                )
+                mpo0_c_flip = jnp.transpose(eff0_c_flip[n_flip], (2, 3, 0, 1))
+                mpo1_c_flip = jnp.transpose(
+                    eff1_c_flip[config[r + 1, c]], (2, 3, 0, 1)
+                )
+                mpo0_c1_flip = jnp.transpose(
+                    eff0_c1_flip[config[r, c + 1]], (2, 3, 0, 1)
+                )
+                amp_flip = _contract_2row_2col(
+                    left_env, top_env, mpo0_c_flip, mpo1_c_flip, mpo0_c1_flip, mpo1_c1,
+                    bottom_env, right_envs[c + 1], c
+                )
+                return amp_flip, mpo0_c_flip, mpo1_c_flip, mpo0_c1_flip
 
-            mpo0_c_flip = jnp.transpose(eff0_c_flip[n_flip], (2, 3, 0, 1))
-            mpo1_c_flip = jnp.transpose(eff1_c_flip[config[r + 1, c]], (2, 3, 0, 1))
-            mpo0_c1_flip = jnp.transpose(eff0_c1_flip[config[r, c + 1]], (2, 3, 0, 1))
+            def _no_flip(_):
+                amp_zero = jnp.zeros((), dtype=amp_cur.dtype)
+                return amp_zero, mpo0_c, mpo1_c, mpo0_c1
 
-            amp_flip = _contract_2row_2col(
-                left_env, top_env, mpo0_c_flip, mpo1_c_flip, mpo0_c1_flip, mpo1_c1,
-                bottom_env, right_envs[c + 1], c
+            amp_flip, mpo0_c_flip, mpo1_c_flip, mpo0_c1_flip = jax.lax.cond(
+                can_flip, _compute_flip, _no_flip, operand=None
             )
         else:
             # Last column: 1-column window in 2-row context
@@ -742,16 +794,29 @@ def _sweep_row_pair(
                 left_env, top_env[c], mpo0_c, mpo1_c, bottom_env[c], right_env_1col
             )
 
-            eff0_c_flip = _assemble_site_with_n(tensors, config, peps_config, r, c, n_flip)
-            eff1_c_flip = _assemble_site_with_kU(tensors, config, peps_config, r + 1, c, n_flip)
-            mpo0_c_flip = jnp.transpose(eff0_c_flip[n_flip], (2, 3, 0, 1))
-            mpo1_c_flip = jnp.transpose(eff1_c_flip[config[r + 1, c]], (2, 3, 0, 1))
+            def _compute_flip(_):
+                eff0_c_flip = _assemble_site_with_n(
+                    tensors, config, peps_config, r, c, n_flip
+                )
+                eff1_c_flip = _assemble_site_with_kU(
+                    tensors, config, peps_config, r + 1, c, n_flip
+                )
+                mpo0_c_flip = jnp.transpose(eff0_c_flip[n_flip], (2, 3, 0, 1))
+                mpo1_c_flip = jnp.transpose(
+                    eff1_c_flip[config[r + 1, c]], (2, 3, 0, 1)
+                )
+                amp_flip = _contract_2row_1col(
+                    left_env, top_env[c], mpo0_c_flip, mpo1_c_flip, bottom_env[c], right_env_1col
+                )
+                return amp_flip, mpo0_c_flip, mpo1_c_flip
 
-            amp_flip = _contract_2row_1col(
-                left_env, top_env[c], mpo0_c_flip, mpo1_c_flip, bottom_env[c], right_env_1col
+            def _no_flip(_):
+                amp_zero = jnp.zeros((), dtype=amp_cur.dtype)
+                return amp_zero, mpo0_c, mpo1_c
+
+            amp_flip, mpo0_c_flip, mpo1_c_flip = jax.lax.cond(
+                can_flip, _compute_flip, _no_flip, operand=None
             )
-
-        amp_flip = jnp.where(can_flip, amp_flip, jnp.zeros_like(amp_flip))
 
         # Metropolis
         ratio = _metropolis_ratio(jnp.abs(amp_cur) ** 2, jnp.abs(amp_flip) ** 2)

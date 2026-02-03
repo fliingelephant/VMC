@@ -170,7 +170,7 @@ class BlockadeConstraintTest(unittest.TestCase):
     """Tests for blockade constraint enforcement."""
 
     def test_violating_config_gives_zero_amplitude(self):
-        """Test that blockade-violating configs have zero or near-zero amplitude."""
+        """Test that blockade-violating configs have zero amplitude."""
         config = BlockadePEPSConfig(shape=(2, 2), D0=2, D1=2)
         model = BlockadePEPS(
             rngs=nnx.Rngs(0),
@@ -197,10 +197,7 @@ class BlockadeConstraintTest(unittest.TestCase):
         # Valid amplitude should be non-zero
         self.assertGreater(jnp.abs(amp_valid), 1e-10)
 
-        # Invalid amplitude should be zero (or very small due to numerical issues)
-        # Note: This depends on the tensor structure enforcing the constraint
-        # The constraint is enforced by the fact that n=1 requires kL=kU=0,
-        # but if left neighbor has n=1, its kR=1, which violates incoming constraint
+        self.assertLess(jnp.abs(amp_invalid), 1e-10)
 
 
 class HamiltonianTest(unittest.TestCase):
@@ -542,38 +539,62 @@ class SamplingBalanceTest(unittest.TestCase):
         # Should have at least 2 unique samples (exploration happened)
         self.assertGreater(len(unique_samples), 1)
 
-    def test_detailed_balance_chi_squared(self):
-        """Test that sampling distribution matches |ψ|² via chi-squared test."""
+    def test_detailed_balance_chi_squared_3x3(self):
+        """Test that sampling distribution matches |ψ|² on 3x3 via chi-squared test."""
         from scipy import stats
         import numpy as np
+        import itertools
 
-        # Use small lattice for exact enumeration
-        config = BlockadePEPSConfig(shape=(2, 2), D0=2, D1=2)
+        shape = (3, 3)
+        n_rows, n_cols = shape
+        n_sites = n_rows * n_cols
+
+        config = BlockadePEPSConfig(shape=shape, D0=2, D1=2)
         model = BlockadePEPS(
-            rngs=nnx.Rngs(123),  # Fixed seed for reproducibility
+            rngs=nnx.Rngs(123),
             config=config,
             contraction_strategy=NoTruncation(),
         )
 
-        # Enumerate all valid configs and compute exact probabilities
-        valid_configs = self._enumerate_independent_sets_2x2()
+        valid = []
+        for bits in itertools.product([0, 1], repeat=n_sites):
+            arr = np.asarray(bits, dtype=np.int32).reshape(shape)
+            ok = True
+            for r in range(n_rows):
+                for c in range(n_cols):
+                    if arr[r, c] == 1:
+                        if r > 0 and arr[r - 1, c] == 1:
+                            ok = False
+                            break
+                        if r < n_rows - 1 and arr[r + 1, c] == 1:
+                            ok = False
+                            break
+                        if c > 0 and arr[r, c - 1] == 1:
+                            ok = False
+                            break
+                        if c < n_cols - 1 and arr[r, c + 1] == 1:
+                            ok = False
+                            break
+                if not ok:
+                    break
+            if ok:
+                valid.append(arr.reshape(-1))
+        valid_configs = jnp.asarray(valid, dtype=jnp.int32)
         n_configs = len(valid_configs)
-        
+
         tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
         amplitudes = jax.vmap(
             lambda s: BlockadePEPS.apply(tensors, s, config.shape, config, model.strategy)
         )(valid_configs)
-        
         probs_exact = jnp.abs(amplitudes) ** 2
-        probs_exact = probs_exact / jnp.sum(probs_exact)  # Normalize
+        probs_exact = probs_exact / jnp.sum(probs_exact)
 
-        # Sample many configurations
         key = jax.random.key(42)
         key, init_key = jax.random.split(key)
         n_chains = 8
-        n_samples = 2000  # Many samples for statistical test
+        n_samples = 10000
 
-        initial_configs = jax.vmap(lambda k: random_independent_set(k, config.shape))(
+        initial_configs = jax.vmap(lambda k: random_independent_set(k, shape))(
             jax.random.split(init_key, n_chains)
         )
         initial_flat = initial_configs.reshape(n_chains, -1)
@@ -584,40 +605,26 @@ class SamplingBalanceTest(unittest.TestCase):
             n_chains=n_chains,
             key=key,
             initial_configuration=initial_flat,
-            burn_in=50,  # Sufficient burn-in
+            burn_in=50,
         )
 
-        # Count occurrences of each valid config
-        def config_to_code(s):
-            return jnp.sum(s * jnp.array([8, 4, 2, 1]))
-        
-        valid_codes = jax.vmap(config_to_code)(valid_configs)
-        sample_codes = jax.vmap(config_to_code)(samples)
-        
-        # Count empirical frequencies
+        weights = 2 ** np.arange(n_sites - 1, -1, -1, dtype=np.int64)
+        valid_codes_np = np.dot(np.asarray(valid_configs), weights)
+        sample_codes_np = np.dot(np.asarray(samples), weights)
+
         counts = np.zeros(n_configs)
-        valid_codes_np = np.array(valid_codes)
-        sample_codes_np = np.array(sample_codes)
-        
         for i, code in enumerate(valid_codes_np):
             counts[i] = np.sum(sample_codes_np == code)
 
-        # Chi-squared test
-        expected_counts = np.array(probs_exact) * n_samples
-        
-        # Only include bins with expected count > 5 for valid chi-squared
+        expected_counts = np.asarray(probs_exact) * n_samples
         mask = expected_counts > 5
         if np.sum(mask) < 2:
-            # Not enough bins for meaningful test - skip
             self.skipTest("Not enough bins with expected count > 5")
-        
+
         observed = counts[mask]
         expected = expected_counts[mask]
-        
+
         chi2, p_value = stats.chisquare(observed, expected)
-        
-        # p-value should be > 0.01 (not rejecting null hypothesis at 1% level)
-        # This means empirical distribution is consistent with exact distribution
         self.assertGreater(
             p_value, 0.01,
             f"Chi-squared test failed: chi2={chi2:.2f}, p={p_value:.4f}\n"

@@ -257,7 +257,11 @@ def _apply_mpo_variational(
 def _init_compressed_mps(
     target: tuple, Dc: int, dtype: jnp.dtype
 ) -> list[jax.Array]:
-    """Initialize compressed MPS with target bond dimension via QR."""
+    """Initialize compressed MPS with target bond dimension via QR.
+
+    Creates a left-canonical MPS by sweeping left-to-right with QR.
+    Bond dimensions are capped at Dc.
+    """
     n_sites = len(target)
     result = []
     carry = None
@@ -280,7 +284,7 @@ def _init_compressed_mps(
         # QR decomposition
         Q, R = jax.lax.linalg.qr(mat, full_matrices=False)
 
-        # Truncate to Dc columns (simple truncation for initialization)
+        # Truncate to Dc columns
         k = min(Dc, Q.shape[1])
         Q_trunc = Q[:, :k]
         R_trunc = R[:k, :]
@@ -352,13 +356,17 @@ def _build_left_envs(
 def _variational_sweep_lr(
     target: tuple, result: list, right_envs: list, dtype: jnp.dtype
 ) -> list[jax.Array]:
-    """Left-to-right variational sweep with proper overlap environments.
+    """Left-to-right variational sweep (one-site, QR only).
 
-    At each site i, compute optimal tensor: M'[i] = L̃ @ M[i] @ R̃[i]
-    Then QR decompose to maintain left-canonical form.
+    At each site j:
+    1. Compute optimal tensor: M'[j] = L̃ @ M[j] @ R̃[j]
+    2. QR decompose: M'[j] = A[j] @ C[j]
+    3. Absorb C[j] into result[j+1] for next iteration (Paeckel Sec 2.5)
+
+    Reference: Paeckel et al. arXiv:1901.05824, Sec 2.5-2.6.2, Alg 5
     """
     n_sites = len(target)
-    new_result = []
+    new_result = list(result)  # Copy to allow absorbing C
 
     # Left environment starts as identity
     L = jnp.ones((1, 1), dtype=dtype)
@@ -368,26 +376,27 @@ def _variational_sweep_lr(
         R = right_envs[i]  # (tr, rr)
 
         # Compute optimal tensor: M'[rl, p, rr] = L̃[tl, rl] @ M[tl, p, tr] @ R̃[tr, rr]
-        # Step 1: Contract L with target
         Lt = jnp.tensordot(L, t, axes=[[0], [0]])  # (rl, p, tr)
-        # Step 2: Contract with R
         optimal = jnp.tensordot(Lt, R, axes=[[2], [0]])  # (rl, p, rr)
 
         if i == n_sites - 1:
-            # Last site: just store the optimal tensor
-            new_result.append(optimal)
+            new_result[i] = optimal
             break
 
-        # QR decompose to maintain left-canonical form
+        # QR decompose: optimal = A @ C (Paeckel Sec 2.5)
         left_dim, phys_dim, right_dim = optimal.shape
         mat = optimal.reshape(left_dim * phys_dim, right_dim)
-        Q, remainder = jax.lax.linalg.qr(mat, full_matrices=False)
+        A, C = jax.lax.linalg.qr(mat, full_matrices=False)
 
-        new_tensor = Q.reshape(left_dim, phys_dim, Q.shape[1])
-        new_result.append(new_tensor)
+        new_tensor = A.reshape(left_dim, phys_dim, A.shape[1])
+        new_result[i] = new_tensor
 
-        # Update left environment for next site
-        # L̃_new[tr, rr] = L̃[tl, rl] * t[tl, p, tr] * new_tensor*[rl, p, rr]
+        # Absorb C into next tensor: result[j+1] ← C @ result[j+1] (Paeckel Sec 2.5)
+        # This maintains state equivalence during the sweep
+        next_tensor = new_result[i + 1]  # (rl_next, p_next, rr_next)
+        new_result[i + 1] = jnp.tensordot(C, next_tensor, axes=[[1], [0]])
+
+        # Update left environment for next site using the new A tensor
         L = jnp.tensordot(Lt, new_tensor.conj(), axes=[[0, 1], [0, 1]])  # (tr, rr)
 
     return new_result
@@ -396,13 +405,17 @@ def _variational_sweep_lr(
 def _variational_sweep_rl(
     target: tuple, result: list, left_envs: list, dtype: jnp.dtype
 ) -> list[jax.Array]:
-    """Right-to-left variational sweep with proper overlap environments.
+    """Right-to-left variational sweep (one-site, QR only).
 
-    At each site i, compute optimal tensor: M'[i] = L̃[i] @ M[i] @ R̃
-    Then LQ decompose to maintain right-canonical form.
+    At each site j:
+    1. Compute optimal tensor: M'[j] = L̃[j] @ M[j] @ R̃
+    2. LQ decompose: M'[j] = C[j-1] @ B[j]
+    3. Absorb C[j-1] into result[j-1] for next iteration (Paeckel Sec 2.5)
+
+    Reference: Paeckel et al. arXiv:1901.05824, Sec 2.5-2.6.2, Alg 5
     """
     n_sites = len(target)
-    new_result = list(result)  # Copy
+    new_result = list(result)  # Copy to allow absorbing C
 
     # Right environment starts as identity
     R = jnp.ones((1, 1), dtype=dtype)
@@ -412,29 +425,31 @@ def _variational_sweep_rl(
         L = left_envs[i]  # (tl, rl)
 
         # Compute optimal tensor: M'[rl, p, rr] = L̃[tl, rl] @ M[tl, p, tr] @ R̃[tr, rr]
-        # Step 1: Contract target with R
         tR = jnp.tensordot(t, R, axes=[[2], [0]])  # (tl, p, rr)
-        # Step 2: Contract with L
         optimal = jnp.tensordot(L, tR, axes=[[0], [0]])  # (rl, p, rr)
 
         if i == 0:
-            # First site: just store the optimal tensor
             new_result[i] = optimal
             break
 
-        # LQ decompose to maintain right-canonical form
-        # LQ via QR on transpose: A = L @ Q, A.T = Q.T @ L.T
+        # LQ decompose: optimal = C @ B (Paeckel Sec 2.5)
+        # LQ via QR on transpose: A = C @ B, A.T = B.T @ C.T
         left_dim, phys_dim, right_dim = optimal.shape
         mat = optimal.reshape(left_dim, phys_dim * right_dim)
         Q_t, R_t = jax.lax.linalg.qr(mat.T, full_matrices=False)
-        # Q = Q_t.T has orthonormal rows, L = R_t.T
-        Q_mat = Q_t.T  # (k, phys * right)
+        # B = Q_t.T has orthonormal rows, C = R_t.T
+        B = Q_t.T  # (k, phys * right)
+        C = R_t.T  # (left, k)
 
-        new_tensor = Q_mat.reshape(Q_mat.shape[0], phys_dim, right_dim)
+        new_tensor = B.reshape(B.shape[0], phys_dim, right_dim)
         new_result[i] = new_tensor
 
-        # Update right environment for next site
-        # R̃_new[tl, rl] = t[tl, p, tr] * R̃[tr, rr] * new_tensor*[rl, p, rr]
+        # Absorb C into previous tensor: result[j-1] ← result[j-1] @ C (Paeckel Sec 2.5)
+        # This maintains state equivalence during the sweep
+        prev_tensor = new_result[i - 1]  # (rl_prev, p_prev, rr_prev)
+        new_result[i - 1] = jnp.tensordot(prev_tensor, C, axes=[[2], [0]])
+
+        # Update right environment for next site using the new B tensor
         R = jnp.tensordot(tR, new_tensor.conj(), axes=[[1, 2], [1, 2]])  # (tl, rl)
 
     return new_result

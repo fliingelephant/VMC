@@ -637,15 +637,15 @@ def _compute_all_env_grads_and_energy(
     amp: jax.Array,
     shape: tuple[int, int],
     strategy: ContractionStrategy,
-    bottom_envs: list[tuple],
+    top_envs: list[tuple],
     *,
     diagonal_terms: list,
     one_site_terms: list[list[list]],
     horizontal_terms: list[list[list]],
     vertical_terms: list[list[list]],
     collect_grads: bool = True,
-) -> tuple[list[list[jax.Array]], jax.Array]:
-    """Compute gradients and local energy for a PEPS sample."""
+) -> tuple[list[list[jax.Array]], jax.Array, list[tuple]]:
+    """Backward pass: use cached top_envs, build and cache bottom_envs."""
     n_rows, n_cols = shape
     dtype = jnp.asarray(tensors[0][0]).dtype
     phys_dim = int(jnp.asarray(tensors[0][0]).shape[0])
@@ -655,17 +655,22 @@ def _compute_all_env_grads_and_energy(
         if collect_grads
         else []
     )
+    bottom_envs_cache = [None] * n_rows
     energy = jnp.zeros((), dtype=amp.dtype)
+
+    # Diagonal terms
     for term in diagonal_terms:
         idx = jnp.asarray(0, dtype=jnp.int32)
         for row, col in term.sites:
             idx = idx * phys_dim + spins[row, col]
         energy = energy + term.diag[idx]
 
-    top_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
-    mpo = _build_row_mpo(tensors, spins[0], 0, n_cols)
-    for row in range(n_rows):
-        bottom_env = bottom_envs[row]
+    # Backward pass: bottom → top
+    bottom_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
+    for row in range(n_rows - 1, -1, -1):
+        bottom_envs_cache[row] = bottom_env
+        top_env = top_envs[row]
+        mpo = _build_row_mpo(tensors, spins[row], row, n_cols)
         right_envs = _compute_right_envs(top_env, mpo, bottom_env, dtype)
         left_env = jnp.ones((1, 1, 1), dtype=dtype)
         for c in range(n_cols):
@@ -706,17 +711,17 @@ def _compute_all_env_grads_and_energy(
                     amps_flat = amps_edge.reshape(-1)
                     for term in edge_terms:
                         energy = energy + jnp.dot(term.op[:, col_idx], amps_flat) / amp
-            # Direct einsum for left_env update
             left_env = jnp.einsum(
                 "ace,aub,cduv,evf->bdf",
                 left_env, top_env[c], mpo[c], bottom_env[c],
                 optimize=[(0, 1), (0, 2), (0, 1)],
             )
+        # Vertical energy between row and row+1
         if row < n_rows - 1:
             mpo_next = _build_row_mpo(tensors, spins[row + 1], row + 1, n_cols)
             energy = energy + _compute_row_pair_vertical_energy(
                 top_env,
-                bottom_envs[row + 1],
+                bottom_envs_cache[row + 1],
                 mpo,
                 mpo_next,
                 tensors[row],
@@ -727,11 +732,9 @@ def _compute_all_env_grads_and_energy(
                 amp,
                 phys_dim,
             )
-        top_env = strategy.apply(top_env, mpo)
-        if row < n_rows - 1:
-            mpo = mpo_next
+        bottom_env = _apply_mpo_from_below(bottom_env, mpo, strategy)
 
-    return env_grads, energy
+    return env_grads, energy, bottom_envs_cache
 
 
 def _compute_2site_horizontal_env(
@@ -885,19 +888,21 @@ def grads_and_energy(
     sample: jax.Array,
     amp: jax.Array,
     operator: Any,
-    envs: list[tuple],
-) -> tuple[list[list[jax.Array]], jax.Array]:
+    top_envs: list[tuple],
+) -> tuple[list[list[jax.Array]], jax.Array, list[tuple]]:
     """Compute environment gradients and local energy for PEPS.
+
+    Uses backward pass: takes cached top_envs, returns cached bottom_envs.
 
     Args:
         model: PEPS model
         sample: flat sample array (occupancy indices)
         amp: amplitude for this configuration
         operator: LocalHamiltonian with terms
-        envs: bottom environments (computed via bottom_envs())
+        top_envs: top environments (from sweep())
 
     Returns:
-        (env_grads, energy)
+        (env_grads, energy, bottom_envs) - includes cached bottom environments for next sweep
     """
     from vmc.operators.local_terms import bucket_terms
 
@@ -912,7 +917,7 @@ def grads_and_energy(
         amp,
         model.shape,
         model.strategy,
-        envs,
+        top_envs,
         diagonal_terms=diagonal_terms,
         one_site_terms=one_site_terms,
         horizontal_terms=horizontal_terms,
@@ -936,7 +941,7 @@ def sweep(
     sample: jax.Array,
     key: jax.Array,
     envs: list[tuple],
-) -> tuple[jax.Array, jax.Array, jax.Array]:
+) -> tuple[jax.Array, jax.Array, jax.Array, list[tuple]]:
     """Single Metropolis sweep for PEPS.
 
     Args:
@@ -946,7 +951,7 @@ def sweep(
         envs: bottom environments from previous iteration
 
     Returns:
-        (new_sample, key, amp) - flat sample array after sweep
+        (new_sample, key, amp, top_envs) - includes cached top environments
     """
     indices = sample.reshape(model.shape)
     tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
@@ -954,6 +959,7 @@ def sweep(
     dtype = tensors[0][0].dtype
 
     top_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
+    top_envs_cache = [top_env]
     for row in range(n_rows):
         bottom_env = envs[row]
         mpo_row = _build_row_mpo(tensors, indices[row], row, n_cols)
@@ -1004,9 +1010,10 @@ def sweep(
             )
 
         top_env = model.strategy.apply(top_env, tuple(updated_row))
+        top_envs_cache.append(top_env)
 
     amp = _contract_bottom(top_env)
-    return indices.reshape(-1), key, amp
+    return indices.reshape(-1), key, amp, top_envs_cache
 
 
 class PEPS(nnx.Module):

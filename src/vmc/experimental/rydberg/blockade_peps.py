@@ -414,6 +414,15 @@ def grads_and_energy(
         bottom_env = envs[row]
         right_envs = _compute_right_envs_1row(top_env, mpo, bottom_env, dtype)
         left_env = jnp.ones((1, 1, 1), dtype=dtype)
+        # Boundary-aware branching keeps static shapes: 2-row window if row+1 exists.
+        row_has_x = any(one_site_terms[row][c] for c in range(n_cols))
+        if row_has_x and row < n_rows - 1:
+            bottom_env_pair = envs[row + 1]
+            mpo_next = _build_row_mpo(tensors, config, peps_config, row + 1)
+            right_envs_2row = _compute_right_envs_2row(
+                top_env, mpo, mpo_next, bottom_env_pair, dtype
+            )
+            left_env_2row = jnp.ones((1, 1, 1, 1), dtype=dtype)
 
         eff_row = [
             _assemble_site(
@@ -438,10 +447,198 @@ def grads_and_energy(
             # X term energy (sigma^x flips n)
             site_terms = one_site_terms[row][c]
             if site_terms:
-                amps_site = jnp.einsum("pudlr,udlr->p", eff_row[c], env_grad)
-                spin_idx = config[row, c]
+                n_cur = config[row, c]
+                n_flip = 1 - n_cur
+                can_flip = jnp.where(
+                    n_flip == 1,
+                    can_flip_to_one(config, n_rows, n_cols, row, c),
+                    jnp.ones((), dtype=jnp.bool_),
+                )
+                if row < n_rows - 1:
+                    # 2-row contraction needs row+1 tensors (kU depends on flip).
+                    if c + 1 < n_cols:
+                        # 2-col window: include c+1 because kL depends on flip.
+                        right_env = right_envs_2row[c + 1]
+
+                        def _compute_flip(_):
+                            eff0_c_flip = _assemble_site(
+                                tensors,
+                                peps_config,
+                                row,
+                                c,
+                                n_flip,
+                                config[row, c - 1] if c > 0 else 0,
+                                config[row - 1, c] if row > 0 else 0,
+                            )
+                            eff1_c_flip = _assemble_site(
+                                tensors,
+                                peps_config,
+                                row + 1,
+                                c,
+                                config[row + 1, c],
+                                config[row + 1, c - 1] if c > 0 else 0,
+                                n_flip,
+                            )
+                            eff0_c1_flip = _assemble_site(
+                                tensors,
+                                peps_config,
+                                row,
+                                c + 1,
+                                config[row, c + 1],
+                                n_flip,
+                                config[row - 1, c + 1] if row > 0 else 0,
+                            )
+                            mpo0_c_flip = jnp.transpose(eff0_c_flip[n_flip], (2, 3, 0, 1))
+                            mpo1_c_flip = jnp.transpose(
+                                eff1_c_flip[config[row + 1, c]], (2, 3, 0, 1)
+                            )
+                            mpo0_c1_flip = jnp.transpose(
+                                eff0_c1_flip[config[row, c + 1]], (2, 3, 0, 1)
+                            )
+                            return _contract_2row_2col(
+                                left_env_2row,
+                                top_env,
+                                mpo0_c_flip,
+                                mpo1_c_flip,
+                                mpo0_c1_flip,
+                                mpo_next[c + 1],
+                                bottom_env_pair,
+                                right_env,
+                                c,
+                            )
+
+                        amp_flip = jax.lax.cond(
+                            can_flip,
+                            _compute_flip,
+                            lambda _: jnp.zeros((), dtype=amp.dtype),
+                            operand=None,
+                        )
+                    else:
+                        # Last column: no c+1, use 1-col window in 2-row shape.
+                        def _compute_flip(_):
+                            eff0_c_flip = _assemble_site(
+                                tensors,
+                                peps_config,
+                                row,
+                                c,
+                                n_flip,
+                                config[row, c - 1] if c > 0 else 0,
+                                config[row - 1, c] if row > 0 else 0,
+                            )
+                            eff1_c_flip = _assemble_site(
+                                tensors,
+                                peps_config,
+                                row + 1,
+                                c,
+                                config[row + 1, c],
+                                config[row + 1, c - 1] if c > 0 else 0,
+                                n_flip,
+                            )
+                            mpo0_c_flip = jnp.transpose(eff0_c_flip[n_flip], (2, 3, 0, 1))
+                            mpo1_c_flip = jnp.transpose(
+                                eff1_c_flip[config[row + 1, c]], (2, 3, 0, 1)
+                            )
+                            right_env_1col = jnp.ones((1, 1, 1, 1), dtype=dtype)
+                            return _contract_2row_1col(
+                                left_env_2row,
+                                top_env[c],
+                                mpo0_c_flip,
+                                mpo1_c_flip,
+                                bottom_env_pair[c],
+                                right_env_1col,
+                            )
+
+                        amp_flip = jax.lax.cond(
+                            can_flip,
+                            _compute_flip,
+                            lambda _: jnp.zeros((), dtype=amp.dtype),
+                            operand=None,
+                        )
+                else:
+                    # Last row: 1-row contraction (no row+1).
+                    if c + 1 < n_cols:
+                        # 2-col window: include c+1 because kL depends on flip.
+                        right_env = (
+                            right_envs[c + 1]
+                            if c + 1 < n_cols - 1
+                            else jnp.ones((1, 1, 1), dtype=dtype)
+                        )
+
+                        def _compute_flip(_):
+                            eff_c_flip = _assemble_site(
+                                tensors,
+                                peps_config,
+                                row,
+                                c,
+                                n_flip,
+                                config[row, c - 1] if c > 0 else 0,
+                                config[row - 1, c] if row > 0 else 0,
+                            )
+                            eff_c1_flip = _assemble_site(
+                                tensors,
+                                peps_config,
+                                row,
+                                c + 1,
+                                config[row, c + 1],
+                                n_flip,
+                                config[row - 1, c + 1] if row > 0 else 0,
+                            )
+                            mpo_c_flip = jnp.transpose(eff_c_flip[n_flip], (2, 3, 0, 1))
+                            mpo_c1_flip = jnp.transpose(
+                                eff_c1_flip[config[row, c + 1]], (2, 3, 0, 1)
+                            )
+                            return jnp.einsum(
+                                "ace,aub,cduv,evf,bpg,dhpq,fqi,ghi->",
+                                left_env,
+                                top_env[c],
+                                mpo_c_flip,
+                                bottom_env[c],
+                                top_env[c + 1],
+                                mpo_c1_flip,
+                                bottom_env[c + 1],
+                                right_env,
+                                optimize=[(0, 1), (0, 4), (0, 3), (0, 2), (2, 3), (0, 2), (0, 1)],
+                            )
+
+                        amp_flip = jax.lax.cond(
+                            can_flip,
+                            _compute_flip,
+                            lambda _: jnp.zeros((), dtype=amp.dtype),
+                            operand=None,
+                        )
+                    else:
+                        # Last column: 1-col window in 1-row shape.
+                        def _compute_flip(_):
+                            eff_c_flip = _assemble_site(
+                                tensors,
+                                peps_config,
+                                row,
+                                c,
+                                n_flip,
+                                config[row, c - 1] if c > 0 else 0,
+                                config[row - 1, c] if row > 0 else 0,
+                            )
+                            mpo_c_flip = jnp.transpose(eff_c_flip[n_flip], (2, 3, 0, 1))
+                            right_env = jnp.ones((1, 1, 1), dtype=dtype)
+                            return jnp.einsum(
+                                "ace,aub,cduv,evf,bdf->",
+                                left_env,
+                                top_env[c],
+                                mpo_c_flip,
+                                bottom_env[c],
+                                right_env,
+                                optimize=[(0, 1), (1, 2), (1, 2), (0, 1)],
+                            )
+
+                        amp_flip = jax.lax.cond(
+                            can_flip,
+                            _compute_flip,
+                            lambda _: jnp.zeros((), dtype=amp.dtype),
+                            operand=None,
+                        )
+
                 for term in site_terms:
-                    energy = energy + jnp.dot(term.op[:, spin_idx], amps_site) / amp
+                    energy = energy + term.op[n_flip, n_cur] * amp_flip / amp
 
             # Update left_env
             left_env = jnp.einsum(
@@ -449,6 +646,12 @@ def grads_and_energy(
                 left_env, top_env[c], mpo[c], bottom_env[c],
                 optimize=[(0, 1), (0, 2), (0, 1)],
             )
+            if row_has_x and row < n_rows - 1:
+                left_env_2row = jnp.einsum(
+                    "alxe,aub,lruv,xyvw,ewf->bryf",
+                    left_env_2row, top_env[c], mpo[c], mpo_next[c], bottom_env_pair[c],
+                    optimize=[(0, 1), (0, 3), (0, 2), (0, 1)],
+                )
 
         top_env = strategy.apply(top_env, mpo)
         if row < n_rows - 1:

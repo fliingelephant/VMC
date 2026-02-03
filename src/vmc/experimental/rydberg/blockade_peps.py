@@ -31,6 +31,8 @@ from vmc.models.peps import (
     Variational,
     _apply_mpo_from_below,
     _contract_bottom,
+    _compute_right_envs,
+    _compute_single_gradient,
     _compute_right_envs_2row,
     _metropolis_ratio,
     bottom_envs,
@@ -408,22 +410,8 @@ def grads_and_energy(
 
     # 2. Gradients and X term energy via row sweep
     top_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
-    mpo = _build_row_mpo(tensors, config, peps_config, 0)
 
     for row in range(n_rows):
-        bottom_env = envs[row]
-        right_envs = _compute_right_envs_1row(top_env, mpo, bottom_env, dtype)
-        left_env = jnp.ones((1, 1, 1), dtype=dtype)
-        # Boundary-aware branching keeps static shapes: 2-row window if row+1 exists.
-        row_has_x = any(one_site_terms[row][c] for c in range(n_cols))
-        if row_has_x and row < n_rows - 1:
-            bottom_env_pair = envs[row + 1]
-            mpo_next = _build_row_mpo(tensors, config, peps_config, row + 1)
-            right_envs_2row = _compute_right_envs_2row(
-                top_env, mpo, mpo_next, bottom_env_pair, dtype
-            )
-            left_env_2row = jnp.ones((1, 1, 1, 1), dtype=dtype)
-
         eff_row = [
             _assemble_site(
                 tensors,
@@ -436,6 +424,38 @@ def grads_and_energy(
             )
             for c in range(n_cols)
         ]
+        mpo = tuple(
+            jnp.transpose(eff_row[c][config[row, c]], (2, 3, 0, 1))
+            for c in range(n_cols)
+        )
+        bottom_env = envs[row]
+        right_envs = _compute_right_envs(top_env, mpo, bottom_env, dtype)
+        left_env = jnp.ones((1, 1, 1), dtype=dtype)
+        # Boundary-aware branching keeps static shapes: 2-row window if row+1 exists.
+        row_has_x = any(one_site_terms[row][c] for c in range(n_cols))
+        mpo_next = None
+        if row_has_x and row < n_rows - 1:
+            bottom_env_pair = envs[row + 1]
+            eff_row_next = [
+                _assemble_site(
+                    tensors,
+                    peps_config,
+                    row + 1,
+                    c,
+                    config[row + 1, c],
+                    config[row + 1, c - 1] if c > 0 else 0,
+                    config[row, c],
+                )
+                for c in range(n_cols)
+            ]
+            mpo_next = tuple(
+                jnp.transpose(eff_row_next[c][config[row + 1, c]], (2, 3, 0, 1))
+                for c in range(n_cols)
+            )
+            right_envs_2row = _compute_right_envs_2row(
+                top_env, mpo, mpo_next, bottom_env_pair, dtype
+            )
+            left_env_2row = jnp.ones((1, 1, 1, 1), dtype=dtype)
 
         for c in range(n_cols):
             # Compute gradient
@@ -655,43 +675,26 @@ def grads_and_energy(
 
         top_env = strategy.apply(top_env, mpo)
         if row < n_rows - 1:
-            mpo = _build_row_mpo(tensors, config, peps_config, row + 1)
+            if mpo_next is None:
+                eff_row_next = [
+                    _assemble_site(
+                        tensors,
+                        peps_config,
+                        row + 1,
+                        c,
+                        config[row + 1, c],
+                        config[row + 1, c - 1] if c > 0 else 0,
+                        config[row, c],
+                    )
+                    for c in range(n_cols)
+                ]
+                mpo_next = tuple(
+                    jnp.transpose(eff_row_next[c][config[row + 1, c]], (2, 3, 0, 1))
+                    for c in range(n_cols)
+                )
+            mpo = mpo_next
 
     return env_grads, energy
-
-
-def _compute_right_envs_1row(
-    top_env: tuple,
-    mpo_row: tuple,
-    bottom_env: tuple,
-    dtype,
-) -> list[jax.Array]:
-    """Compute right environments for 1-row contractions."""
-    n_cols = len(mpo_row)
-    right_envs = [None] * n_cols
-    right_envs[n_cols - 1] = jnp.ones((1, 1, 1), dtype=dtype)
-    for c in range(n_cols - 2, -1, -1):
-        right_envs[c] = jnp.einsum(
-            "aub,cduv,evf,bdf->ace",
-            top_env[c + 1], mpo_row[c + 1], bottom_env[c + 1], right_envs[c + 1],
-            optimize=[(0, 3), (0, 2), (0, 1)],
-        )
-    return right_envs
-
-
-def _compute_single_gradient(
-    left_env: jax.Array,
-    right_env: jax.Array,
-    top_tensor: jax.Array,
-    bot_tensor: jax.Array,
-) -> jax.Array:
-    """Compute gradient for a single tensor given left/right environments."""
-    grad = jnp.einsum(
-        "ace,aub,evf,bdf->cuvd", left_env, top_tensor, bot_tensor, right_env,
-        optimize=[(0, 1), (0, 1), (0, 1)],
-    )
-    return jnp.transpose(grad, (1, 2, 0, 3))
-
 
 @sweep.dispatch
 def sweep(
@@ -771,7 +774,7 @@ def _sweep_single_row(
 
     mpo = _build_row_mpo(tensors, config, peps_config, r)
     # right_envs[c] covers columns c+1, c+2, ... So right_envs[c+1] covers c+2 onwards
-    right_envs = _compute_right_envs_1row(top_env, mpo, bottom_env, dtype)
+    right_envs = _compute_right_envs(top_env, mpo, bottom_env, dtype)
     left_env = jnp.ones((1, 1, 1), dtype=dtype)
 
     for c in range(n_cols):

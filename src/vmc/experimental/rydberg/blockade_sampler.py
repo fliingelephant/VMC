@@ -144,20 +144,37 @@ def sequential_sample_with_gradients(
         grad_parts = []
         for row in range(n_rows):
             for col in range(n_cols):
+                kL = indices[row, col - 1] if col > 0 else 0
+                kU = indices[row - 1, col] if row > 0 else 0
+                stride = 2 if row > 0 else 1
+                cfg_idx_n0 = kL * stride + kU
+                cfg_idx = jnp.where(indices[row, col] == 0, cfg_idx_n0, 0)
                 grad_full = jnp.zeros_like(tensors[row][col])
-                grad_full = grad_full.at[indices[row, col]].set(env_grads[row][col])
+                grad_full = grad_full.at[indices[row, col], cfg_idx].set(
+                    env_grads[row][col]
+                )
                 grad_parts.append(grad_full.ravel())
         return jnp.concatenate(grad_parts) / amp, jnp.zeros((0,), dtype=jnp.int8)
 
     def flatten_sliced_gradients(env_grads, sample, amp):
+        indices = sample.reshape(shape)
         grad_parts = [
             env_grads[row][col].reshape(-1)
             for row in range(n_rows)
             for col in range(n_cols)
         ]
         p_parts = [
-            jnp.full((params_per_site[site],), sample[site], dtype=jnp.int8)
-            for site in range(n_sites)
+            jnp.full(
+                (params_per_site[site],),
+                indices[row, col] * tensors[row][col].shape[1]
+                + (indices[row, col - 1] if col > 0 else 0)
+                * (2 if row > 0 else 1)
+                + (indices[row - 1, col] if row > 0 else 0),
+                dtype=jnp.int16,
+            )
+            for site, (row, col) in enumerate(
+                ((r, c) for r in range(n_rows) for c in range(n_cols))
+            )
         ]
         return jnp.concatenate(grad_parts) / amp, jnp.concatenate(p_parts)
 

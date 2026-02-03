@@ -639,15 +639,7 @@ def grads_and_energy(
                                 optimize=[(0, 1), (0, 3), (0, 2), (0, 1)],
                             )
                             continue
-                        # Direct einsum for 2-column amplitude
-                        # Convention: mpo0[c+1] (r,s,g,h) where D_up=g connects to top, D_down=h connects to mpo1
-                        amp_cur = jnp.einsum(
-                            "alxe,aub,lruv,xyvw,ewf,bgc,rsgh,ythi,fij,cstj->",
-                            left_env_2row, top_env[c], row_mpo[c], row_mpo_next[c], bottom_env_next[c],
-                            top_env[c + 1], row_mpo[c + 1], row_mpo_next[c + 1], bottom_env_next[c + 1],
-                            right_envs_2row[c + 1],
-                            optimize=[(1, 5), (3, 6), (1, 2), (1, 2), (0, 2), (2, 4), (1, 3), (0, 2), (0, 1)],
-                        )
+                        # Use global amp to normalize plaquette contributions (saves one contraction).
                         # Compute amplitude for +delta flip
                         h_plus, v_plus = _plaquette_flip(
                             h_links, v_links, row, c, delta=1, N=config.N
@@ -692,7 +684,7 @@ def grads_and_energy(
                             coeff = jnp.sum(
                                 jnp.asarray([term.coeff for term in plaquette_here])
                             )
-                        energy = energy + coeff * (amp_plus + amp_minus) / amp_cur
+                        energy = energy + coeff * (amp_plus + amp_minus) / amp
                         # Direct einsum for left_env_2row update
                         left_env_2row = jnp.einsum(
                             "alxe,aub,lruv,xyvw,ewf->bryf",

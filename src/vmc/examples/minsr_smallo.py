@@ -11,7 +11,7 @@ from flax import nnx
 
 from vmc.core import _value_and_grad
 from vmc.models.mps import MPS
-from vmc.models.peps import PEPS, ZipUp
+from vmc.models.peps import PEPS, Variational
 from vmc.qgt import QGT, Jacobian, SlicedJacobian, SliceOrdering, SiteOrdering
 from vmc.samplers.sequential import sequential_sample
 from vmc.utils.smallo import params_per_site
@@ -71,7 +71,7 @@ def minsr_demo_peps(
         rngs=nnx.Rngs(seed),
         shape=(length, length),
         bond_dim=bond_dim,
-        contraction_strategy=ZipUp(bond_dim ** 2),
+        contraction_strategy=Variational(bond_dim ** 2),
     )
     samples = sequential_sample(
         model,

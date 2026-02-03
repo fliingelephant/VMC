@@ -158,7 +158,7 @@ class GIPEPS(nnx.Module):
         nr = jnp.pad(h_links, ((0, 0), (0, 1)), constant_values=0)
         nu = jnp.pad(v_links, ((1, 0), (0, 0)), constant_values=0)
         nd = jnp.pad(v_links, ((0, 1), (0, 0)), constant_values=0)
-        div = (nl + nu - nr - nd) % n
+        div = (nl + nd - nu - nr) % n
         charge_of_site = jnp.asarray(config.charge_of_site, dtype=sites.dtype)
         charge = charge_of_site[sites]
         valid = (div + charge) % n == jnp.asarray(config.Qx, dtype=div.dtype)
@@ -198,15 +198,15 @@ class GIPEPS(nnx.Module):
             )
             h_links = h_links.at[: n_rows - 1, :].add(deltas)
             h_links = h_links.at[1:, :].add(-deltas)
-            v_links = v_links.at[:, : n_cols - 1].add(-deltas)
-            v_links = v_links.at[:, 1:].add(deltas)
+            v_links = v_links.at[:, : n_cols - 1].add(deltas)
+            v_links = v_links.at[:, 1:].add(-deltas)
             h_links = h_links % self.N
             v_links = v_links % self.N
         nl = jnp.pad(h_links, ((0, 0), (1, 0)), constant_values=0)
         nr = jnp.pad(h_links, ((0, 0), (0, 1)), constant_values=0)
         nu = jnp.pad(v_links, ((1, 0), (0, 0)), constant_values=0)
         nd = jnp.pad(v_links, ((0, 1), (0, 0)), constant_values=0)
-        div = (nl + nu - nr - nd) % self.N
+        div = (nl + nd - nu - nr) % self.N
         charge = (self.Qx - div) % self.N
         keys = jax.random.split(site_key, n_rows * n_cols).reshape((n_rows, n_cols))
         sites = jax.vmap(
@@ -454,8 +454,8 @@ def _plaquette_flip(
     n = jnp.asarray(N, dtype=h_links.dtype)
     h_links = h_links.at[r, c].set((h_links[r, c] + delta) % n)
     h_links = h_links.at[r + 1, c].set((h_links[r + 1, c] - delta) % n)
-    v_links = v_links.at[r, c].set((v_links[r, c] - delta) % n)
-    v_links = v_links.at[r, c + 1].set((v_links[r, c + 1] + delta) % n)
+    v_links = v_links.at[r, c].set((v_links[r, c] + delta) % n)
+    v_links = v_links.at[r, c + 1].set((v_links[r, c + 1] - delta) % n)
     return h_links, v_links
 
 
@@ -915,8 +915,8 @@ def _vertical_link_sweep_row_pair(
         v_prop = v_links.at[r, c].set((v_links[r, c] + delta) % n)
         q_top = charge_of_site[sites[r, c]]
         q_bottom = charge_of_site[sites[r + 1, c]]
-        q_top_new = (q_top + delta) % n
-        q_bottom_new = (q_bottom - delta) % n
+        q_top_new = (q_top - delta) % n
+        q_bottom_new = (q_bottom + delta) % n
         key, site_key = jax.random.split(key)
         key_top, key_bottom = jax.random.split(site_key)
         site_top = _sample_site_index_for_charge(

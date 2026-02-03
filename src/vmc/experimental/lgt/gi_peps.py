@@ -12,7 +12,7 @@ slicing.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import functools
 from typing import Any
 
@@ -51,6 +51,16 @@ class GIPEPSConfig:
     degeneracy_per_charge: tuple[int, ...]
     charge_of_site: tuple[int, ...]
     dtype: Any = jnp.complex128
+    mask_per_charge: jax.Array | None = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        dmax = int(max(self.degeneracy_per_charge))
+        if all(d == dmax for d in self.degeneracy_per_charge):
+            object.__setattr__(self, "mask_per_charge", None)
+            return
+        deg = jnp.asarray(self.degeneracy_per_charge, dtype=jnp.int32)
+        mask = jnp.arange(dmax) < deg[:, None]
+        object.__setattr__(self, "mask_per_charge", mask)
 
     @property
     def dmax(self) -> int:
@@ -309,7 +319,21 @@ def _assemble_site(
     cfg_idx = _site_cfg_index(
         config, k_l=k_l, k_u=k_u, k_r=k_r, k_d=k_d, r=r, c=c
     )
-    return tensors[r][c][:, cfg_idx, :, :, :, :]
+    tensor = tensors[r][c][:, cfg_idx, :, :, :, :]
+    mask_per_charge = config.mask_per_charge
+    if mask_per_charge is None:
+        return tensor
+    mask_u = mask_per_charge[k_u][: tensor.shape[1]]
+    mask_d = mask_per_charge[k_d][: tensor.shape[2]]
+    mask_l = mask_per_charge[k_l][: tensor.shape[3]]
+    mask_r = mask_per_charge[k_r][: tensor.shape[4]]
+    return (
+        tensor
+        * mask_u[None, :, None, None, None]
+        * mask_d[None, None, :, None, None]
+        * mask_l[None, None, None, :, None]
+        * mask_r[None, None, None, None, :]
+    )
 
 
 def _site_cfg_index(

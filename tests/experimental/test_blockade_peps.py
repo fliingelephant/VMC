@@ -89,25 +89,57 @@ class CfgIdxTest(unittest.TestCase):
         # Test different incoming configurations at bulk site (1, 1)
         # kL=0, kU=0 -> cfg_idx=0
         n_config = jnp.array([[0, 0, 0], [0, 0, 0], [0, 0, 0]], dtype=jnp.int32)
-        tensor = _assemble_site(tensors, n_config, config, 1, 1)
+        tensor = _assemble_site(
+            tensors,
+            config,
+            1,
+            1,
+            n_config[1, 1],
+            n_config[1, 0],
+            n_config[0, 1],
+        )
         expected = tensors[1][1][:, 0]
         self.assertTrue(jnp.allclose(tensor, expected))
 
         # kL=0, kU=1 -> cfg_idx=1
         n_config = jnp.array([[0, 1, 0], [0, 0, 0], [0, 0, 0]], dtype=jnp.int32)
-        tensor = _assemble_site(tensors, n_config, config, 1, 1)
+        tensor = _assemble_site(
+            tensors,
+            config,
+            1,
+            1,
+            n_config[1, 1],
+            n_config[1, 0],
+            n_config[0, 1],
+        )
         expected = tensors[1][1][:, 1]
         self.assertTrue(jnp.allclose(tensor, expected))
 
         # kL=1, kU=0 -> cfg_idx=2
         n_config = jnp.array([[0, 0, 0], [1, 0, 0], [0, 0, 0]], dtype=jnp.int32)
-        tensor = _assemble_site(tensors, n_config, config, 1, 1)
+        tensor = _assemble_site(
+            tensors,
+            config,
+            1,
+            1,
+            n_config[1, 1],
+            n_config[1, 0],
+            n_config[0, 1],
+        )
         expected = tensors[1][1][:, 2]
         self.assertTrue(jnp.allclose(tensor, expected))
 
         # kL=1, kU=1 -> cfg_idx=3
         n_config = jnp.array([[0, 1, 0], [1, 0, 0], [0, 0, 0]], dtype=jnp.int32)
-        tensor = _assemble_site(tensors, n_config, config, 1, 1)
+        tensor = _assemble_site(
+            tensors,
+            config,
+            1,
+            1,
+            n_config[1, 1],
+            n_config[1, 0],
+            n_config[0, 1],
+        )
         expected = tensors[1][1][:, 3]
         self.assertTrue(jnp.allclose(tensor, expected))
 
@@ -125,7 +157,15 @@ class CfgIdxTest(unittest.TestCase):
 
         # When n=1, cfg_idx should always be 0 (regardless of neighbors)
         n_config = jnp.array([[0, 0, 0], [0, 1, 0], [0, 0, 0]], dtype=jnp.int32)
-        tensor = _assemble_site(tensors, n_config, config, 1, 1)
+        tensor = _assemble_site(
+            tensors,
+            config,
+            1,
+            1,
+            n_config[1, 1],
+            n_config[1, 0],
+            n_config[0, 1],
+        )
         expected = tensors[1][1][:, 0]
         self.assertTrue(jnp.allclose(tensor, expected))
 

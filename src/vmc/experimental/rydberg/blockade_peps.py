@@ -19,7 +19,7 @@ Valid configurations at a bulk site:
 from __future__ import annotations
 
 import functools
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import jax
@@ -50,10 +50,18 @@ class BlockadePEPSConfig:
     D1: int  # Degeneracy for sector k=1
     phys_dim: int = 2  # Must be 2 for blockade
     dtype: Any = jnp.complex128
+    mask_per_charge: jax.Array | None = field(init=False, repr=False, compare=False)
 
     def __post_init__(self):
         if self.phys_dim != 2:
             raise ValueError("BlockadePEPS requires phys_dim=2")
+        dmax = max(self.D0, self.D1)
+        if self.D0 == dmax and self.D1 == dmax:
+            object.__setattr__(self, "mask_per_charge", None)
+            return
+        deg = jnp.asarray((self.D0, self.D1), dtype=jnp.int32)
+        mask = jnp.arange(dmax) < deg[:, None]
+        object.__setattr__(self, "mask_per_charge", mask)
 
     @property
     def Dmax(self) -> int:
@@ -180,94 +188,45 @@ def assemble_tensors(
     for r in range(n_rows):
         row = []
         for c in range(n_cols):
-            row.append(_assemble_site(tensors, config, peps_config, r, c))
+            n = config[r, c]
+            kL = config[r, c - 1] if c > 0 else 0
+            kU = config[r - 1, c] if r > 0 else 0
+            row.append(_assemble_site(tensors, peps_config, r, c, n, kL, kU))
         eff.append(row)
     return eff
 
 
 def _assemble_site(
     tensors: list[list[jax.Array]],
-    config: jax.Array,
     peps_config: BlockadePEPSConfig,
     r: int,
     c: int,
+    n: jax.Array,
+    kL: jax.Array,
+    kU: jax.Array,
 ) -> jax.Array:
     """Assemble site tensor based on current configuration.
 
     For n=0: cfg_idx = kL * stride + kU (up to 4 configs)
     For n=1: cfg_idx = 0 (only valid config)
     """
-    n_rows, n_cols = peps_config.shape
-    n = config[r, c]
-    kL = config[r, c - 1] if c > 0 else 0
-    kU = config[r - 1, c] if r > 0 else 0
-
     # Compute cfg_idx
     stride = 2 if r > 0 else 1
     cfg_idx_n0 = kL * stride + kU
     cfg_idx = jnp.where(n == 0, cfg_idx_n0, 0)
 
-    return tensors[r][c][:, cfg_idx, :, :, :, :]
-
-
-def _assemble_site_with_n(
-    tensors: list[list[jax.Array]],
-    config: jax.Array,
-    peps_config: BlockadePEPSConfig,
-    r: int,
-    c: int,
-    n_new: jax.Array,
-) -> jax.Array:
-    """Assemble site tensor with overridden n value."""
-    n_rows, n_cols = peps_config.shape
-    kL = config[r, c - 1] if c > 0 else 0
-    kU = config[r - 1, c] if r > 0 else 0
-
-    stride = 2 if r > 0 else 1
-    cfg_idx_n0 = kL * stride + kU
-    cfg_idx = jnp.where(n_new == 0, cfg_idx_n0, 0)
-
-    return tensors[r][c][:, cfg_idx, :, :, :, :]
-
-
-def _assemble_site_with_kU(
-    tensors: list[list[jax.Array]],
-    config: jax.Array,
-    peps_config: BlockadePEPSConfig,
-    r: int,
-    c: int,
-    kU_new: jax.Array,
-) -> jax.Array:
-    """Assemble site tensor with overridden kU (from flipped neighbor above)."""
-    n_rows, n_cols = peps_config.shape
-    n = config[r, c]
-    kL = config[r, c - 1] if c > 0 else 0
-
-    stride = 2 if r > 0 else 1
-    cfg_idx_n0 = kL * stride + kU_new
-    cfg_idx = jnp.where(n == 0, cfg_idx_n0, 0)
-
-    return tensors[r][c][:, cfg_idx, :, :, :, :]
-
-
-def _assemble_site_with_kL(
-    tensors: list[list[jax.Array]],
-    config: jax.Array,
-    peps_config: BlockadePEPSConfig,
-    r: int,
-    c: int,
-    kL_new: jax.Array,
-) -> jax.Array:
-    """Assemble site tensor with overridden kL (from flipped neighbor to left)."""
-    n_rows, n_cols = peps_config.shape
-    n = config[r, c]
-    kU = config[r - 1, c] if r > 0 else 0
-
-    stride = 2 if r > 0 else 1
-    cfg_idx_n0 = kL_new * stride + kU
-    cfg_idx = jnp.where(n == 0, cfg_idx_n0, 0)
-
-    return tensors[r][c][:, cfg_idx, :, :, :, :]
+    tensor = tensors[r][c][:, cfg_idx, :, :, :, :]
+    mask_per_charge = peps_config.mask_per_charge
+    if mask_per_charge is None:
+        return tensor
+    mask_u = mask_per_charge[kU][: tensor.shape[1]]
+    tensor = tensor * mask_u[None, :, None, None, None]
+    mask_d = mask_per_charge[n][: tensor.shape[2]]
+    tensor = tensor * mask_d[None, None, :, None, None]
+    mask_l = mask_per_charge[kL][: tensor.shape[3]]
+    tensor = tensor * mask_l[None, None, None, :, None]
+    mask_r = mask_per_charge[n][: tensor.shape[4]]
+    return tensor * mask_r[None, None, None, None, :]
 
 
 # =============================================================================
@@ -336,7 +295,15 @@ def _build_row_mpo(
     n_cols = peps_config.shape[1]
     return tuple(
         jnp.transpose(
-            _assemble_site(tensors, config, peps_config, row, c)[config[row, c]],
+            _assemble_site(
+                tensors,
+                peps_config,
+                row,
+                c,
+                config[row, c],
+                config[row, c - 1] if c > 0 else 0,
+                config[row - 1, c] if row > 0 else 0,
+            )[config[row, c]],
             (2, 3, 0, 1),
         )
         for c in range(n_cols)
@@ -449,7 +416,15 @@ def grads_and_energy(
         left_env = jnp.ones((1, 1, 1), dtype=dtype)
 
         eff_row = [
-            _assemble_site(tensors, config, peps_config, row, c)
+            _assemble_site(
+                tensors,
+                peps_config,
+                row,
+                c,
+                config[row, c],
+                config[row, c - 1] if c > 0 else 0,
+                config[row - 1, c] if row > 0 else 0,
+            )
             for c in range(n_cols)
         ]
 
@@ -626,11 +601,23 @@ def _sweep_single_row(
             )
 
             def _compute_flip(_):
-                eff_flip = _assemble_site_with_n(
-                    tensors, config, peps_config, r, c, n_flip
+                eff_flip = _assemble_site(
+                    tensors,
+                    peps_config,
+                    r,
+                    c,
+                    n_flip,
+                    config[r, c - 1] if c > 0 else 0,
+                    config[r - 1, c] if r > 0 else 0,
                 )
-                eff_c1_flip = _assemble_site_with_kL(
-                    tensors, config, peps_config, r, c + 1, n_flip
+                eff_c1_flip = _assemble_site(
+                    tensors,
+                    peps_config,
+                    r,
+                    c + 1,
+                    config[r, c + 1],
+                    n_flip,
+                    config[r - 1, c + 1] if r > 0 else 0,
                 )
                 mpo_c_flip = jnp.transpose(eff_flip[n_flip], (2, 3, 0, 1))
                 mpo_c1_flip = jnp.transpose(
@@ -660,8 +647,14 @@ def _sweep_single_row(
             )
 
             def _compute_flip(_):
-                eff_flip = _assemble_site_with_n(
-                    tensors, config, peps_config, r, c, n_flip
+                eff_flip = _assemble_site(
+                    tensors,
+                    peps_config,
+                    r,
+                    c,
+                    n_flip,
+                    config[r, c - 1] if c > 0 else 0,
+                    config[r - 1, c] if r > 0 else 0,
                 )
                 mpo_c_flip = jnp.transpose(eff_flip[n_flip], (2, 3, 0, 1))
                 amp_flip = jnp.einsum(
@@ -758,14 +751,32 @@ def _sweep_row_pair(
             )
 
             def _compute_flip(_):
-                eff0_c_flip = _assemble_site_with_n(
-                    tensors, config, peps_config, r, c, n_flip
+                eff0_c_flip = _assemble_site(
+                    tensors,
+                    peps_config,
+                    r,
+                    c,
+                    n_flip,
+                    config[r, c - 1] if c > 0 else 0,
+                    config[r - 1, c] if r > 0 else 0,
                 )
-                eff1_c_flip = _assemble_site_with_kU(
-                    tensors, config, peps_config, r + 1, c, n_flip
+                eff1_c_flip = _assemble_site(
+                    tensors,
+                    peps_config,
+                    r + 1,
+                    c,
+                    config[r + 1, c],
+                    config[r + 1, c - 1] if c > 0 else 0,
+                    n_flip,
                 )
-                eff0_c1_flip = _assemble_site_with_kL(
-                    tensors, config, peps_config, r, c + 1, n_flip
+                eff0_c1_flip = _assemble_site(
+                    tensors,
+                    peps_config,
+                    r,
+                    c + 1,
+                    config[r, c + 1],
+                    n_flip,
+                    config[r - 1, c + 1] if r > 0 else 0,
                 )
                 mpo0_c_flip = jnp.transpose(eff0_c_flip[n_flip], (2, 3, 0, 1))
                 mpo1_c_flip = jnp.transpose(
@@ -795,11 +806,23 @@ def _sweep_row_pair(
             )
 
             def _compute_flip(_):
-                eff0_c_flip = _assemble_site_with_n(
-                    tensors, config, peps_config, r, c, n_flip
+                eff0_c_flip = _assemble_site(
+                    tensors,
+                    peps_config,
+                    r,
+                    c,
+                    n_flip,
+                    config[r, c - 1] if c > 0 else 0,
+                    config[r - 1, c] if r > 0 else 0,
                 )
-                eff1_c_flip = _assemble_site_with_kU(
-                    tensors, config, peps_config, r + 1, c, n_flip
+                eff1_c_flip = _assemble_site(
+                    tensors,
+                    peps_config,
+                    r + 1,
+                    c,
+                    config[r + 1, c],
+                    config[r + 1, c - 1] if c > 0 else 0,
+                    n_flip,
                 )
                 mpo0_c_flip = jnp.transpose(eff0_c_flip[n_flip], (2, 3, 0, 1))
                 mpo1_c_flip = jnp.transpose(

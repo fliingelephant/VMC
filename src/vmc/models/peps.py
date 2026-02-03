@@ -9,7 +9,6 @@ from vmc import config  # noqa: F401 - JAX config must be imported first
 
 import abc
 import functools
-import logging
 from typing import TYPE_CHECKING, Any
 
 import jax
@@ -51,7 +50,6 @@ __all__ = [
     "_forward_with_cache",
 ]
 
-logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -230,7 +228,6 @@ def _apply_mpo_variational(
 
     This avoids SVD entirely, using only QR for canonical form maintenance.
     """
-    n_sites = len(mps)
     dtype = mps[0].dtype
     Dc = truncate_bond_dimension
 
@@ -486,18 +483,17 @@ def _forward_with_cache(
     shape: tuple[int, int],
     strategy: ContractionStrategy,
 ) -> tuple[jax.Array, list[tuple]]:
-    """Forward pass that caches all intermediate boundary MPSs."""
+    """Forward pass that caches the top boundary before each row."""
     n_rows, n_cols = shape
     dtype = jnp.asarray(tensors[0][0]).dtype
 
-    top_envs = []
+    top_envs = [None] * n_rows
     boundary = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
-    top_envs.append(boundary)
 
     for row in range(n_rows):
+        top_envs[row] = boundary
         mpo = _build_row_mpo(tensors, spins[row], row, n_cols)
         boundary = strategy.apply(boundary, mpo)
-        top_envs.append(boundary)
 
     return _contract_bottom(boundary), top_envs
 
@@ -959,8 +955,9 @@ def sweep(
     dtype = tensors[0][0].dtype
 
     top_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
-    top_envs_cache = [top_env]
+    top_envs_cache = [None] * n_rows
     for row in range(n_rows):
+        top_envs_cache[row] = top_env
         bottom_env = envs[row]
         mpo_row = _build_row_mpo(tensors, indices[row], row, n_cols)
         right_envs = _compute_right_envs(top_env, mpo_row, bottom_env, dtype)
@@ -1010,7 +1007,6 @@ def sweep(
             )
 
         top_env = model.strategy.apply(top_env, tuple(updated_row))
-        top_envs_cache.append(top_env)
 
     amp = _contract_bottom(top_env)
     return indices.reshape(-1), key, amp, top_envs_cache

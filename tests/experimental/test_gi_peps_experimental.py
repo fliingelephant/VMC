@@ -49,6 +49,26 @@ class GIPEPSTest(unittest.TestCase):
         self.assertTrue(jnp.array_equal(h_links, h_out))
         self.assertTrue(jnp.array_equal(v_links, v_out))
 
+    def test_apply_returns_zero_on_invalid_config(self):
+        config = GIPEPSConfig(
+            shape=(3, 3),
+            N=2,
+            phys_dim=2,
+            Qx=0,
+            degeneracy_per_charge=(2, 2),
+            charge_of_site=(0, 1),
+        )
+        strategy = NoTruncation()
+        model = GIPEPS(rngs=nnx.Rngs(0), config=config, contraction_strategy=strategy)
+        key = jax.random.key(0)
+        sample = model.random_physical_configuration(key, n_samples=1)[0]
+        sites, h_links, v_links = GIPEPS.unflatten_sample(sample, config.shape)
+        bad_sites = sites.at[0, 0].set(1 - sites[0, 0])
+        bad_sample = GIPEPS.flatten_sample(bad_sites, h_links, v_links)
+        tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
+        amp_bad = GIPEPS.apply(tensors, bad_sample, config.shape, config, strategy)
+        self.assertTrue(bool(jax.device_get(amp_bad == 0)))
+
     def test_sampler_shapes(self):
         strategies = [
             NoTruncation(),

@@ -18,6 +18,7 @@ Use a **hybrid approach**: ABCs for type hierarchies + plum `@dispatch` for mult
 
 ## Design Decisions
 
+- **Use Einsum over mannual tensordot.** Use Einsum with `optimize=True` or manually define contraction orders, instead of sequentially do tensor/matrix operations.
 - **Prefer composition over inheritance.** Combine small strategy objects rather than deep class trees.
 - **No factory functions.** Use direct instantiation with explicit arguments.
 - **DRY (Don't Repeat Yourself).** Consolidate duplicated implementations into a single source of truth.

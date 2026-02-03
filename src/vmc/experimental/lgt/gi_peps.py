@@ -12,7 +12,7 @@ slicing.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import functools
 from typing import Any
 
@@ -51,6 +51,16 @@ class GIPEPSConfig:
     degeneracy_per_charge: tuple[int, ...]
     charge_of_site: tuple[int, ...]
     dtype: Any = jnp.complex128
+    mask_per_charge: jax.Array | None = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        dmax = int(max(self.degeneracy_per_charge))
+        if all(d == dmax for d in self.degeneracy_per_charge):
+            object.__setattr__(self, "mask_per_charge", None)
+            return
+        deg = jnp.asarray(self.degeneracy_per_charge, dtype=jnp.int32)
+        mask = jnp.arange(dmax) < deg[:, None]
+        object.__setattr__(self, "mask_per_charge", mask)
 
     @property
     def dmax(self) -> int:
@@ -143,9 +153,26 @@ class GIPEPS(nnx.Module):
         strategy: Any,
     ) -> jax.Array:
         sites, h_links, v_links = GIPEPS.unflatten_sample(sample, shape)
-        eff_tensors = assemble_tensors(tensors, h_links, v_links, config)
-        spins = sites.reshape(-1)
-        return _peps_apply_occupancy(eff_tensors, spins, shape, strategy)
+        n = jnp.asarray(config.N, dtype=h_links.dtype)
+        nl = jnp.pad(h_links, ((0, 0), (1, 0)), constant_values=0)
+        nr = jnp.pad(h_links, ((0, 0), (0, 1)), constant_values=0)
+        nu = jnp.pad(v_links, ((1, 0), (0, 0)), constant_values=0)
+        nd = jnp.pad(v_links, ((0, 1), (0, 0)), constant_values=0)
+        div = (nl + nd - nu - nr) % n
+        charge_of_site = jnp.asarray(config.charge_of_site, dtype=sites.dtype)
+        charge = charge_of_site[sites]
+        valid = (div + charge) % n == jnp.asarray(config.Qx, dtype=div.dtype)
+        invalid = jnp.any(~valid)
+        dtype = jnp.asarray(tensors[0][0]).dtype
+
+        def _compute_amp(_):
+            eff_tensors = assemble_tensors(tensors, h_links, v_links, config)
+            spins = sites.reshape(-1)
+            return _peps_apply_occupancy(eff_tensors, spins, shape, strategy)
+
+        return jax.lax.cond(
+            invalid, lambda _: jnp.zeros((), dtype=dtype), _compute_amp, operand=None
+        )
 
     def random_physical_configuration(
         self,
@@ -171,15 +198,15 @@ class GIPEPS(nnx.Module):
             )
             h_links = h_links.at[: n_rows - 1, :].add(deltas)
             h_links = h_links.at[1:, :].add(-deltas)
-            v_links = v_links.at[:, : n_cols - 1].add(-deltas)
-            v_links = v_links.at[:, 1:].add(deltas)
+            v_links = v_links.at[:, : n_cols - 1].add(deltas)
+            v_links = v_links.at[:, 1:].add(-deltas)
             h_links = h_links % self.N
             v_links = v_links % self.N
         nl = jnp.pad(h_links, ((0, 0), (1, 0)), constant_values=0)
         nr = jnp.pad(h_links, ((0, 0), (0, 1)), constant_values=0)
         nu = jnp.pad(v_links, ((1, 0), (0, 0)), constant_values=0)
         nd = jnp.pad(v_links, ((0, 1), (0, 0)), constant_values=0)
-        div = (nl + nu - nr - nd) % self.N
+        div = (nl + nd - nu - nr) % self.N
         charge = (self.Qx - div) % self.N
         keys = jax.random.split(site_key, n_rows * n_cols).reshape((n_rows, n_cols))
         sites = jax.vmap(
@@ -292,7 +319,21 @@ def _assemble_site(
     cfg_idx = _site_cfg_index(
         config, k_l=k_l, k_u=k_u, k_r=k_r, k_d=k_d, r=r, c=c
     )
-    return tensors[r][c][:, cfg_idx, :, :, :, :]
+    tensor = tensors[r][c][:, cfg_idx, :, :, :, :]
+    mask_per_charge = config.mask_per_charge
+    if mask_per_charge is None:
+        return tensor
+    mask_u = mask_per_charge[k_u][: tensor.shape[1]]
+    mask_d = mask_per_charge[k_d][: tensor.shape[2]]
+    mask_l = mask_per_charge[k_l][: tensor.shape[3]]
+    mask_r = mask_per_charge[k_r][: tensor.shape[4]]
+    return (
+        tensor
+        * mask_u[None, :, None, None, None]
+        * mask_d[None, None, :, None, None]
+        * mask_l[None, None, None, :, None]
+        * mask_r[None, None, None, None, :]
+    )
 
 
 def _site_cfg_index(
@@ -413,8 +454,8 @@ def _plaquette_flip(
     n = jnp.asarray(N, dtype=h_links.dtype)
     h_links = h_links.at[r, c].set((h_links[r, c] + delta) % n)
     h_links = h_links.at[r + 1, c].set((h_links[r + 1, c] - delta) % n)
-    v_links = v_links.at[r, c].set((v_links[r, c] - delta) % n)
-    v_links = v_links.at[r, c + 1].set((v_links[r, c + 1] + delta) % n)
+    v_links = v_links.at[r, c].set((v_links[r, c] + delta) % n)
+    v_links = v_links.at[r, c + 1].set((v_links[r, c + 1] - delta) % n)
     return h_links, v_links
 
 
@@ -598,15 +639,7 @@ def grads_and_energy(
                                 optimize=[(0, 1), (0, 3), (0, 2), (0, 1)],
                             )
                             continue
-                        # Direct einsum for 2-column amplitude
-                        # Convention: mpo0[c+1] (r,s,g,h) where D_up=g connects to top, D_down=h connects to mpo1
-                        amp_cur = jnp.einsum(
-                            "alxe,aub,lruv,xyvw,ewf,bgc,rsgh,ythi,fij,cstj->",
-                            left_env_2row, top_env[c], row_mpo[c], row_mpo_next[c], bottom_env_next[c],
-                            top_env[c + 1], row_mpo[c + 1], row_mpo_next[c + 1], bottom_env_next[c + 1],
-                            right_envs_2row[c + 1],
-                            optimize=[(1, 5), (3, 6), (1, 2), (1, 2), (0, 2), (2, 4), (1, 3), (0, 2), (0, 1)],
-                        )
+                        # Use global amp to normalize plaquette contributions (saves one contraction).
                         # Compute amplitude for +delta flip
                         h_plus, v_plus = _plaquette_flip(
                             h_links, v_links, row, c, delta=1, N=config.N
@@ -651,7 +684,7 @@ def grads_and_energy(
                             coeff = jnp.sum(
                                 jnp.asarray([term.coeff for term in plaquette_here])
                             )
-                        energy = energy + coeff * (amp_plus + amp_minus) / amp_cur
+                        energy = energy + coeff * (amp_plus + amp_minus) / amp
                         # Direct einsum for left_env_2row update
                         left_env_2row = jnp.einsum(
                             "alxe,aub,lruv,xyvw,ewf->bryf",
@@ -882,8 +915,8 @@ def _vertical_link_sweep_row_pair(
         v_prop = v_links.at[r, c].set((v_links[r, c] + delta) % n)
         q_top = charge_of_site[sites[r, c]]
         q_bottom = charge_of_site[sites[r + 1, c]]
-        q_top_new = (q_top + delta) % n
-        q_bottom_new = (q_bottom - delta) % n
+        q_top_new = (q_top - delta) % n
+        q_bottom_new = (q_bottom + delta) % n
         key, site_key = jax.random.split(key)
         key_top, key_bottom = jax.random.split(site_key)
         site_top = _sample_site_index_for_charge(

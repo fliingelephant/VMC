@@ -134,8 +134,13 @@ def _contract_theta(m: jax.Array, w: jax.Array, carry: jax.Array | None) -> tupl
     (left_dim, phys_dim, Dr, wr).
     """
     if carry is not None:
-        tmp = jnp.einsum("kdl,dpr->prkl", carry, m)
-        theta = jnp.einsum("prkl,lwpq->kqrw", tmp, w)
+        theta = jnp.einsum(
+            "kdl,dpr,lwpq->kqrw",
+            carry,
+            m,
+            w,
+            optimize=[(0, 1), (0, 1)],
+        )
         left_dim, phys_dim, Dr, wr = theta.shape
         return theta, left_dim, phys_dim, Dr, wr
     theta = jnp.einsum("dpr,lwpq->dlqrw", m, w)
@@ -751,12 +756,16 @@ def _compute_2site_horizontal_env(
 
     Returns tensor with shape (up0, down0, mL, up1, down1, mR).
     """
-    # Contract left side: left_env (a,c,e) @ top0 (a,u,b) @ bot0 (e,d,f) -> (c,u,b,d,f)
-    tmp_left = jnp.einsum("ace,aub,edf->cubdf", left_env, top0, bot0, optimize=[(0, 1), (0, 1)])
-    # Contract right side: top1 (b,v,g) @ right_env (g,h,i) @ bot1 (f,w,i) -> (b,v,h,f,w)
-    tmp_right = jnp.einsum("bvg,ghi,fwi->bvhfw", top1, right_env, bot1, optimize=[(0, 1), (0, 1)])
-    # Contract left and right: (c,u,b,d,f) @ (b,v,h,f,w) -> (c,u,d,v,h,w)
-    env = jnp.einsum("cubdf,bvhfw->cudvhw", tmp_left, tmp_right, optimize=[(0, 1)])
+    env = jnp.einsum(
+        "ace,aub,edf,bvg,ghi,fwi->cudvhw",
+        left_env,
+        top0,
+        bot0,
+        top1,
+        right_env,
+        bot1,
+        optimize=[(0, 1), (0, 1), (1, 2), (1, 2), (0, 1)],
+    )
     # Transpose to (up0, down0, mL, up1, down1, mR)
     return jnp.transpose(env, (1, 2, 0, 3, 5, 4))
 

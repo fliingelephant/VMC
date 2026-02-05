@@ -16,6 +16,10 @@ from vmc.utils.utils import (
     occupancy_to_spin,
     spin_to_occupancy,
 )
+from vmc.utils.factorizations import (
+    _qr_compactwy,
+    _qr_cholesky,
+)
 
 # Note: vmc_utils imports are not included here to avoid circular imports.
 # Import directly from vmc.utils.vmc_utils when needed.
@@ -32,4 +36,6 @@ __all__ = [
     "independent_set_violations",
     "occupancy_to_spin",
     "spin_to_occupancy",
+    "_qr_compactwy",
+    "_qr_cholesky",
 ]

@@ -17,6 +17,7 @@ from flax import nnx
 
 from plum import dispatch
 
+from vmc.utils.factorizations import _qr_compactwy
 from vmc.utils.utils import random_tensor, spin_to_occupancy
 
 if TYPE_CHECKING:
@@ -280,7 +281,7 @@ def _init_compressed_mps(mps: tuple, mpo: tuple, Dc: int) -> list[jax.Array]:
         mat = theta.reshape(left_dim * phys_dim, Dr * wr)
 
         # QR decomposition
-        Q, R = jax.lax.linalg.qr(mat, full_matrices=False)
+        Q, R = _qr_compactwy(mat)
 
         # Truncate to Dc columns
         k = min(Dc, Q.shape[1])
@@ -372,7 +373,7 @@ def _variational_sweep_lr(
         # QR decompose: optimal = A @ C (Paeckel Sec 2.5)
         left_dim, phys_dim, right_dim = optimal.shape
         mat = optimal.reshape(left_dim * phys_dim, right_dim)
-        A, C = jax.lax.linalg.qr(mat, full_matrices=False)
+        A, C = _qr_compactwy(mat)
 
         new_tensor = A.reshape(left_dim, phys_dim, A.shape[1])
         new_result[i] = new_tensor
@@ -440,7 +441,7 @@ def _variational_sweep_rl(
         # LQ via QR on transpose: A = C @ B, A.T = B.T @ C.T
         left_dim, phys_dim, right_dim = optimal.shape
         mat = optimal.reshape(left_dim, phys_dim * right_dim)
-        Q_t, R_t = jax.lax.linalg.qr(mat.T, full_matrices=False)
+        Q_t, R_t = _qr_compactwy(mat.T)
         # B = Q_t.T has orthonormal rows, C = R_t.T
         B = Q_t.T  # (k, phys * right)
         C = R_t.T  # (left, k)
@@ -668,6 +669,7 @@ def _compute_all_env_grads_and_energy(
 
     # Backward pass: bottom → top
     bottom_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
+    next_row_mpo = None
     for row in range(n_rows - 1, -1, -1):
         bottom_envs_cache[row] = bottom_env
         top_env = top_envs[row]
@@ -719,12 +721,11 @@ def _compute_all_env_grads_and_energy(
             )
         # Vertical energy between row and row+1
         if row < n_rows - 1:
-            mpo_next = _build_row_mpo(tensors, spins[row + 1], row + 1, n_cols)
             energy = energy + _compute_row_pair_vertical_energy(
                 top_env,
                 bottom_envs_cache[row + 1],
                 mpo,
-                mpo_next,
+                next_row_mpo,
                 tensors[row],
                 tensors[row + 1],
                 spins[row],
@@ -734,6 +735,7 @@ def _compute_all_env_grads_and_energy(
                 phys_dim,
             )
         bottom_env = _apply_mpo_from_below(bottom_env, mpo, strategy)
+        next_row_mpo = mpo
 
     return env_grads, energy, bottom_envs_cache
 

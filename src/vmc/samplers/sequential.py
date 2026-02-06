@@ -557,9 +557,10 @@ def sequential_sample_with_gradients(
 
     def burn_step(carry, _):
         samples, chain_keys, envs = carry
-        samples, chain_keys, envs, _, _, _, _ = jax.vmap(mc_sweep)(
-            samples, chain_keys, envs
-        )
+        samples, chain_keys, _, _ = jax.vmap(
+            lambda sample, key, env: sweep(model, sample, key, env)
+        )(samples, chain_keys, envs)
+        envs = jax.vmap(lambda sample: bottom_envs(model, sample))(samples)
         return (samples, chain_keys, envs), None
 
     (samples_flat, chain_keys, envs), _ = jax.lax.scan(
@@ -600,5 +601,4 @@ def sequential_sample_with_gradients(
         p = _trim_samples(p, total_samples, num_samples)
 
     return samples_out, grads, p, key, final_samples, amps, local_energies
-
 

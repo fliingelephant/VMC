@@ -693,20 +693,17 @@ def _compute_all_env_grads_and_energy(
             if c < n_cols - 1:
                 edge_terms = horizontal_terms[row][c]
                 if edge_terms:
-                    env_2site = _compute_2site_horizontal_env(
+                    amps_edge = jnp.einsum(
+                        "ace,aub,edf,pudcr,qvwrx,bvg,fwi,gxi->pq",
                         left_env,
-                        right_envs[c + 1],
                         top_env[c],
                         bottom_env[c],
-                        top_env[c + 1],
-                        bottom_env[c + 1],
-                    )
-                    amps_edge = jnp.einsum(
-                        "pudlr,qverx,udlvex->pq",
                         tensors[row][c],
                         tensors[row][c + 1],
-                        env_2site,
-                        optimize=[(0, 2), (0, 1)],
+                        top_env[c + 1],
+                        bottom_env[c + 1],
+                        right_envs[c + 1],
+                        optimize=[(0, 1), (1, 6), (0, 5), (1, 3), (0, 3), (0, 2), (0, 1)],
                     )
                     spin0 = spins[row, c]
                     spin1 = spins[row, c + 1]

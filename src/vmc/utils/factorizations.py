@@ -55,7 +55,7 @@ def _householder_wy(r: jax.Array, tau: jax.Array) -> jax.Array:
 
 
 def _qr_cholesky(a: jax.Array) -> tuple[jax.Array, jax.Array]:
-    gram = a.conj().T @ a
+    gram = a.mH @ a
     L = jnp.linalg.cholesky(gram)
-    q = jax.scipy.linalg.solve_triangular(L, a.conj().T, lower=True).conj().T
-    return q, L.conj().T
+    q = jax.scipy.linalg.solve_triangular(L, a.mH, lower=True).mH
+    return q, L.mH

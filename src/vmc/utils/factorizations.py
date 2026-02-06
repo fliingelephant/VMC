@@ -31,7 +31,7 @@ def _householder_wy(r: jax.Array, tau: jax.Array) -> jax.Array:
     basis = jnp.eye(k, dtype=dtype)
 
     def update_column(j: int, T: jax.Array) -> jax.Array:
-        mask = strict_lower[:, j]
+        mask = strict_lower[j, :]
         yhy_col = YHY[..., :, j] * mask
         t_yhy = jnp.einsum("...ab,...b->...a", T, yhy_col, optimize=True)
         tau_j = tau[..., j][..., None]

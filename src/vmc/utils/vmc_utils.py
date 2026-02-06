@@ -20,9 +20,8 @@ from plum import dispatch
 from vmc.core.eval import _value
 from vmc.models.peps import (
     PEPS,
-    _build_row_mpo,
     _compute_all_env_grads_and_energy,
-    bottom_envs,
+    _forward_with_cache,
 )
 from vmc.operators.local_terms import LocalHamiltonian, bucket_terms
 from vmc.utils.utils import occupancy_to_spin, spin_to_occupancy
@@ -146,14 +145,14 @@ def local_estimate(
     def per_sample(sample, amp):
         occupancy = spin_to_occupancy(sample)
         spins = occupancy.reshape(shape)
-        envs = bottom_envs(model, occupancy)
-        _, energy = _compute_all_env_grads_and_energy(
+        _, top_envs = _forward_with_cache(tensors, spins, shape, model.strategy)
+        _, energy, _ = _compute_all_env_grads_and_energy(
             tensors,
             spins,
             amp,
             shape,
             model.strategy,
-            envs,
+            top_envs,
             diagonal_terms=diagonal_terms,
             one_site_terms=one_site_terms,
             horizontal_terms=horizontal_terms,

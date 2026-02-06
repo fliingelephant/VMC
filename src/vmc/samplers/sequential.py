@@ -287,7 +287,7 @@ def sequential_sample(
     envs = jax.vmap(lambda s: bottom_envs(model, s))(samples_flat)
 
     def sweep_once(sample, key, envs):
-        sample, key, _ = sweep(model, sample, key, envs)
+        sample, key, _, _ = sweep(model, sample, key, envs)
         envs = bottom_envs(model, sample)
         return sample, key, envs
 
@@ -550,17 +550,17 @@ def sequential_sample_with_gradients(
 
     def mc_sweep(sample, key, envs):
         """Single MC sweep: Metropolis sweep + gradient/energy + flatten (single vmap)."""
-        sample, key, amp = sweep(model, sample, key, envs)
-        envs = bottom_envs(model, sample)
-        env_grads, local_energy = grads_and_energy(model, sample, amp, operator, envs)
+        sample, key, amp, top_envs = sweep(model, sample, key, envs)
+        env_grads, local_energy, envs = grads_and_energy(model, sample, amp, operator, top_envs)
         grad_row, p_row = flatten_grads(env_grads, sample, amp)
         return sample, key, envs, grad_row, p_row, amp, local_energy
 
     def burn_step(carry, _):
         samples, chain_keys, envs = carry
-        samples, chain_keys, envs, _, _, _, _ = jax.vmap(mc_sweep)(
-            samples, chain_keys, envs
-        )
+        samples, chain_keys, _, _ = jax.vmap(
+            lambda sample, key, env: sweep(model, sample, key, env)
+        )(samples, chain_keys, envs)
+        envs = jax.vmap(lambda sample: bottom_envs(model, sample))(samples)
         return (samples, chain_keys, envs), None
 
     (samples_flat, chain_keys, envs), _ = jax.lax.scan(
@@ -601,5 +601,4 @@ def sequential_sample_with_gradients(
         p = _trim_samples(p, total_samples, num_samples)
 
     return samples_out, grads, p, key, final_samples, amps, local_energies
-
 

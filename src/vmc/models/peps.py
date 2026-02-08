@@ -151,7 +151,6 @@ def _contract_theta(m: jax.Array, w: jax.Array, carry: jax.Array | None) -> tupl
     return theta, left_dim, phys_dim, Dr, wr
 
 
-@jax.jit
 def _apply_mpo_exact(mps: tuple, mpo: tuple) -> tuple:
     """Exact MPO application without truncation."""
     return tuple(
@@ -162,7 +161,6 @@ def _apply_mpo_exact(mps: tuple, mpo: tuple) -> tuple:
     )
 
 
-@functools.partial(jax.jit, static_argnums=(2,))
 def _apply_mpo_zip_up(
     mps: tuple, mpo: tuple, truncate_bond_dimension: int
 ) -> tuple:
@@ -188,7 +186,6 @@ def _apply_mpo_zip_up(
     return tuple(new)
 
 
-@functools.partial(jax.jit, static_argnums=(2,))
 def _apply_mpo_density_matrix(
     mps: tuple, mpo: tuple, truncate_bond_dimension: int
 ) -> tuple:
@@ -215,7 +212,6 @@ def _apply_mpo_density_matrix(
     return tuple(new)
 
 
-@functools.partial(jax.jit, static_argnums=(2, 3))
 def _apply_mpo_variational(
     mps: tuple, mpo: tuple, truncate_bond_dimension: int, n_sweeps: int = 2
 ) -> tuple:
@@ -703,7 +699,7 @@ def _compute_all_env_grads_and_energy(
                         top_env[c + 1],
                         bottom_env[c + 1],
                         right_envs[c + 1],
-                        optimize=[(0, 1), (1, 6), (0, 5), (1, 3), (0, 3), (0, 2), (0, 1)],
+                        optimize=[(0, 1), (1, 6), (0, 5), (1, 3), (1, 2), (1, 2), (0, 1)],
                     )
                     spin0 = spins[row, c]
                     spin1 = spins[row, c + 1]

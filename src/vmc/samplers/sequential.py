@@ -56,7 +56,7 @@ def _collect_samples(
     chain_length: int,
     sample_view,
 ):
-    # Burn-in sweeps (inline _run_sweeps)
+    # Burn-in sweeps
     def burn_step(carry, _):
         state, key = carry
         state, key = sweep_batched(state, key)
@@ -167,9 +167,9 @@ def _sequential_mps_sweep_with_envs(
         tensor_flip = tensors[site, flip_idx]
         amp_cur = jnp.einsum("i,ij,j->", left_env, tensor_cur, right_env, optimize=[(0, 1), (0, 1)])
         amp_flip = jnp.einsum("i,ij,j->", left_env, tensor_flip, right_env, optimize=[(0, 1), (0, 1)])
-        weight_cur = jnp.abs(amp_cur) ** 2
-        weight_flip = jnp.abs(amp_flip) ** 2
-        ratio = _metropolis_ratio(weight_cur, weight_flip)
+        prob_cur = jnp.abs(amp_cur) ** 2
+        prob_flip = jnp.abs(amp_flip) ** 2
+        ratio = _metropolis_ratio(prob_cur, prob_flip)
 
         key, accept_key = jax.random.split(key)
         accept = jax.random.uniform(accept_key) < jnp.minimum(1.0, ratio)
@@ -601,4 +601,3 @@ def sequential_sample_with_gradients(
         p = _trim_samples(p, total_samples, num_samples)
 
     return samples_out, grads, p, key, final_samples, amps, local_energies
-

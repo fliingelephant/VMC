@@ -926,12 +926,12 @@ def grads_and_energy(
     )
 
 
-def _metropolis_ratio(weight_cur: jax.Array, weight_flip: jax.Array) -> jax.Array:
-    """Compute Metropolis acceptance ratio with proper handling of zero weights."""
+def _metropolis_ratio(prob_cur: jax.Array, prob_flip: jax.Array) -> jax.Array:
+    """Compute Metropolis acceptance ratio with proper handling of zero probabilities."""
     return jnp.where(
-        weight_cur > 0.0,
-        weight_flip / weight_cur,
-        jnp.where(weight_flip > 0.0, jnp.inf, 0.0),
+        prob_cur > 0.0,
+        prob_flip / prob_cur,
+        jnp.where(prob_flip > 0.0, jnp.inf, 0.0),
     )
 
 
@@ -966,6 +966,14 @@ def sweep(
         mpo_row = _build_row_mpo(tensors, indices[row], row, n_cols)
         right_envs = _compute_right_envs(top_env, mpo_row, bottom_env, dtype)
         left_env = jnp.ones((1, 1, 1), dtype=dtype)
+        # Reinitialize per row (instead of carrying across rows) because top_env
+        # is replaced by strategy.apply(...) at row end, which may truncate and
+        # change the effective boundary representation for the next row.
+        amp_cur = jnp.einsum(
+            "ace,aub,cduv,evf,bdf->",
+            left_env, top_env[0], mpo_row[0], bottom_env[0], right_envs[0],
+            optimize=[(0, 1), (1, 2), (1, 2), (0, 1)],
+        )
         updated_row = []
         for col in range(n_cols):
             site_tensor = tensors[row][col]
@@ -981,25 +989,18 @@ def sweep(
                 flip_idx = (cur_idx + delta) % phys_dim
             mpo_flip = jnp.transpose(site_tensor[flip_idx], (2, 3, 0, 1))
             mpo_cur = mpo_row[col]
-            # Direct einsum for amplitude computation (no transfer intermediate)
-            amp_cur = jnp.einsum(
-                "ace,aub,cduv,evf,bdf->",
-                left_env, top_env[col], mpo_cur, bottom_env[col], right_envs[col],
-                optimize=[(0, 1), (1, 2), (1, 2), (0, 1)],
-            )
             amp_flip = jnp.einsum(
                 "ace,aub,cduv,evf,bdf->",
                 left_env, top_env[col], mpo_flip, bottom_env[col], right_envs[col],
                 optimize=[(0, 1), (1, 2), (1, 2), (0, 1)],
             )
-            weight_cur = jnp.abs(amp_cur) ** 2
-            weight_flip = jnp.abs(amp_flip) ** 2
-            ratio = _metropolis_ratio(weight_cur, weight_flip)
+            ratio = _metropolis_ratio(jnp.abs(amp_cur) ** 2, jnp.abs(amp_flip) ** 2)
 
             key, accept_key = jax.random.split(key)
             accept = jax.random.uniform(accept_key) < jnp.minimum(1.0, ratio)
             new_idx = jnp.where(accept, flip_idx, cur_idx)
             indices = indices.at[row, col].set(new_idx)
+            amp_cur = jnp.where(accept, amp_flip, amp_cur)
 
             mpo_sel = jnp.where(accept, mpo_flip, mpo_cur)
             updated_row.append(mpo_sel)

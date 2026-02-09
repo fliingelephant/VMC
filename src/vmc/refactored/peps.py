@@ -143,6 +143,18 @@ def build_mc_kernels(
             mpo_row = _build_row_mpo(tensors, indices[row], row, n_cols)
             right_envs = _compute_right_envs(top_env, mpo_row, bottom_env, dtype)
             left_env = jnp.ones((1, 1, 1), dtype=dtype)
+            # Reinitialize per row (instead of carrying across rows) because
+            # top_env is replaced by strategy.apply(...) at row end, which may
+            # truncate and change the effective boundary representation.
+            amp_cur = jnp.einsum(
+                "ace,aub,cduv,evf,bdf->",
+                left_env,
+                top_env[0],
+                mpo_row[0],
+                bottom_env[0],
+                right_envs[0],
+                optimize=[(0, 1), (1, 2), (1, 2), (0, 1)],
+            )
             updated_row = []
 
             for col in range(n_cols):
@@ -162,15 +174,6 @@ def build_mc_kernels(
 
                 mpo_cur = mpo_row[col]
                 mpo_flip = jnp.transpose(site_tensor[flip_idx], (2, 3, 0, 1))
-                amp_cur = jnp.einsum(
-                    "ace,aub,cduv,evf,bdf->",
-                    left_env,
-                    top_env[col],
-                    mpo_cur,
-                    bottom_env[col],
-                    right_envs[col],
-                    optimize=[(0, 1), (1, 2), (1, 2), (0, 1)],
-                )
                 amp_flip = jnp.einsum(
                     "ace,aub,cduv,evf,bdf->",
                     left_env,
@@ -185,6 +188,7 @@ def build_mc_kernels(
                 accept = jax.random.uniform(accept_key) < jnp.minimum(1.0, ratio)
                 new_idx = jnp.where(accept, flip_idx, cur_idx)
                 indices = indices.at[row, col].set(new_idx)
+                amp_cur = jnp.where(accept, amp_flip, amp_cur)
 
                 mpo_sel = jnp.where(accept, mpo_flip, mpo_cur)
                 updated_row.append(mpo_sel)

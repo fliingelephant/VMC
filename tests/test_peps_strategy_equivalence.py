@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from vmc.models.peps import DensityMatrix, NoTruncation, PEPS, Variational, ZipUp
+from vmc.peps import DensityMatrix, NoTruncation, PEPS, Variational, ZipUp
 
 
 class PEPSStrategyEquivalenceTest(unittest.TestCase):

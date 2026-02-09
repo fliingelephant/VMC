@@ -19,19 +19,17 @@ from __future__ import annotations
 
 from vmc import config  # noqa: F401
 
-import functools
 import logging
 from pathlib import Path
 
 import jax
 from flax import nnx
 
-from vmc.drivers import DynamicsDriver, ImaginaryTimeUnit
-from vmc.experimental.lgt.gi_local_terms import GILocalHamiltonian, build_electric_terms
-from vmc.experimental.lgt.gi_peps import GIPEPS, GIPEPSConfig
-from vmc.experimental.lgt.gi_sampler import sequential_sample_with_gradients
-from vmc.models.peps import ZipUp
+from vmc.drivers import TDVPDriver, ImaginaryTimeUnit
 from vmc.operators import PlaquetteTerm
+from vmc.peps import ZipUp
+from vmc.peps.gi.local_terms import GILocalHamiltonian, build_electric_terms
+from vmc.peps.gi.model import GIPEPS, GIPEPSConfig
 from vmc.preconditioners import SRPreconditioner
 
 from .observables import SimulationData, format_step_log
@@ -69,22 +67,17 @@ def run_optimization(
     seed: int = 42,
     log_interval: int = 10,
     data: SimulationData | None = None,
-) -> DynamicsDriver:
+) -> TDVPDriver:
     """Run imaginary-time ground state optimization."""
-    sampler = functools.partial(
-        sequential_sample_with_gradients,
-        n_samples=n_samples,
-        burn_in=5,
-        full_gradient=True,
-    )
-    driver = DynamicsDriver(
+    driver = TDVPDriver(
         model,
         operator,
-        sampler=sampler,
         preconditioner=SRPreconditioner(diag_shift=diag_shift),
         dt=dt,
         time_unit=ImaginaryTimeUnit(),
         sampler_key=jax.random.key(seed),
+        n_samples=n_samples,
+        full_gradient=True,
     )
 
     for step in range(n_steps):

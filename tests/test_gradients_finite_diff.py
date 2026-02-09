@@ -1,4 +1,4 @@
-"""Finite-difference checks for MPS/PEPS amplitude gradients."""
+"""Finite-difference checks for PEPS amplitude gradients."""
 from __future__ import annotations
 
 import unittest
@@ -11,9 +11,8 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from vmc.core import _value_and_grad
-from vmc.models.mps import MPS
-from vmc.models.peps import NoTruncation, PEPS
+from vmc.peps import NoTruncation, PEPS
+from vmc.peps.standard.compat import _value_and_grad
 
 
 def _central_diff_grad(func, x: np.ndarray, eps: float) -> np.ndarray:
@@ -27,54 +26,12 @@ def _central_diff_grad(func, x: np.ndarray, eps: float) -> np.ndarray:
         epsd[i] = eps
         f_plus = func(x + epsd)
         f_minus = func(x - epsd)
-        grad_r = 0.5 * (f_plus - f_minus)
-        grad[i] = grad_r
-        grad[i] /= eps
+        grad[i] = 0.5 * (f_plus - f_minus) / eps
         epsd[i] = 0
     return grad
 
 
-def _flatten_tensors(tensors: list[np.ndarray]) -> tuple[np.ndarray, list[tuple[int, ...]]]:
-    flat = np.concatenate([np.ravel(t) for t in tensors])
-    shapes = [t.shape for t in tensors]
-    return flat, shapes
-
-
-def _unflatten_tensors(
-    flat: np.ndarray, shapes: list[tuple[int, ...]]
-) -> list[np.ndarray]:
-    tensors = []
-    offset = 0
-    for shape in shapes:
-        size = int(np.prod(shape))
-        tensor = np.asarray(flat[offset : offset + size]).reshape(shape)
-        tensors.append(tensor)
-        offset += size
-    return tensors
-
-
 class FiniteDiffGradientTest(unittest.TestCase):
-    def test_mps_amplitude_gradient(self) -> None:
-        model = MPS(rngs=nnx.Rngs(0), n_sites=6, bond_dim=3)
-        key = jax.random.key(0)
-        sample = jax.random.bernoulli(key, 0.5, (model.n_sites,))
-        sample = jnp.where(sample, 1, -1).astype(jnp.int32)
-
-        tensors = [np.asarray(t) for t in model.tensors]
-        flat, shapes = _flatten_tensors(tensors)
-
-        def amp_from_flat(flat_params: np.ndarray) -> np.ndarray:
-            tensors_local = _unflatten_tensors(flat_params, shapes)
-            amps = MPS.apply(
-                [jnp.asarray(t) for t in tensors_local], sample[None, :]
-            )
-            return np.asarray(amps[0])
-
-        _, grad, _ = _value_and_grad(model, sample, full_gradient=True)
-        grad_fd = _central_diff_grad(amp_from_flat, flat, eps=1e-6)
-        max_diff = np.max(np.abs(np.asarray(grad) - grad_fd))
-        self.assertLess(max_diff, 1e-5)
-
     def test_peps_amplitude_gradient(self) -> None:
         shape = (2, 3)
         model = PEPS(
@@ -85,8 +42,7 @@ class FiniteDiffGradientTest(unittest.TestCase):
         )
         n_sites = shape[0] * shape[1]
         key = jax.random.key(1)
-        sample = jax.random.bernoulli(key, 0.5, (n_sites,))
-        sample = jnp.where(sample, 1, -1).astype(jnp.int32)
+        sample = jax.random.bernoulli(key, 0.5, (n_sites,)).astype(jnp.int32)
 
         tensors = [[np.asarray(t) for t in row] for row in model.tensors]
         flat = np.concatenate([np.ravel(t) for row in tensors for t in row])

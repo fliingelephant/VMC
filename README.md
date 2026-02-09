@@ -4,7 +4,7 @@
 
 > **Note:** This repo is under active development and not ready for use.
 
-Variational Monte Carlo dynamics for tensor-network states (MPS/PEPS), implemented with [JAX] primitives and [NetKet] interfaces.
+Variational Monte Carlo dynamics for projected entangled-pair states (PEPS), implemented with [JAX] primitives and [NetKet] interfaces.
 
 ## Features (for tensor-network states)
 

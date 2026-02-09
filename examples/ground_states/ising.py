@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from vmc import config  # noqa: F401 - JAX config must be imported first
 
-import functools
 import logging
 
 import jax
@@ -18,13 +17,12 @@ import jax.numpy as jnp
 import netket as nk
 from flax import nnx
 
-from vmc.drivers import DynamicsDriver, ImaginaryTimeUnit
-from vmc.models.peps import PEPS, ZipUp
+from vmc.drivers import TDVPDriver, ImaginaryTimeUnit
 from vmc.operators import DiagonalTerm, LocalHamiltonian, OneSiteTerm
+from vmc.peps import PEPS, ZipUp
 from vmc.preconditioners import SRPreconditioner, DirectSolve
 from vmc.qgt import SampleSpace
 from vmc.qgt.solvers import solve_cholesky
-from vmc.samplers.sequential import sequential_sample_with_gradients
 
 logger = logging.getLogger(__name__)
 
@@ -60,16 +58,9 @@ def run_optimization(
     seed=42,
 ):
     """Run ground state optimization loop."""
-    sampler = functools.partial(
-        sequential_sample_with_gradients,
-        n_samples=n_samples,
-        burn_in=8,
-        full_gradient=False,
-    )
-    driver = DynamicsDriver(
+    driver = TDVPDriver(
         model,
         H,
-        sampler=sampler,
         preconditioner=SRPreconditioner(
             space=SampleSpace(),
             strategy=DirectSolve(solver=solve_cholesky),
@@ -78,6 +69,8 @@ def run_optimization(
         dt=dt,
         time_unit=ImaginaryTimeUnit(),
         sampler_key=jax.random.key(seed),
+        n_samples=n_samples,
+        full_gradient=False,
     )
 
     for step in range(n_steps):

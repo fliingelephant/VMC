@@ -11,7 +11,7 @@ import abc
 import logging
 import os
 import time
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -19,15 +19,16 @@ from netket import stats as nkstats
 from flax import nnx
 from tqdm.auto import tqdm
 
+from vmc.core import _sample_counts, _trim_samples, make_mc_sampler
+from vmc.peps import build_mc_kernels
+import vmc.peps.blockade.kernels  # noqa: F401  # register blockade build_mc_kernels dispatch
+import vmc.peps.gi.kernels  # noqa: F401  # register GI build_mc_kernels dispatch
 from vmc.preconditioners import SRPreconditioner
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "DynamicsDriver",
+    "TDVPDriver",
     "Integrator",
     "Euler",
     "RK4",
@@ -49,7 +50,7 @@ class Integrator(abc.ABC):
     @abc.abstractmethod
     def step(
         self,
-        driver: "DynamicsDriver",
+        driver: "TDVPDriver",
         params: Any,
         t: float,
         dt: float,
@@ -72,7 +73,7 @@ class Euler(Integrator):
 
     def step(
         self,
-        driver: "DynamicsDriver",
+        driver: "TDVPDriver",
         params: Any,
         t: float,
         dt: float,
@@ -86,7 +87,7 @@ class RK4(Integrator):
 
     def step(
         self,
-        driver: "DynamicsDriver",
+        driver: "TDVPDriver",
         params: Any,
         t: float,
         dt: float,
@@ -140,7 +141,7 @@ class ImaginaryTimeUnit(TimeUnit):
         return Euler()
 
 
-class DynamicsDriver:
+class TDVPDriver:
     """Unified dynamics driver for VMC and TDVP-style evolution."""
 
     def __init__(
@@ -148,22 +149,25 @@ class DynamicsDriver:
         model,
         operator,
         *,
-        sampler: Callable,
         preconditioner: SRPreconditioner,
         dt: float,
         t0: float = 0.0,
         time_unit: TimeUnit = RealTimeUnit(),
         integrator: Integrator | None = None,
         sampler_key: jax.Array = jax.random.key(0),
+        n_samples: int = 1,
         n_chains: int = 1,
+        full_gradient: bool = False,
     ):
         self.model = model
         self.operator = operator
-        self.sampler = sampler
         self.preconditioner = preconditioner
         self.dt = float(dt)
         self.t = float(t0)
         self.step_count = 0
+        self.n_samples = int(n_samples)
+        self.n_chains = int(n_chains)
+        self.full_gradient = bool(full_gradient)
         self._loss_stats = None
         self._sampler_configuration = None
         self._graphdef, params, model_state = nnx.split(self.model, nnx.Param, ...)
@@ -198,15 +202,52 @@ class DynamicsDriver:
         log_timing = logger.isEnabledFor(logging.INFO)
         t0 = time.perf_counter() if log_timing else 0.0
 
-        samples, o, p, self._sampler_key, self._sampler_configuration, amp, local_energies = self.sampler(
-            self.model,
-            self._operator_at(t),
-            key=self._sampler_key,
-            initial_configuration=self._sampler_configuration,
+        operator = self._operator_at(t)
+        _, num_chains, chain_length, total_samples = _sample_counts(
+            self.n_samples,
+            self.n_chains,
         )
+        init_cache, transition, estimate = build_mc_kernels(
+            self.model,
+            operator,
+            full_gradient=self.full_gradient,
+        )
+        mc_sampler = make_mc_sampler(transition, estimate)
+        self._sampler_key, chain_key = jax.random.split(self._sampler_key)
+        config_states = self._sampler_configuration.reshape(num_chains, -1)
+        chain_keys = jax.random.split(chain_key, num_chains)
+        tensors = [[jnp.asarray(t) for t in row] for row in self.model.tensors]
+        cache = init_cache(tensors, config_states)
+        (final_configurations, _, _), (samples_hist, estimates) = mc_sampler(
+            tensors,
+            config_states,
+            chain_keys,
+            cache,
+            n_steps=chain_length,
+        )
+        samples = _trim_samples(samples_hist, total_samples, self.n_samples)
+        o = _trim_samples(
+            estimates.local_log_derivatives,
+            total_samples,
+            self.n_samples,
+        )
+        local_energies = _trim_samples(
+            estimates.local_estimate,
+            total_samples,
+            self.n_samples,
+        )
+        if self.full_gradient:
+            p = None
+        else:
+            p = _trim_samples(
+                estimates.active_slice_indices,
+                total_samples,
+                self.n_samples,
+            )
+        self._sampler_configuration = final_configurations
 
         if log_timing:
-            for arr in (samples, o, p, amp, local_energies):
+            for arr in (samples, o, p, local_energies):
                 if arr is not None:
                     jax.block_until_ready(arr)
             t1 = time.perf_counter()

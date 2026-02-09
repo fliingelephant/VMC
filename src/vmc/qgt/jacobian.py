@@ -23,7 +23,7 @@ class SliceOrdering:
     """Outer loop over slice indices k, process all sites together.
 
     For the small-o trick: ∑_k ∑_sites
-    - PEPS: k = physical state σ ∈ {0, ..., d-1}
+    - Standard PEPS: k = physical state σ ∈ {0, ..., d-1}
     - GIPEPS: k = combined index σ * nc + cfg_idx
 
     Memory: O(n_samples × n_params / max_sliced_dim)
@@ -59,7 +59,7 @@ class SlicedJacobian:
 
     For each sample, only one "active slice" of parameters contributes to the
     amplitude at each site. The slice index p[sample, site] is determined by:
-    - MPS/PEPS: physical state σ ∈ {0, ..., d-1}
+    - Standard PEPS: physical state σ ∈ {0, ..., d-1}
     - GIPEPS: combined index σ * nc + cfg_idx (gauge config encoded)
 
     sliced_dims[site] specifies how many distinct slices exist at each site.
@@ -83,7 +83,7 @@ class SlicedJacobian:
         ordering: SliceOrdering | SiteOrdering = SliceOrdering(),
     ):
         """Construct from model and samples."""
-        from vmc.core import _value_and_grad
+        from vmc.peps.standard.compat import _value_and_grad
         from vmc.utils.smallo import sliced_dims
         from vmc.utils.vmc_utils import flatten_samples
 

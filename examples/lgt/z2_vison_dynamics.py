@@ -28,7 +28,6 @@ from __future__ import annotations
 
 from vmc import config  # noqa: F401
 
-import functools
 import logging
 from pathlib import Path
 
@@ -36,12 +35,11 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from vmc.drivers import DynamicsDriver, ImaginaryTimeUnit, RealTimeUnit, RK4
-from vmc.experimental.lgt.gi_local_terms import GILocalHamiltonian, build_electric_terms
-from vmc.experimental.lgt.gi_peps import GIPEPS, GIPEPSConfig
-from vmc.experimental.lgt.gi_sampler import sequential_sample_with_gradients
-from vmc.models.peps import ZipUp
+from vmc.drivers import TDVPDriver, ImaginaryTimeUnit, RealTimeUnit, RK4
 from vmc.operators import PlaquetteTerm
+from vmc.peps import ZipUp
+from vmc.peps.gi.local_terms import GILocalHamiltonian, build_electric_terms
+from vmc.peps.gi.model import GIPEPS, GIPEPSConfig
 from vmc.preconditioners import SRPreconditioner
 
 from .observables import SimulationData
@@ -76,20 +74,15 @@ def run_ground_state(
 ):
     """Find ground state via imaginary-time evolution."""
     logger.info("Finding ground state (imaginary-time)...")
-    sampler = functools.partial(
-        sequential_sample_with_gradients,
-        n_samples=n_samples,
-        burn_in=5,
-        full_gradient=True,
-    )
-    driver = DynamicsDriver(
+    driver = TDVPDriver(
         model,
         operator,
-        sampler=sampler,
         preconditioner=SRPreconditioner(diag_shift=0.1),
         dt=dt,
         time_unit=ImaginaryTimeUnit(),
         sampler_key=jax.random.key(seed),
+        n_samples=n_samples,
+        full_gradient=True,
     )
     
     for step in range(n_steps):
@@ -111,7 +104,7 @@ def run_real_time(
     dt: float = 0.005,
     seed: int = 42,
     data: SimulationData | None = None,
-) -> DynamicsDriver:
+) -> TDVPDriver:
     """Run real-time evolution after vison creation.
     
     To replicate Fig 5, track ⟨P_x⟩/2 at each plaquette over time.
@@ -119,21 +112,16 @@ def run_real_time(
     as a 2D heatmap for 10×10.
     """
     logger.info("Running real-time dynamics (dt=%.4f, T=%.1f)...", dt, T)
-    sampler = functools.partial(
-        sequential_sample_with_gradients,
-        n_samples=n_samples,
-        burn_in=3,
-        full_gradient=True,
-    )
-    driver = DynamicsDriver(
+    driver = TDVPDriver(
         model,
         operator,
-        sampler=sampler,
         preconditioner=SRPreconditioner(diag_shift=1e-8),  # Paper: 10^-8 for real-time
         dt=dt,
         time_unit=RealTimeUnit(),
         integrator=RK4(),  # Paper uses second-order Taylor, RK4 is similar
         sampler_key=jax.random.key(seed),
+        n_samples=n_samples,
+        full_gradient=True,
     )
     
     initial_energy = None

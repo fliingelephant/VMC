@@ -9,8 +9,8 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from vmc.core import _value_and_grad
-from vmc.models.peps import NoTruncation, PEPS
+from vmc.peps import NoTruncation, PEPS
+from vmc.peps.standard.compat import _value_and_grad
 from vmc.utils.utils import occupancy_to_spin, spin_to_occupancy
 
 

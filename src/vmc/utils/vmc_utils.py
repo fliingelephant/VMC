@@ -17,13 +17,9 @@ from flax import nnx
 from netket.operator import DiscreteOperator
 from plum import dispatch
 
-from vmc.core.eval import _value
-from vmc.models.peps import (
-    PEPS,
-    _compute_all_env_grads_and_energy,
-    _forward_with_cache,
-)
-from vmc.operators.local_terms import LocalHamiltonian, bucket_terms
+from vmc.operators.local_terms import LocalHamiltonian
+from vmc.peps.standard.compat import _value, local_estimate as peps_local_estimate
+from vmc.peps.standard.model import PEPS
 from vmc.utils.utils import occupancy_to_spin, spin_to_occupancy
 
 __all__ = [
@@ -110,58 +106,7 @@ def local_estimate(
     operator: LocalHamiltonian,
     amps: jax.Array,
 ) -> jax.Array:
-    """Compute local energy estimates for PEPS from local operator terms."""
-    samples = jnp.asarray(samples)
-    amps = jnp.asarray(amps)
-    shape = model.shape
-    diagonal_terms, one_site_terms, horizontal_terms, vertical_terms, _ = bucket_terms(
-        operator.terms, shape
-    )
-    has_diag = bool(diagonal_terms)
-    has_one_site = any(term_list for row in one_site_terms for term_list in row)
-    has_horizontal = any(term_list for row in horizontal_terms for term_list in row)
-    has_vertical = any(term_list for row in vertical_terms for term_list in row)
-    has_offdiag = has_one_site or has_horizontal or has_vertical
-
-    if not has_diag and not has_offdiag:
-        return jnp.zeros((samples.shape[0],), dtype=amps.dtype)
-
-    if has_diag and not has_offdiag:
-        phys_dim = model.phys_dim
-
-        def diag_only(sample):
-            spins = spin_to_occupancy(sample).reshape(shape)
-            total = jnp.zeros((), dtype=amps.dtype)
-            for term in diagonal_terms:
-                idx = jnp.asarray(0, dtype=jnp.int32)
-                for row, col in term.sites:
-                    idx = idx * phys_dim + spins[row, col]
-                total = total + term.diag[idx]
-            return total
-
-        return jax.vmap(diag_only)(samples)
-
-    tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
-    def per_sample(sample, amp):
-        occupancy = spin_to_occupancy(sample)
-        spins = occupancy.reshape(shape)
-        _, top_envs = _forward_with_cache(tensors, spins, shape, model.strategy)
-        _, energy, _ = _compute_all_env_grads_and_energy(
-            tensors,
-            spins,
-            amp,
-            shape,
-            model.strategy,
-            top_envs,
-            diagonal_terms=diagonal_terms,
-            one_site_terms=one_site_terms,
-            horizontal_terms=horizontal_terms,
-            vertical_terms=vertical_terms,
-            collect_grads=False,
-        )
-        return energy
-
-    return jax.vmap(per_sample, in_axes=(0, 0))(samples, amps)
+    return peps_local_estimate(model, samples, operator, amps)
 
 
 @dispatch
@@ -174,7 +119,7 @@ def local_estimate(
     """Compute local energy estimates for samples using NetKet operator.
 
     Args:
-        model: Variational model (MPS/PEPS).
+        model: Variational model.
         samples: Spin configurations with shape (n_samples, n_sites), occupancy format (0/1).
         operator: NetKet DiscreteOperator providing ``get_conn_padded``.
         amps: Pre-computed amplitudes for samples.

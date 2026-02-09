@@ -8,7 +8,7 @@ from vmc import config  # noqa: F401 - JAX config must be imported first
 import jax
 import jax.numpy as jnp
 
-from vmc.drivers import DynamicsDriver, Euler, RK4
+from vmc.drivers import TDVPDriver, Euler, RK4
 
 
 class _LinearDriver:
@@ -19,8 +19,8 @@ class _LinearDriver:
         _ = (t, stage)
         return self._mat @ params
 
-    _tree_add_scaled = staticmethod(DynamicsDriver._tree_add_scaled)
-    _tree_weighted_sum = staticmethod(DynamicsDriver._tree_weighted_sum)
+    _tree_add_scaled = staticmethod(TDVPDriver._tree_add_scaled)
+    _tree_weighted_sum = staticmethod(TDVPDriver._tree_weighted_sum)
 
 
 class IntegratorTest(unittest.TestCase):

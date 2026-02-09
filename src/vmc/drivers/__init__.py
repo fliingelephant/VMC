@@ -1,8 +1,8 @@
-"""Custom VMC and TDVP drivers."""
+"""TDVP drivers."""
 from __future__ import annotations
 
-from vmc.drivers.custom_driver import (
-    DynamicsDriver,
+from vmc.drivers.tdvp import (
+    TDVPDriver,
     Euler,
     ImaginaryTimeUnit,
     Integrator,
@@ -12,7 +12,7 @@ from vmc.drivers.custom_driver import (
 )
 
 __all__ = [
-    "DynamicsDriver",
+    "TDVPDriver",
     "Euler",
     "ImaginaryTimeUnit",
     "Integrator",

@@ -4,11 +4,51 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from vmc.experimental.lgt.gi_local_terms import GILocalHamiltonian, build_electric_terms
-from vmc.experimental.lgt.gi_peps import GIPEPS, GIPEPSConfig
-from vmc.experimental.lgt.gi_sampler import sequential_sample_with_gradients
-from vmc.models.peps import DensityMatrix, NoTruncation, ZipUp
+from vmc.core import _sample_counts, _trim_samples, make_mc_sampler
 from vmc.operators import PlaquetteTerm
+from vmc.peps import DensityMatrix, NoTruncation, ZipUp, build_mc_kernels
+from vmc.peps.gi import GILocalHamiltonian, GIPEPS, GIPEPSConfig
+from vmc.peps.gi.local_terms import build_electric_terms
+
+
+def _sample_with_kernels(
+    model: GIPEPS,
+    operator: GILocalHamiltonian,
+    *,
+    n_samples: int,
+    n_chains: int,
+    key: jax.Array,
+    initial_configuration: jax.Array,
+    full_gradient: bool,
+) -> tuple[jax.Array, jax.Array, jax.Array | None, jax.Array, jax.Array, jax.Array, jax.Array]:
+    _, num_chains, chain_length, total_samples = _sample_counts(n_samples, n_chains)
+    config_states = initial_configuration.reshape(num_chains, -1)
+    chain_keys = jax.random.split(key, num_chains)
+    tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
+    init_cache, transition, estimate = build_mc_kernels(
+        model,
+        operator,
+        full_gradient=full_gradient,
+    )
+    cache = init_cache(tensors, config_states)
+    mc_sampler = make_mc_sampler(transition, estimate)
+    (final_configurations, final_keys, _), (samples_hist, estimates) = mc_sampler(
+        tensors,
+        config_states,
+        chain_keys,
+        cache,
+        n_steps=chain_length,
+    )
+    samples = _trim_samples(samples_hist, total_samples, n_samples)
+    grads = _trim_samples(estimates.local_log_derivatives, total_samples, n_samples)
+    p = (
+        None
+        if full_gradient
+        else _trim_samples(estimates.active_slice_indices, total_samples, n_samples)
+    )
+    amps = _trim_samples(estimates.amp, total_samples, n_samples)
+    energies = _trim_samples(estimates.local_estimate, total_samples, n_samples)
+    return samples, grads, p, final_keys, final_configurations, amps, energies
 
 
 class GIPEPSTest(unittest.TestCase):
@@ -116,7 +156,7 @@ class GIPEPSTest(unittest.TestCase):
                     )
                     key = jax.random.key(idx)
                     key, init_key = jax.random.split(key)
-                    samples, grads, _, _, _, amps, energies = sequential_sample_with_gradients(
+                    samples, grads, _, _, _, amps, energies = _sample_with_kernels(
                         model,
                         operator,
                         n_samples=3,
@@ -125,7 +165,6 @@ class GIPEPSTest(unittest.TestCase):
                         initial_configuration=model.random_physical_configuration(
                             init_key, n_samples=n_chains
                         ),
-                        burn_in=1,
                         full_gradient=True,
                     )
                     self.assertEqual(samples.shape[0], 3)
@@ -162,7 +201,7 @@ class GIPEPSTest(unittest.TestCase):
         )
         key = jax.random.key(0)
         key, init_key = jax.random.split(key)
-        samples, grads, _, _, _, amps, _ = sequential_sample_with_gradients(
+        samples, grads, _, _, _, amps, _ = _sample_with_kernels(
             model,
             operator,
             n_samples=20,
@@ -171,7 +210,6 @@ class GIPEPSTest(unittest.TestCase):
             initial_configuration=model.random_physical_configuration(
                 init_key, n_samples=1
             ),
-            burn_in=1,
             full_gradient=True,
         )
         tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
@@ -214,7 +252,7 @@ class GIPEPSTest(unittest.TestCase):
         )
         key = jax.random.key(1)
         key, init_key = jax.random.split(key)
-        samples, grads, _, _, _, amps, _ = sequential_sample_with_gradients(
+        samples, grads, _, _, _, amps, _ = _sample_with_kernels(
             model,
             operator,
             n_samples=2,
@@ -223,7 +261,6 @@ class GIPEPSTest(unittest.TestCase):
             initial_configuration=model.random_physical_configuration(
                 init_key, n_samples=1
             ),
-            burn_in=1,
             full_gradient=True,
         )
         tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
@@ -253,7 +290,7 @@ class GIPEPSTest(unittest.TestCase):
         This test demonstrates that encoding only phys_idx in p (without cfg_idx)
         causes reconstruction to fail, proving the bug fix was necessary.
         """
-        from vmc.experimental.lgt.gi_peps import _link_value_or_zero, _site_cfg_index
+        from vmc.peps.gi.model import _link_value_or_zero, _site_cfg_index
 
         config = GIPEPSConfig(
             shape=(3, 3),
@@ -276,26 +313,24 @@ class GIPEPSTest(unittest.TestCase):
         init_cfg = model.random_physical_configuration(init_key, n_samples=1)
 
         # Get full gradients as ground truth
-        samples_full, grads_full, _, _, _, _, _ = sequential_sample_with_gradients(
+        samples_full, grads_full, _, _, _, _, _ = _sample_with_kernels(
             model,
             operator,
             n_samples=5,
             n_chains=1,
             key=key,
             initial_configuration=init_cfg,
-            burn_in=1,
             full_gradient=True,
         )
 
         # Get sliced gradients (with fixed encoding)
-        _, grads_sliced, p_fixed, _, _, _, _ = sequential_sample_with_gradients(
+        _, grads_sliced, p_fixed, _, _, _, _ = _sample_with_kernels(
             model,
             operator,
             n_samples=5,
             n_chains=1,
             key=key,
             initial_configuration=init_cfg,
-            burn_in=1,
             full_gradient=False,
         )
 
@@ -407,26 +442,24 @@ class GIPEPSTest(unittest.TestCase):
 
         # Get full gradients
         key1, key2 = jax.random.split(key)
-        samples_full, grads_full, _, _, _, amps_full, _ = sequential_sample_with_gradients(
+        samples_full, grads_full, _, _, _, amps_full, _ = _sample_with_kernels(
             model,
             operator,
             n_samples=5,
             n_chains=1,
             key=key1,
             initial_configuration=init_cfg,
-            burn_in=1,
             full_gradient=True,
         )
 
         # Get sliced gradients with same key for same samples
-        samples_sliced, grads_sliced, p, _, _, amps_sliced, _ = sequential_sample_with_gradients(
+        samples_sliced, grads_sliced, p, _, _, amps_sliced, _ = _sample_with_kernels(
             model,
             operator,
             n_samples=5,
             n_chains=1,
             key=key1,
             initial_configuration=init_cfg,
-            burn_in=1,
             full_gradient=False,
         )
 
@@ -546,26 +579,24 @@ class GIPEPSTest(unittest.TestCase):
         init_cfg = model.random_physical_configuration(init_key, n_samples=1)
 
         # Get full gradients
-        _, grads_full, _, _, _, amps, _ = sequential_sample_with_gradients(
+        _, grads_full, _, _, _, amps, _ = _sample_with_kernels(
             model,
             operator,
             n_samples=8,
             n_chains=1,
             key=key,
             initial_configuration=init_cfg,
-            burn_in=1,
             full_gradient=True,
         )
 
         # Get sliced gradients
-        _, grads_sliced, p, _, _, _, _ = sequential_sample_with_gradients(
+        _, grads_sliced, p, _, _, _, _ = _sample_with_kernels(
             model,
             operator,
             n_samples=8,
             n_chains=1,
             key=key,
             initial_configuration=init_cfg,
-            burn_in=1,
             full_gradient=False,
         )
 

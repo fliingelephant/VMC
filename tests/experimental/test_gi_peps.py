@@ -5,8 +5,9 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from vmc.experimental.lgt.gi_peps import GIPEPS, GIPEPSConfig
-from vmc.models.peps import NoTruncation, bottom_envs, sweep
+from vmc.core import make_mc_sampler
+from vmc.peps import NoTruncation, build_mc_kernels
+from vmc.peps.gi import GILocalHamiltonian, GIPEPS, GIPEPSConfig
 
 
 class GIPepsGaussLawTest(unittest.TestCase):
@@ -44,12 +45,26 @@ class GIPepsGaussLawTest(unittest.TestCase):
         sample = model.random_physical_configuration(key, n_samples=1)[0]
         self.assertTrue(self._gauss_law_satisfied(sample, config))
 
-        envs = bottom_envs(model, sample)
-        for _ in range(3):
-            key, subkey = jax.random.split(key)
-            sample, _, _ = sweep(model, sample, subkey, envs)
-            self.assertTrue(self._gauss_law_satisfied(sample, config))
-            envs = bottom_envs(model, sample)
+        operator = GILocalHamiltonian(shape=config.shape, terms=())
+        init_cache, transition, estimate = build_mc_kernels(
+            model,
+            operator,
+            full_gradient=False,
+        )
+        mc_sampler = make_mc_sampler(transition, estimate)
+        tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
+        config_states = sample.reshape(1, -1)
+        chain_keys = jax.random.split(key, 1)
+        cache = init_cache(tensors, config_states)
+        (_, _, _), (samples_hist, _) = mc_sampler(
+            tensors,
+            config_states,
+            chain_keys,
+            cache,
+            n_steps=3,
+        )
+        for i in range(samples_hist.shape[0]):
+            self.assertTrue(self._gauss_law_satisfied(samples_hist[i, 0], config))
 
 
 if __name__ == "__main__":

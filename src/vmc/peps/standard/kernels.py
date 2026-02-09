@@ -1,4 +1,4 @@
-"""PEPS kernels for the refactored rollout core."""
+"""PEPS kernel bundle for the canonical sampling core."""
 from __future__ import annotations
 
 from typing import Any, Callable, NamedTuple
@@ -7,16 +7,17 @@ from vmc import config  # noqa: F401 - JAX config must be imported first
 
 import jax
 import jax.numpy as jnp
+from plum import dispatch
 
-from vmc.models.peps import (
-    PEPS,
+from vmc.peps.common.contraction import (
     _apply_mpo_from_below,
     _build_row_mpo,
-    _compute_all_env_grads_and_energy,
     _compute_right_envs,
     _contract_bottom,
     _metropolis_ratio,
 )
+from vmc.peps.common.energy import _compute_all_env_grads_and_energy
+from vmc.peps.standard.model import PEPS
 from vmc.operators.local_terms import LocalHamiltonian, bucket_terms
 from vmc.utils.smallo import params_per_site as params_per_site_fn
 
@@ -87,6 +88,7 @@ def _assemble_log_derivatives(
     return jnp.concatenate(grad_parts) / amp, active_slice_indices
 
 
+@dispatch
 def build_mc_kernels(
     model: PEPS,
     operator: LocalHamiltonian,

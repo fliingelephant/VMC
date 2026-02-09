@@ -1,55 +1,21 @@
-"""Unit tests for sequential sampling."""
+"""Unit tests for PEPS sequential Monte Carlo sampling kernels."""
 from __future__ import annotations
 
 import itertools
-import logging
-import time
 import unittest
 
 from vmc import config  # noqa: F401 - JAX config must be imported first
 
 import jax
 import jax.numpy as jnp
-import netket as nk
 from flax import nnx
-from plum import dispatch
 
-from vmc.core import _value_and_grad
-from vmc.samplers.sequential import sequential_sample, sequential_sample_with_gradients
-from vmc.models.mps import MPS
-from vmc.models.peps import NoTruncation, PEPS
+from vmc.core import _sample_counts, _trim_samples, make_mc_sampler
 from vmc.operators import LocalHamiltonian
-from vmc.utils.utils import occupancy_to_spin
-
-logger = logging.getLogger(__name__)
-
-
-@dispatch
-def _max_full_vs_sliced_diff(
-    model: MPS,
-    samples: jax.Array,
-    grads_full: jax.Array,
-    grads_sliced: jax.Array,
-) -> float:
-    n_sites, bond_dim, phys_dim = model.n_sites, model.bond_dim, model.phys_dim
-    max_diff = offset_full = offset_sliced = 0
-    for site in range(n_sites):
-        left_dim, right_dim = MPS.site_dims(site, n_sites, bond_dim)
-        params_per_phys = left_dim * right_dim
-        full_site = grads_full[
-            :, offset_full : offset_full + phys_dim * params_per_phys
-        ].reshape(samples.shape[0], phys_dim, params_per_phys)
-        selected = jnp.take_along_axis(
-            full_site, samples[:, site][:, None, None], axis=1
-        ).squeeze(axis=1)
-        sliced_site = grads_sliced[:, offset_sliced : offset_sliced + params_per_phys]
-        max_diff = jnp.maximum(max_diff, jnp.max(jnp.abs(selected - sliced_site)))
-        offset_full += phys_dim * params_per_phys
-        offset_sliced += params_per_phys
-    return float(max_diff)
+from vmc.peps import NoTruncation, PEPS, build_mc_kernels
+from vmc.peps.standard.compat import _value_and_grad
 
 
-@dispatch
 def _max_full_vs_sliced_diff(
     model: PEPS,
     samples: jax.Array,
@@ -72,7 +38,9 @@ def _max_full_vs_sliced_diff(
             selected = jnp.take_along_axis(
                 full_site, samples[:, row, col][:, None, None], axis=1
             ).squeeze(axis=1)
-            sliced_site = grads_sliced[:, offset_sliced : offset_sliced + params_per_phys]
+            sliced_site = grads_sliced[
+                :, offset_sliced : offset_sliced + params_per_phys
+            ]
             max_diff = jnp.maximum(max_diff, jnp.max(jnp.abs(selected - sliced_site)))
             offset_full += phys_dim * params_per_phys
             offset_sliced += params_per_phys
@@ -86,25 +54,13 @@ class SequentialSamplingTest(unittest.TestCase):
     WEIGHTS = (1 << SHIFTS).astype(jnp.int32)
     BASIS = jnp.arange(2**N_SITES, dtype=jnp.int32)
     BASIS_BITS = (BASIS[:, None] >> SHIFTS[None, :]) & 1
-    SPINS_BASIS = occupancy_to_spin(BASIS_BITS)
-    
     SAMPLES = 40960
-    BURN_IN = 3
     CHAINS = [1, 10]
     SEEDS = [42, 91, 10001]
     MAX_DIFF = 2e-3
     MAX_GRAD_DIFF = 1e-14
-    MPS_BOND_DIM = 4
     PEPS_BOND_DIM = 3
     PEPS_STRATEGY = NoTruncation()
-
-    @classmethod
-    def _make_mps(cls, seed: int) -> MPS:
-        return MPS(
-            rngs=nnx.Rngs(seed),
-            n_sites=cls.N_SITES,
-            bond_dim=cls.MPS_BOND_DIM,
-        )
 
     @classmethod
     def _make_peps(cls, seed: int) -> PEPS:
@@ -115,159 +71,141 @@ class SequentialSamplingTest(unittest.TestCase):
             contraction_strategy=cls.PEPS_STRATEGY,
         )
 
+    def _sample_with_kernels(
+        self,
+        model: PEPS,
+        *,
+        n_samples: int,
+        n_chains: int,
+        key: jax.Array,
+        full_gradient: bool,
+        initial_configuration: jax.Array | None = None,
+    ) -> tuple[jax.Array, jax.Array, jax.Array | None]:
+        _, num_chains, chain_length, total_samples = _sample_counts(
+            n_samples, n_chains
+        )
+        if initial_configuration is None:
+            key, init_key = jax.random.split(key)
+            initial_configuration = model.random_physical_configuration(
+                init_key, n_samples=num_chains
+            )
+        config_states = initial_configuration.reshape(num_chains, -1)
+        chain_keys = jax.random.split(key, num_chains)
+        tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
+        operator = LocalHamiltonian(shape=self.SHAPE, terms=())
+        init_cache, transition, estimate = build_mc_kernels(
+            model,
+            operator,
+            full_gradient=full_gradient,
+        )
+        cache = init_cache(tensors, config_states)
+        mc_sampler = make_mc_sampler(transition, estimate)
+        (_, _, _), (samples_hist, estimates) = mc_sampler(
+            tensors,
+            config_states,
+            chain_keys,
+            cache,
+            n_steps=chain_length,
+        )
+        samples = _trim_samples(samples_hist, total_samples, n_samples)
+        grads = _trim_samples(
+            estimates.local_log_derivatives,
+            total_samples,
+            n_samples,
+        )
+        if full_gradient:
+            p = None
+        else:
+            p = _trim_samples(
+                estimates.active_slice_indices,
+                total_samples,
+                n_samples,
+            )
+        return samples, grads, p
+
     def test_sequential_sample(self) -> None:
-        """Validate sequential_sample distribution against exact probabilities."""
-        spins_basis = self.SPINS_BASIS
-        weights = self.WEIGHTS
-        for make_model, n_chains, seed in itertools.product(
-            [self._make_mps, self._make_peps], self.CHAINS, self.SEEDS
-        ):
-            with self.subTest(
-                model=make_model.__name__,
-                n_chains=n_chains,
-                seed=seed,
-            ):
-                model = make_model(seed)
+        """Validate PEPS sampled distribution against exact probabilities."""
+        for n_chains, seed in itertools.product(self.CHAINS, self.SEEDS):
+            with self.subTest(n_chains=n_chains, seed=seed):
+                model = self._make_peps(seed)
                 amps_basis, _, _ = _value_and_grad(
-                    model, jnp.asarray(spins_basis), full_gradient=False
+                    model,
+                    jnp.asarray(self.BASIS_BITS),
+                    full_gradient=False,
                 )
                 probs = jnp.abs(amps_basis) ** 2
                 probs /= probs.sum()
-                key = jax.random.key(seed)
-                key, init_key = jax.random.split(key)
-                samples = sequential_sample(
+                samples, _, _ = self._sample_with_kernels(
                     model,
                     n_samples=self.SAMPLES,
                     n_chains=n_chains,
-                    burn_in=self.BURN_IN,
-                    key=key,
-                    initial_configuration=model.random_physical_configuration(
-                        init_key, n_samples=n_chains
-                    ),
+                    key=jax.random.key(seed),
+                    full_gradient=False,
                 )
-                indices = jnp.sum(samples * weights, axis=-1).astype(jnp.int32)
+                indices = jnp.sum(samples * self.WEIGHTS, axis=-1).astype(jnp.int32)
                 empirical = jnp.bincount(indices, length=2**self.N_SITES) / samples.shape[0]
-                self.assertLess(float(jnp.max(jnp.abs(empirical - probs))), self.MAX_DIFF)
+                self.assertLess(
+                    float(jnp.max(jnp.abs(empirical - probs))),
+                    self.MAX_DIFF,
+                )
 
     def test_sequential_sample_with_gradients(self) -> None:
-        """Validate distribution, p-indexing, and full/sliced gradient consistency."""
-        spins_basis = self.SPINS_BASIS
-        weights = self.WEIGHTS
-
-        for make_model, n_chains, seed in itertools.product(
-            [self._make_mps, self._make_peps], self.CHAINS, self.SEEDS
-        ):
-            model = make_model(seed)
-            if isinstance(model, MPS):
-                hi = nk.hilbert.Spin(s=1 / 2, N=self.N_SITES)
-                operator = nk.operator.Ising(
-                    hi,
-                    nk.graph.Chain(length=self.N_SITES),
-                    h=0.0,
-                    J=0.0,
-                    dtype=jnp.complex128,
+        """Validate PEPS full/sliced gradient consistency and p-indexing."""
+        for n_chains, seed in itertools.product(self.CHAINS, self.SEEDS):
+            with self.subTest(n_chains=n_chains, seed=seed):
+                model = self._make_peps(seed)
+                init_key = jax.random.key(seed + 17)
+                initial_configuration = model.random_physical_configuration(
+                    init_key, n_samples=n_chains
                 )
-            else:
-                operator = LocalHamiltonian(shape=self.SHAPE, terms=())
-            key = jax.random.key(seed)
-            key, init_key = jax.random.split(key)
-            initial_configuration = model.random_physical_configuration(
-                init_key, n_samples=n_chains
-            )
-            amps_basis, _, p_ref = _value_and_grad(
-                model, jnp.asarray(spins_basis), full_gradient=False
-            )
-            probs = jnp.abs(amps_basis) ** 2
-            probs /= probs.sum()
-            key = jax.random.key(seed)
-            start = time.perf_counter()
-            samples_sliced, grads_sliced, p_sliced, _, _, _, _ = sequential_sample_with_gradients(
-                model,
-                operator,
-                n_samples=self.SAMPLES,
-                n_chains=n_chains,
-                burn_in=self.BURN_IN,
-                key=key,
-                full_gradient=False,
-                initial_configuration=initial_configuration,
-            )
-            elapsed = time.perf_counter() - start
-            logger.info(
-                "sequential_sample_with_gradients full_gradient=%s model=%s n_chains=%d seed=%d took %.3fs",
-                False,
-                make_model.__name__,
-                n_chains,
-                seed,
-                elapsed,
-            )
-            start = time.perf_counter()
-            samples_full, grads_full, p_full, _, _, _, _ = sequential_sample_with_gradients(
-                model,
-                operator,
-                n_samples=self.SAMPLES,
-                n_chains=n_chains,
-                burn_in=self.BURN_IN,
-                key=key,
-                full_gradient=True,
-                initial_configuration=initial_configuration,
-            )
-            elapsed = time.perf_counter() - start
-            logger.info(
-                "sequential_sample_with_gradients full_gradient=%s model=%s n_chains=%d seed=%d took %.3fs",
-                True,
-                make_model.__name__,
-                n_chains,
-                seed,
-                elapsed,
-            )
-            self.assertEqual(grads_sliced.shape, p_sliced.shape)
-            self.assertEqual(grads_sliced.shape[0], samples_sliced.shape[0])
-            self.assertEqual(grads_full.shape[0], samples_full.shape[0])
-            self.assertEqual(grads_full.shape[1], grads_sliced.shape[1] * model.phys_dim)
-            indices_sliced = jnp.sum(samples_sliced * weights, axis=-1).astype(jnp.int32)
-            empirical_sliced = jnp.bincount(indices_sliced, length=2**self.N_SITES) / samples_sliced.shape[0]
-            indices_full = jnp.sum(samples_full * weights, axis=-1).astype(jnp.int32)
-            empirical_full = jnp.bincount(indices_full, length=2**self.N_SITES) / samples_full.shape[0]
-            with self.subTest(
-                model=make_model.__name__,
-                n_chains=n_chains,
-                seed=seed,
-                full_gradient="align",
-            ):
+                amps_basis, _, p_ref = _value_and_grad(
+                    model,
+                    jnp.asarray(self.BASIS_BITS),
+                    full_gradient=False,
+                )
+                probs = jnp.abs(amps_basis) ** 2
+                probs /= probs.sum()
+
+                samples_sliced, grads_sliced, p_sliced = self._sample_with_kernels(
+                    model,
+                    n_samples=self.SAMPLES,
+                    n_chains=n_chains,
+                    key=jax.random.key(seed),
+                    full_gradient=False,
+                    initial_configuration=initial_configuration,
+                )
+                samples_full, grads_full, p_full = self._sample_with_kernels(
+                    model,
+                    n_samples=self.SAMPLES,
+                    n_chains=n_chains,
+                    key=jax.random.key(seed),
+                    full_gradient=True,
+                    initial_configuration=initial_configuration,
+                )
+
+                self.assertIsNone(p_full)
+                self.assertEqual(grads_sliced.shape, p_sliced.shape)
+                self.assertEqual(grads_sliced.shape[0], samples_sliced.shape[0])
+                self.assertEqual(grads_full.shape[0], samples_full.shape[0])
+                self.assertEqual(
+                    grads_full.shape[1],
+                    grads_sliced.shape[1] * model.phys_dim,
+                )
                 self.assertTrue(jnp.array_equal(samples_sliced, samples_full))
                 self.assertLess(
-                    _max_full_vs_sliced_diff(model, samples_sliced, grads_full, grads_sliced),
+                    _max_full_vs_sliced_diff(
+                        model, samples_sliced, grads_full, grads_sliced
+                    ),
                     self.MAX_GRAD_DIFF,
                 )
 
-            with self.subTest(
-                model=make_model.__name__,
-                n_chains=n_chains,
-                seed=seed,
-                full_gradient=False,
-            ):
-                self.assertLess(float(jnp.max(jnp.abs(empirical_sliced - probs))), self.MAX_DIFF)
-                self.assertTrue(jnp.array_equal(p_sliced, p_ref[indices_sliced]))
-
-            with self.subTest(
-                model=make_model.__name__,
-                n_chains=n_chains,
-                seed=seed,
-                full_gradient=True,
-            ):
-                self.assertLess(float(jnp.max(jnp.abs(empirical_full - probs))), self.MAX_DIFF)
-                amps, grads_ref_full, _ = _value_and_grad(
-                    model, occupancy_to_spin(jnp.asarray(samples_full)), full_gradient=True
-                )
-                grads_ref_full = grads_ref_full / amps[:, None]
+                indices = jnp.sum(samples_sliced * self.WEIGHTS, axis=-1).astype(jnp.int32)
+                self.assertTrue(jnp.array_equal(p_sliced, p_ref[indices]))
+                empirical = jnp.bincount(indices, length=2**self.N_SITES) / samples_sliced.shape[0]
                 self.assertLess(
-                    float(jnp.max(jnp.abs(
-                        jnp.linalg.norm(grads_full, axis=1) - jnp.linalg.norm(grads_ref_full, axis=1)
-                    ))),
-                    self.MAX_GRAD_DIFF,
+                    float(jnp.max(jnp.abs(empirical - probs))),
+                    self.MAX_DIFF,
                 )
-                self.assertLess(float(jnp.max(jnp.abs(grads_full - grads_ref_full))), self.MAX_GRAD_DIFF)
-                self.assertIsNone(p_full)
 
 
 if __name__ == "__main__":

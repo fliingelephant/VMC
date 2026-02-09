@@ -6,7 +6,7 @@ Key concepts:
 
 For a given sample configuration, only one slice of parameters at each site
 contributes to the wavefunction amplitude. The slice index is determined by:
-- MPS/PEPS: physical state σ ∈ {0, ..., d-1}
+- PEPS: physical state σ ∈ {0, ..., d-1}
 - GIPEPS: combined index (σ, cfg) where cfg encodes local gauge configuration
 """
 from __future__ import annotations
@@ -15,21 +15,9 @@ from vmc import config  # noqa: F401 - JAX config must be imported first
 
 from plum import dispatch
 
-from vmc.models.mps import MPS
-from vmc.models.peps import PEPS
+from vmc.peps.standard.model import PEPS
 
 __all__ = ["params_per_site", "sliced_dims"]
-
-
-@dispatch
-def params_per_site(model: MPS) -> list[int]:
-    """Number of parameters per active slice at each MPS site."""
-    n_sites, bond_dim = model.n_sites, model.bond_dim
-    return [
-        left * right
-        for site in range(n_sites)
-        for left, right in [MPS.site_dims(site, n_sites, bond_dim)]
-    ]
 
 
 @dispatch
@@ -45,12 +33,6 @@ def params_per_site(model: PEPS) -> list[int]:
             PEPS.site_dims(r, c, n_rows, n_cols, bond_dim)
         ]
     ]
-
-
-@dispatch
-def sliced_dims(model: MPS) -> tuple[int, ...]:
-    """Number of distinct active slices per site (= phys_dim for MPS)."""
-    return (model.phys_dim,) * model.n_sites
 
 
 @dispatch

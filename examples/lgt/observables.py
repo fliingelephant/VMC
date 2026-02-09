@@ -16,8 +16,8 @@ from typing import TYPE_CHECKING
 import jax.numpy as jnp
 
 if TYPE_CHECKING:
-    from vmc.experimental.lgt.gi_peps import GIPEPS
-    from vmc.experimental.lgt.gi_local_terms import GILocalHamiltonian
+    from vmc.peps.gi.local_terms import GILocalHamiltonian
+    from vmc.peps.gi.model import GIPEPS
 
 logger = logging.getLogger(__name__)
 

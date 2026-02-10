@@ -5,25 +5,61 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from vmc.experimental.rydberg import (
+from vmc.core import _sample_counts, _trim_samples, make_mc_sampler
+from vmc.operators import LocalHamiltonian
+from vmc.peps import (
+    DensityMatrix,
+    NoTruncation,
+    Variational,
+    ZipUp,
+    build_mc_kernels,
+)
+from vmc.peps.blockade import (
     BlockadePEPS,
     BlockadePEPSConfig,
     random_independent_set,
     rydberg_hamiltonian,
 )
-from vmc.models.peps import (
-    DensityMatrix,
-    NoTruncation,
-    Variational,
-    ZipUp,
-    bottom_envs,
-    grads_and_energy,
-    sweep,
-)
-from vmc.samplers.sequential import (
-    sequential_sample,
-    sequential_sample_with_gradients,
-)
+
+
+def _sample_with_kernels(
+    model: BlockadePEPS,
+    operator: LocalHamiltonian,
+    *,
+    n_samples: int,
+    n_chains: int,
+    key: jax.Array,
+    initial_configuration: jax.Array,
+    full_gradient: bool,
+) -> tuple[jax.Array, jax.Array, jax.Array | None, jax.Array, jax.Array, jax.Array, jax.Array]:
+    _, num_chains, chain_length, total_samples = _sample_counts(n_samples, n_chains)
+    config_states = initial_configuration.reshape(num_chains, -1)
+    chain_keys = jax.random.split(key, num_chains)
+    tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
+    init_cache, transition, estimate = build_mc_kernels(
+        model,
+        operator,
+        full_gradient=full_gradient,
+    )
+    cache = init_cache(tensors, config_states)
+    mc_sampler = make_mc_sampler(transition, estimate)
+    (final_configurations, final_keys, _), (samples_hist, estimates) = mc_sampler(
+        tensors,
+        config_states,
+        chain_keys,
+        cache,
+        n_steps=chain_length,
+    )
+    samples = _trim_samples(samples_hist, total_samples, n_samples)
+    grads = _trim_samples(estimates.local_log_derivatives, total_samples, n_samples)
+    p = (
+        None
+        if full_gradient
+        else _trim_samples(estimates.active_slice_indices, total_samples, n_samples)
+    )
+    amps = _trim_samples(estimates.amp, total_samples, n_samples)
+    energies = _trim_samples(estimates.local_estimate, total_samples, n_samples)
+    return samples, grads, p, final_keys, final_configurations, amps, energies
 
 
 class BlockadePEPSConfigTest(unittest.TestCase):
@@ -76,7 +112,7 @@ class CfgIdxTest(unittest.TestCase):
 
     def test_cfg_idx_bulk_n0(self):
         """Test cfg_idx for n=0 at bulk site."""
-        from vmc.experimental.rydberg.blockade_peps import _assemble_site
+        from vmc.peps.blockade.model import _assemble_site
 
         config = BlockadePEPSConfig(shape=(3, 3), D0=2, D1=2)
         model = BlockadePEPS(
@@ -145,7 +181,7 @@ class CfgIdxTest(unittest.TestCase):
 
     def test_cfg_idx_n1_always_0(self):
         """Test that n=1 always uses cfg_idx=0."""
-        from vmc.experimental.rydberg.blockade_peps import _assemble_site
+        from vmc.peps.blockade.model import _assemble_site
 
         config = BlockadePEPSConfig(shape=(3, 3), D0=2, D1=2)
         model = BlockadePEPS(
@@ -275,14 +311,19 @@ class SweepTest(unittest.TestCase):
         key = jax.random.key(42)
         key, init_key = jax.random.split(key)
         initial_config = random_independent_set(init_key, config.shape)
-        initial_sample = BlockadePEPS.flatten_sample(initial_config)
+        initial_sample = BlockadePEPS.flatten_sample(initial_config).reshape(1, -1)
+        samples, _, _, _, _, _, _ = _sample_with_kernels(
+            model,
+            LocalHamiltonian(shape=config.shape, terms=()),
+            n_samples=5,
+            n_chains=1,
+            key=key,
+            initial_configuration=initial_sample,
+            full_gradient=False,
+        )
 
-        envs = bottom_envs(model, initial_sample)
-
-        for _ in range(5):
-            key, sweep_key = jax.random.split(key)
-            new_sample, _, amp = sweep(model, initial_sample, sweep_key, envs)
-            new_config = BlockadePEPS.unflatten_sample(new_sample, config.shape)
+        for i in range(samples.shape[0]):
+            new_config = BlockadePEPS.unflatten_sample(samples[i], config.shape)
 
             # Check validity
             config_np = jax.device_get(new_config)
@@ -298,15 +339,15 @@ class SweepTest(unittest.TestCase):
                         if r < config.shape[0] - 1:
                             self.assertEqual(config_np[r + 1, c], 0)
 
-            initial_sample = new_sample
-            envs = bottom_envs(model, initial_sample)
-
 
 class GradsAndEnergyTest(unittest.TestCase):
     """Tests for grads_and_energy function."""
 
     def test_grads_and_energy_shapes(self):
         """Test that grads_and_energy returns correct shapes."""
+        from vmc.peps.blockade import model as blockade_model
+        from vmc.peps.common.contraction import _forward_with_cache
+
         config = BlockadePEPSConfig(shape=(3, 3), D0=2, D1=2)
         model = BlockadePEPS(
             rngs=nnx.Rngs(0),
@@ -317,23 +358,34 @@ class GradsAndEnergyTest(unittest.TestCase):
         key = jax.random.key(42)
         initial_config = random_independent_set(key, config.shape)
         sample = BlockadePEPS.flatten_sample(initial_config)
-
         h = rydberg_hamiltonian(config.shape, Omega=1.0, Delta=0.5)
-        envs = bottom_envs(model, sample)
 
-        # Get amplitude
+        config_2d = sample.reshape(config.shape)
         tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
-        amp = BlockadePEPS.apply(
-            tensors, sample, config.shape, config, model.strategy
+        eff_tensors = blockade_model.assemble_tensors(
+            tensors,
+            config_2d,
+            config,
+        )
+        amp, top_envs = _forward_with_cache(
+            eff_tensors,
+            config_2d,
+            config.shape,
+            model.strategy,
+        )
+        env_grads, energy, _ = blockade_model.estimate(
+            tensors,
+            sample,
+            amp,
+            h,
+            config.shape,
+            config,
+            model.strategy,
+            top_envs,
         )
 
-        env_grads, energy = grads_and_energy(model, sample, amp, h, envs)
-
-        # Check shapes
         self.assertEqual(len(env_grads), config.shape[0])
         self.assertEqual(len(env_grads[0]), config.shape[1])
-
-        # Check energy is a scalar
         self.assertEqual(energy.shape, ())
 
 
@@ -359,13 +411,15 @@ class SamplerTest(unittest.TestCase):
         )
         initial_flat = initial_configs.reshape(n_chains, -1)
 
-        samples = sequential_sample(
+        h = rydberg_hamiltonian(config.shape, Omega=1.0, Delta=0.5)
+        samples, _, _, _, _, _, _ = _sample_with_kernels(
             model,
+            h,
             n_samples=n_samples,
             n_chains=n_chains,
             key=key,
             initial_configuration=initial_flat,
-            burn_in=1,
+            full_gradient=False,
         )
 
         n_sites = config.shape[0] * config.shape[1]
@@ -392,14 +446,14 @@ class SamplerTest(unittest.TestCase):
 
         h = rydberg_hamiltonian(config.shape, Omega=1.0, Delta=0.5)
 
-        samples, grads, p, _, final_configs, amps, energies = sequential_sample_with_gradients(
+        samples, grads, p, _, final_configs, amps, energies = _sample_with_kernels(
             model,
             h,
             n_samples=n_samples,
             n_chains=n_chains,
             key=key,
             initial_configuration=initial_flat,
-            burn_in=1,
+            full_gradient=False,
         )
 
         n_sites = config.shape[0] * config.shape[1]
@@ -489,18 +543,14 @@ class DiagonalEnergyTest(unittest.TestCase):
 
     def test_diagonal_energy_direct(self):
         """Test that diagonal energy matches direct computation."""
+        from vmc.peps.blockade import model as blockade_model
+        from vmc.peps.common.contraction import _forward_with_cache
+
         shape = (2, 2)
         Omega = 0.0  # No X term for this test
         Delta = 0.5
 
         h = rydberg_hamiltonian(shape, Omega=Omega, Delta=Delta)
-
-        # Create configuration
-        config_arr = jnp.array([[1, 0], [0, 1]], dtype=jnp.int32)
-        n_ones = jnp.sum(config_arr)
-
-        # Expected diagonal energy: -Delta * n_ones
-        expected_energy = -Delta * n_ones
 
         # Create model and compute energy
         config = BlockadePEPSConfig(shape=shape, D0=2, D1=2)
@@ -510,18 +560,39 @@ class DiagonalEnergyTest(unittest.TestCase):
             contraction_strategy=NoTruncation(),
         )
 
+        config_arr = jnp.array([[1, 0], [0, 1]], dtype=jnp.int32)
+        n_ones = jnp.sum(config_arr)
+        expected_energy = -Delta * n_ones
         sample = BlockadePEPS.flatten_sample(config_arr)
-        envs = bottom_envs(model, sample)
-
         tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
-        amp = BlockadePEPS.apply(
-            tensors, sample, config.shape, config, model.strategy
+        eff_tensors = blockade_model.assemble_tensors(
+            tensors,
+            config_arr,
+            config,
+        )
+        amp, top_envs = _forward_with_cache(
+            eff_tensors,
+            config_arr,
+            config.shape,
+            model.strategy,
+        )
+        _, energy, _ = blockade_model.estimate(
+            tensors,
+            sample,
+            amp,
+            h,
+            config.shape,
+            config,
+            model.strategy,
+            top_envs,
         )
 
-        _, energy = grads_and_energy(model, sample, amp, h, envs)
-
         # With Omega=0, energy should just be diagonal
-        self.assertAlmostEqual(float(jnp.real(energy)), float(expected_energy), places=5)
+        self.assertAlmostEqual(
+            float(jnp.real(energy)),
+            float(expected_energy),
+            places=5,
+        )
 
 
 class SamplingBalanceTest(unittest.TestCase):
@@ -565,13 +636,15 @@ class SamplingBalanceTest(unittest.TestCase):
         )
         initial_flat = initial_configs.reshape(n_chains, -1)
 
-        samples = sequential_sample(
+        h = rydberg_hamiltonian(config.shape, Omega=1.0, Delta=0.5)
+        samples, _, _, _, _, _, _ = _sample_with_kernels(
             model,
+            h,
             n_samples=n_samples,
             n_chains=n_chains,
             key=key,
             initial_configuration=initial_flat,
-            burn_in=5,
+            full_gradient=False,
         )
 
         # Check that we get multiple unique configurations
@@ -639,13 +712,15 @@ class SamplingBalanceTest(unittest.TestCase):
         )
         initial_flat = initial_configs.reshape(n_chains, -1)
 
-        samples = sequential_sample(
+        h = rydberg_hamiltonian(shape, Omega=1.0, Delta=0.5)
+        samples, _, _, _, _, _, _ = _sample_with_kernels(
             model,
+            h,
             n_samples=n_samples,
             n_chains=n_chains,
             key=key,
             initial_configuration=initial_flat,
-            burn_in=50,
+            full_gradient=False,
         )
 
         weights = 2 ** np.arange(n_sites - 1, -1, -1, dtype=np.int64)

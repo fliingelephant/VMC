@@ -26,19 +26,15 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from vmc.models.peps import (
-    ContractionStrategy,
-    Variational,
+from vmc.peps.blockade.compat import blockade_apply
+from vmc.peps.common.contraction import (
     _apply_mpo_from_below,
-    _contract_bottom,
     _compute_right_envs,
-    _compute_single_gradient,
-    _compute_right_envs_2row,
+    _contract_bottom,
     _metropolis_ratio,
-    bottom_envs,
-    grads_and_energy,
-    sweep,
 )
+from vmc.peps.common.energy import _compute_right_envs_2row, _compute_single_gradient
+from vmc.peps.common.strategy import ContractionStrategy, Variational
 from vmc.operators.local_terms import DiagonalTerm, OneSiteTerm, bucket_terms
 from vmc.utils.utils import random_tensor
 
@@ -136,31 +132,7 @@ class BlockadePEPS(nnx.Module):
         """Unflatten sample to (n_rows, n_cols) configuration."""
         return sample.reshape(shape)
 
-    @staticmethod
-    def apply(
-        tensors: list[list[jax.Array]],
-        sample: jax.Array,
-        shape: tuple[int, int],
-        config: BlockadePEPSConfig,
-        strategy: ContractionStrategy,
-    ) -> jax.Array:
-        """Compute PEPS amplitude for a given configuration."""
-        n_config = BlockadePEPS.unflatten_sample(sample, shape)
-        invalid_h = jnp.any(n_config[:, 1:] * n_config[:, :-1])
-        invalid_v = jnp.any(n_config[1:, :] * n_config[:-1, :])
-        invalid = invalid_h | invalid_v
-        dtype = jnp.asarray(tensors[0][0]).dtype
-
-        def _compute_amp(_):
-            eff_tensors = assemble_tensors(tensors, n_config, config)
-            return _peps_apply_occupancy(eff_tensors, n_config, shape, strategy)
-
-        return jax.lax.cond(
-            invalid,
-            lambda _: jnp.zeros((), dtype=dtype),
-            _compute_amp,
-            operand=None,
-        )
+    apply = staticmethod(blockade_apply)
 
     def random_physical_configuration(
         self,
@@ -312,83 +284,26 @@ def _build_row_mpo(
     )
 
 
-def _peps_apply_occupancy(
+def estimate(
     tensors: list[list[jax.Array]],
-    config: jax.Array,
-    shape: tuple[int, int],
-    strategy: ContractionStrategy,
-) -> jax.Array:
-    """Compute PEPS amplitude for occupancy configuration."""
-    n_rows, n_cols = shape
-    boundary = tuple(
-        jnp.ones((1, 1, 1), dtype=jnp.asarray(tensors[0][0]).dtype)
-        for _ in range(n_cols)
-    )
-    for row in range(n_rows):
-        mpo = tuple(
-            jnp.transpose(tensors[row][c][config[row, c]], (2, 3, 0, 1))
-            for c in range(n_cols)
-        )
-        boundary = strategy.apply(boundary, mpo)
-    return _contract_bottom(boundary)
-
-
-# =============================================================================
-# Dispatched API Functions
-# =============================================================================
-
-
-@bottom_envs.dispatch
-def bottom_envs(model: BlockadePEPS, sample: jax.Array) -> list[tuple]:
-    """Compute bottom boundary environments for BlockadePEPS.
-
-    For 2-row sweep, bottom_envs[r] covers rows r+1 onwards.
-    """
-    config = BlockadePEPS.unflatten_sample(sample, model.shape)
-    tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
-    return _compute_bottom_envs(tensors, config, model.config, model.strategy)
-
-
-def _compute_bottom_envs(
-    tensors: list[list[jax.Array]],
-    config: jax.Array,
-    peps_config: BlockadePEPSConfig,
-    strategy: ContractionStrategy,
-) -> list[tuple]:
-    """Compute bottom boundary environments."""
-    n_rows, n_cols = peps_config.shape
-    dtype = tensors[0][0].dtype
-    envs = [None] * n_rows
-    env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
-
-    for row in range(n_rows - 1, -1, -1):
-        envs[row] = env
-        mpo = _build_row_mpo(tensors, config, peps_config, row)
-        env = _apply_mpo_from_below(env, mpo, strategy)
-
-    return envs
-
-
-@grads_and_energy.dispatch
-def grads_and_energy(
-    model: BlockadePEPS,
     sample: jax.Array,
     amp: jax.Array,
     operator: Any,
-    envs: list[tuple],
-) -> tuple[list[list[jax.Array]], jax.Array]:
+    shape: tuple[int, int],
+    peps_config: BlockadePEPSConfig,
+    strategy: ContractionStrategy,
+    top_envs: list[tuple],
+) -> tuple[list[list[jax.Array]], jax.Array, list[tuple]]:
     """Compute environment gradients and local energy for BlockadePEPS.
 
     Diagonal terms: computed directly from configuration (no tensor operations)
     X terms: use 2-row sweep with tensor contractions
     """
-    config = BlockadePEPS.unflatten_sample(sample, model.shape)
-    tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
-    peps_config = model.config
-    strategy = model.strategy
+    config = BlockadePEPS.unflatten_sample(sample, shape)
     n_rows, n_cols = peps_config.shape
     dtype = tensors[0][0].dtype
     phys_dim = peps_config.phys_dim
+    bottom_envs_cache = [None] * n_rows
 
     (
         diagonal_terms,
@@ -408,10 +323,11 @@ def grads_and_energy(
             idx = idx * phys_dim + config[row, col]
         energy = energy + term.diag[idx]
 
-    # 2. Gradients and X term energy via row sweep
-    top_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
-
-    for row in range(n_rows):
+    # 2. Gradients and X term energy with incremental bottom-env construction
+    bottom_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
+    for row in range(n_rows - 1, -1, -1):
+        bottom_envs_cache[row] = bottom_env
+        top_env = top_envs[row]
         eff_row = [
             _assemble_site(
                 tensors,
@@ -428,14 +344,13 @@ def grads_and_energy(
             jnp.transpose(eff_row[c][config[row, c]], (2, 3, 0, 1))
             for c in range(n_cols)
         )
-        bottom_env = envs[row]
         right_envs = _compute_right_envs(top_env, mpo, bottom_env, dtype)
         left_env = jnp.ones((1, 1, 1), dtype=dtype)
         # Boundary-aware branching keeps static shapes: 2-row window if row+1 exists.
         row_has_x = any(one_site_terms[row][c] for c in range(n_cols))
         mpo_next = None
         if row_has_x and row < n_rows - 1:
-            bottom_env_pair = envs[row + 1]
+            bottom_env_pair = bottom_envs_cache[row + 1]
             eff_row_next = [
                 _assemble_site(
                     tensors,
@@ -673,51 +588,33 @@ def grads_and_energy(
                     optimize=[(0, 1), (0, 3), (0, 2), (0, 1)],
                 )
 
-        top_env = strategy.apply(top_env, mpo)
-        if row < n_rows - 1:
-            if mpo_next is None:
-                eff_row_next = [
-                    _assemble_site(
-                        tensors,
-                        peps_config,
-                        row + 1,
-                        c,
-                        config[row + 1, c],
-                        config[row + 1, c - 1] if c > 0 else 0,
-                        config[row, c],
-                    )
-                    for c in range(n_cols)
-                ]
-                mpo_next = tuple(
-                    jnp.transpose(eff_row_next[c][config[row + 1, c]], (2, 3, 0, 1))
-                    for c in range(n_cols)
-                )
-            mpo = mpo_next
+        bottom_env = _apply_mpo_from_below(bottom_env, mpo, strategy)
 
-    return env_grads, energy
+    return env_grads, energy, bottom_envs_cache
 
-@sweep.dispatch
-def sweep(
-    model: BlockadePEPS,
+def transition(
+    tensors: list[list[jax.Array]],
     sample: jax.Array,
     key: jax.Array,
     envs: list[tuple],
-) -> tuple[jax.Array, jax.Array, jax.Array]:
+    shape: tuple[int, int],
+    peps_config: BlockadePEPSConfig,
+    strategy: ContractionStrategy,
+) -> tuple[jax.Array, jax.Array, jax.Array, tuple]:
     """2-row Metropolis sweep for BlockadePEPS.
 
     Uses overlapping row pairs (0,1), (1,2), ... with 2-column explicit window.
     """
-    config = BlockadePEPS.unflatten_sample(sample, model.shape)
-    tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
-    peps_config = model.config
-    strategy = model.strategy
+    config = BlockadePEPS.unflatten_sample(sample, shape)
     n_rows, n_cols = peps_config.shape
     dtype = tensors[0][0].dtype
 
     # Process row pairs
     top_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
+    top_envs_cache = [None] * n_rows
 
     if n_rows == 1:
+        top_envs_cache[0] = top_env
         # Single row: standard 1-row sweep
         key, config = _sweep_single_row(
             key, tensors, config, peps_config, 0, top_env, envs[0]
@@ -728,6 +625,7 @@ def sweep(
         # Multi-row: 2-row sweep over overlapping pairs
         # This sweeps rows 0, 1, ..., n_rows-2 (each row r is swept in pair (r, r+1))
         for r in range(n_rows - 1):
+            top_envs_cache[r] = top_env
             bottom_env_pair = envs[r + 1] if r + 1 < n_rows else tuple(
                 jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols)
             )
@@ -740,6 +638,7 @@ def sweep(
 
         # Sweep the last row (n_rows-1) with single-row sweep
         # This row wasn't swept in the pair loop above
+        top_envs_cache[n_rows - 1] = top_env
         bottom_env_last = tuple(
             jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols)
         )
@@ -752,7 +651,7 @@ def sweep(
         top_env = strategy.apply(top_env, mpo_last)
 
     amp = _contract_bottom(top_env)
-    return BlockadePEPS.flatten_sample(config), key, amp
+    return BlockadePEPS.flatten_sample(config), key, amp, tuple(top_envs_cache)
 
 
 def _sweep_single_row(
@@ -948,7 +847,6 @@ def _sweep_row_pair(
             # 2-column window
             mpo0_c1 = mpo0[c + 1]
             mpo1_c1 = mpo1[c + 1]
-            right_env = right_envs[c + 1] if c + 2 >= n_cols else right_envs[c + 1]
 
             # Current amplitude
             amp_cur = _contract_2row_2col(

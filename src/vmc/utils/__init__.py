@@ -15,6 +15,7 @@ from vmc.utils.independent_set_sampling import (
 from vmc.utils.utils import (
     occupancy_to_spin,
     spin_to_occupancy,
+    _tree_add_scaled,
 )
 from vmc.utils.factorizations import (
     _qr_compactwy,
@@ -36,6 +37,7 @@ __all__ = [
     "independent_set_violations",
     "occupancy_to_spin",
     "spin_to_occupancy",
+    "_tree_add_scaled",
     "_qr_compactwy",
     "_qr_cholesky",
 ]

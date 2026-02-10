@@ -1,7 +1,6 @@
 """Imaginary-time convergence checks for solvable models."""
 from __future__ import annotations
 
-import functools
 import logging
 import unittest
 
@@ -15,10 +14,8 @@ import jax.numpy as jnp
 import netket as nk
 from flax import nnx
 
-from vmc.core import _value, _value_and_grad
-from vmc.drivers import DynamicsDriver, ImaginaryTimeUnit
-from vmc.models.mps import MPS
-from vmc.models.peps import NoTruncation, PEPS
+from vmc.peps import NoTruncation, PEPS
+from vmc.peps.standard.compat import _value, _value_and_grad
 from vmc.utils.utils import spin_to_occupancy
 from vmc.utils.vmc_utils import local_estimate
 
@@ -94,8 +91,11 @@ class ExactSRPreconditioner:
         params_arrays = jax.tree_util.tree_map(jnp.asarray, params)
         _, unravel = jax.flatten_util.ravel_pytree(params_arrays)
         updates = unravel(update_flat)
-        return jax.tree_util.tree_map(
-            lambda u, t: u.astype(t.dtype), updates, params_arrays
+        return (
+            jax.tree_util.tree_map(
+                lambda u, t: u.astype(t.dtype), updates, params_arrays
+            ),
+            {},
         )
 
 
@@ -255,25 +255,32 @@ def _run_imag_time(
     key: jax.Array,
     gauge_config=None,
 ):
-    sampler = functools.partial(
-        _exact_sampler_with_gradients,
-        states,
-        n_samples=n_samples,
-    )
-    _ = gauge_config
+    del gauge_config
     preconditioner = ExactSRPreconditioner(diag_shift=diag_shift)
-    driver = DynamicsDriver(
-        model,
-        hamiltonian,
-        sampler=sampler,
-        preconditioner=preconditioner,
-        dt=dt,
-        time_unit=ImaginaryTimeUnit(),
-        sampler_key=key,
-    )
     for _ in range(n_steps):
-        driver.step()
-    return driver.model
+        samples, o, p, key, _, _, local_energies = _exact_sampler_with_gradients(
+            states,
+            model,
+            hamiltonian,
+            n_samples=n_samples,
+            key=key,
+        )
+        tensors = [[jnp.asarray(tensor) for tensor in row] for row in model.tensors]
+        updates, _ = preconditioner.apply(
+            model,
+            tensors,
+            samples,
+            o,
+            p,
+            local_energies,
+            grad_factor=-1.0,
+        )
+        for row in range(len(model.tensors)):
+            for col in range(len(model.tensors[row])):
+                model.tensors[row][col][...] = (
+                    model.tensors[row][col] + dt * updates[row][col]
+                )
+    return model
 
 
 class PhysicsModelTest(unittest.TestCase):
@@ -367,6 +374,14 @@ class PhysicsModelTest(unittest.TestCase):
     J1 = 1.0
     J2 = 0.5
 
+    def _chain_peps(self, *, seed: int, n_sites: int, bond_dim: int) -> PEPS:
+        return PEPS(
+            rngs=nnx.Rngs(seed),
+            shape=(1, n_sites),
+            bond_dim=bond_dim,
+            contraction_strategy=NoTruncation(),
+        )
+
     @pytest.mark.slow
     def test_cluster_state_energy(self) -> None:
         hamiltonian, hi, n_sites = _cluster_2d_hamiltonian(
@@ -402,8 +417,8 @@ class PhysicsModelTest(unittest.TestCase):
             self.skipTest("Majumdar-Ghosh requires even site count")
         hi = nk.hilbert.Spin(s=0.5, N=n_sites)
         states = jnp.asarray(hi.all_states(), dtype=jnp.int32)
-        model = MPS(
-            rngs=nnx.Rngs(self.SEED + 1),
+        model = self._chain_peps(
+            seed=self.SEED + 1,
             n_sites=n_sites,
             bond_dim=self.MG_BOND_DIM,
         )
@@ -532,8 +547,8 @@ class PhysicsModelTest(unittest.TestCase):
             J=-self.J1,
             dtype=jnp.complex128,
         )
-        model = MPS(
-            rngs=nnx.Rngs(self.SEED + 3),
+        model = self._chain_peps(
+            seed=self.SEED + 3,
             n_sites=n_sites,
             bond_dim=self.TFIM_BOND_DIM,
         )
@@ -617,8 +632,8 @@ class PhysicsModelTest(unittest.TestCase):
             )
             hamiltonian += field * nk.operator.LocalOperator(hi, Z, [i])
 
-        model = MPS(
-            rngs=nnx.Rngs(self.SEED + 4),
+        model = self._chain_peps(
+            seed=self.SEED + 4,
             n_sites=n_sites,
             bond_dim=self.XY_BOND_DIM,
         )
@@ -696,8 +711,8 @@ class PhysicsModelTest(unittest.TestCase):
         hamiltonian = nk.operator.Heisenberg(
             hi, graph, J=self.J1, dtype=jnp.complex128
         )
-        model = MPS(
-            rngs=nnx.Rngs(self.SEED + 5),
+        model = self._chain_peps(
+            seed=self.SEED + 5,
             n_sites=n_sites,
             bond_dim=self.HEISENBERG_BOND_DIM,
         )

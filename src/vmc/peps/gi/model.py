@@ -20,22 +20,19 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from vmc.models.peps import (
+from vmc.peps.common.contraction import (
     _apply_mpo_from_below,
-    _build_row_mpo,
-    _compute_all_gradients,
-    _compute_2site_horizontal_env,
     _compute_right_envs,
+    _contract_bottom,
+    _metropolis_ratio,
+)
+from vmc.peps.common.energy import (
+    _compute_2site_horizontal_env,
     _compute_right_envs_2row,
     _compute_row_pair_vertical_energy,
     _compute_single_gradient,
-    _contract_bottom,
-    _forward_with_cache,
-    _metropolis_ratio,
-    bottom_envs,
-    grads_and_energy,
-    sweep,
 )
+from vmc.peps.gi.compat import gi_apply
 from vmc.operators.local_terms import bucket_terms
 from vmc.utils.utils import random_tensor
 
@@ -144,35 +141,7 @@ class GIPEPS(nnx.Module):
         v_links = v_flat.reshape((n_rows - 1, n_cols))
         return sites, h_links, v_links
 
-    @staticmethod
-    def apply(
-        tensors: list[list[jax.Array]],
-        sample: jax.Array,
-        shape: tuple[int, int],
-        config: GIPEPSConfig,
-        strategy: Any,
-    ) -> jax.Array:
-        sites, h_links, v_links = GIPEPS.unflatten_sample(sample, shape)
-        n = jnp.asarray(config.N, dtype=h_links.dtype)
-        nl = jnp.pad(h_links, ((0, 0), (1, 0)), constant_values=0)
-        nr = jnp.pad(h_links, ((0, 0), (0, 1)), constant_values=0)
-        nu = jnp.pad(v_links, ((1, 0), (0, 0)), constant_values=0)
-        nd = jnp.pad(v_links, ((0, 1), (0, 0)), constant_values=0)
-        div = (nl + nd - nu - nr) % n
-        charge_of_site = jnp.asarray(config.charge_of_site, dtype=sites.dtype)
-        charge = charge_of_site[sites]
-        valid = (div + charge) % n == jnp.asarray(config.Qx, dtype=div.dtype)
-        invalid = jnp.any(~valid)
-        dtype = jnp.asarray(tensors[0][0]).dtype
-
-        def _compute_amp(_):
-            eff_tensors = assemble_tensors(tensors, h_links, v_links, config)
-            spins = sites.reshape(-1)
-            return _peps_apply_occupancy(eff_tensors, spins, shape, strategy)
-
-        return jax.lax.cond(
-            invalid, lambda _: jnp.zeros((), dtype=dtype), _compute_amp, operand=None
-        )
+    apply = staticmethod(gi_apply)
 
     def random_physical_configuration(
         self,
@@ -373,50 +342,6 @@ def _site_cfg_index(
         cfg_idx = cfg_idx * jnp.asarray(config.N, dtype=jnp.int32) + k.astype(jnp.int32)
     return cfg_idx
 
-
-@functools.partial(jax.custom_vjp, nondiff_argnums=(2, 3))
-def _peps_apply_occupancy(
-    tensors: Any,
-    sample: jax.Array,
-    shape: tuple[int, int],
-    strategy: Any,
-) -> jax.Array:
-    # TODO: refactor to use this as default _peps_apply (drop Netket compatibility).
-    spins = sample.reshape(shape)
-    boundary = tuple(
-        jnp.ones((1, 1, 1), dtype=jnp.asarray(tensors[0][0]).dtype)
-        for _ in range(shape[1])
-    )
-    for row in range(shape[0]):
-        mpo = _build_row_mpo(tensors, spins[row], row, shape[1])
-        boundary = strategy.apply(boundary, mpo)
-    return _contract_bottom(boundary)
-
-
-def _peps_apply_occupancy_fwd(tensors, sample, shape, strategy):
-    spins = sample.reshape(shape)
-    amp, top_envs = _forward_with_cache(tensors, spins, shape, strategy)
-    return amp, (tensors, spins, top_envs)
-
-
-def _peps_apply_occupancy_bwd(shape, strategy, residuals, g):
-    tensors, spins, top_envs = residuals
-    n_rows, n_cols = shape
-    env_grads = _compute_all_gradients(tensors, spins, shape, strategy, top_envs)
-    grad_leaves = []
-    for r in range(n_rows):
-        for c in range(n_cols):
-            grad_full = jnp.zeros_like(jnp.asarray(tensors[r][c]))
-            grad_leaves.append(grad_full.at[spins[r, c]].set(g * env_grads[r][c]))
-    return (
-        jax.tree_util.tree_unflatten(jax.tree_util.tree_structure(tensors), grad_leaves),
-        None,
-    )
-
-
-_peps_apply_occupancy.defvjp(_peps_apply_occupancy_fwd, _peps_apply_occupancy_bwd)
-
-
 # =============================================================================
 # GI-PEPS specific helpers
 # =============================================================================
@@ -460,38 +385,28 @@ def _plaquette_flip(
 
 
 # =============================================================================
-# Dispatched API Functions for GIPEPS
+# Runtime Internals for GIPEPS Kernels
 # =============================================================================
 
 
-@bottom_envs.dispatch
-def bottom_envs(model: GIPEPS, sample: jax.Array) -> list[tuple]:
-    """Compute bottom boundary environments for GI-PEPS."""
-    sites, h_links, v_links = GIPEPS.unflatten_sample(sample, model.shape)
-    tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
-    return _compute_bottom_envs(
-        tensors, sites, h_links, v_links, model.config, model.strategy
-    )
-
-
-@grads_and_energy.dispatch
-def grads_and_energy(
-    model: GIPEPS,
+def estimate(
+    tensors: list[list[jax.Array]],
     sample: jax.Array,
     amp: jax.Array,
     operator: Any,
-    envs: list[tuple],
-) -> tuple[list[list[jax.Array]], jax.Array]:
+    shape: tuple[int, int],
+    config: GIPEPSConfig,
+    strategy: Any,
+    top_envs: list[tuple],
+) -> tuple[list[list[jax.Array]], jax.Array, list[tuple]]:
     """Compute environment gradients and local energy for GI-PEPS."""
-    from vmc.experimental.lgt.gi_local_terms import LinkDiagonalTerm
+    from vmc.peps.gi.local_terms import LinkDiagonalTerm
 
-    sites, h_links, v_links = GIPEPS.unflatten_sample(sample, model.shape)
-    tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
-    config = model.config
-    strategy = model.strategy
+    sites, h_links, v_links = GIPEPS.unflatten_sample(sample, shape)
     n_rows, n_cols = config.shape
     dtype = tensors[0][0].dtype
     phys_dim = config.phys_dim
+    bottom_envs_cache = [None] * n_rows
 
     (
         diagonal_terms,
@@ -502,7 +417,6 @@ def grads_and_energy(
     ) = bucket_terms(operator.terms, config.shape)
 
     env_grads = [[None for _ in range(n_cols)] for _ in range(n_rows)]
-    bottom_envs_list = envs  # Use passed-in envs
 
     # Compute diagonal energy
     energy = jnp.zeros((), dtype=amp.dtype)
@@ -516,10 +430,11 @@ def grads_and_energy(
         energy = energy + term.diag[idx]
 
     # Main row iteration
-    top_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
-    row_mpo = _build_row_mpo_gi(tensors, sites, h_links, v_links, config, 0, n_cols)
-    for row in range(n_rows):
-        bottom_env = bottom_envs_list[row]
+    bottom_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
+    for row in range(n_rows - 1, -1, -1):
+        bottom_envs_cache[row] = bottom_env
+        top_env = top_envs[row]
+        row_mpo = _build_row_mpo_gi(tensors, sites, h_links, v_links, config, row, n_cols)
 
         # Check what terms exist for this row
         row_has_one_site = any(one_site_terms[row][c] for c in range(n_cols))
@@ -604,7 +519,7 @@ def grads_and_energy(
                 tensors, sites, h_links, v_links, config, row + 1, n_cols
             )
             if row_has_vertical or row_has_plaquette:
-                bottom_env_next = bottom_envs_list[row + 1]
+                bottom_env_next = bottom_envs_cache[row + 1]
                 right_envs_2row = _compute_right_envs_2row(
                     top_env, row_mpo, row_mpo_next, bottom_env_next, dtype
                 )
@@ -692,11 +607,9 @@ def grads_and_energy(
                             optimize=[(0, 1), (0, 3), (0, 2), (0, 1)],
                         )
 
-        top_env = strategy.apply(top_env, row_mpo)
-        if row < n_rows - 1:
-            row_mpo = row_mpo_next
+        bottom_env = _apply_mpo_from_below(bottom_env, row_mpo, strategy)
 
-    return env_grads, energy
+    return env_grads, energy, bottom_envs_cache
 
 
 # =============================================================================
@@ -985,24 +898,23 @@ def _compute_bottom_envs(
     return envs
 
 
-@sweep.dispatch
-def sweep(
-    model: GIPEPS,
+def transition(
+    tensors: list[list[jax.Array]],
     sample: jax.Array,
     key: jax.Array,
     envs: list[tuple],
-) -> tuple[jax.Array, jax.Array, jax.Array]:
+    shape: tuple[int, int],
+    config: GIPEPSConfig,
+    strategy: Any,
+    charge_of_site: jax.Array,
+    charge_to_indices: jax.Array,
+    charge_deg: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array, tuple]:
     """Combined plaquette + link sweeps for GI-PEPS."""
-    sites, h_links, v_links = GIPEPS.unflatten_sample(sample, model.shape)
-    tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
-    config = model.config
-    strategy = model.strategy
+    sites, h_links, v_links = GIPEPS.unflatten_sample(sample, shape)
     n_rows, n_cols = config.shape
     dtype = tensors[0][0].dtype
-
-    charge_of_site = jnp.asarray(model.charge_of_site, dtype=jnp.int32)
-    charge_to_indices = model.charge_to_indices
-    charge_deg = model.charge_deg
+    top_envs_cache = [None] * n_rows
 
     # 1. Plaquette sweep over the full lattice (row pairs)
     top_env_plaquettes = None
@@ -1017,6 +929,8 @@ def sweep(
             tensors, sites, h_links, v_links, config, 1, n_cols
         )
         for r in range(n_rows - 1):
+            if config.phys_dim == 1:
+                top_envs_cache[r] = top_env_plaquettes
             key, row_mpo0, row_mpo1, h_links, v_links = _plaquette_sweep_row_pair(
                 key,
                 tensors,
@@ -1036,6 +950,8 @@ def sweep(
                 row_mpo1 = _build_row_mpo_gi(
                     tensors, sites, h_links, v_links, config, r + 2, n_cols
                 )
+        if config.phys_dim == 1:
+            top_envs_cache[n_rows - 1] = top_env_plaquettes
         top_env_plaquettes = strategy.apply(top_env_plaquettes, row_mpo1)
 
     # For pure gauge (phys_dim == 1), no link/matter sweeps needed
@@ -1045,12 +961,13 @@ def sweep(
                 jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols)
             )
             for row in range(n_rows):
+                top_envs_cache[row] = top_env_plaquettes
                 row_mpo = _build_row_mpo_gi(
                     tensors, sites, h_links, v_links, config, row, n_cols
                 )
                 top_env_plaquettes = strategy.apply(top_env_plaquettes, row_mpo)
         amp = _contract_bottom(top_env_plaquettes)
-        return GIPEPS.flatten_sample(sites, h_links, v_links), key, amp
+        return GIPEPS.flatten_sample(sites, h_links, v_links), key, amp, tuple(top_envs_cache)
 
     # 2. Horizontal link sweeps for all rows
     # Recompute bottom_envs after plaquette changes
@@ -1060,6 +977,8 @@ def sweep(
 
     top_env_h = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
     for row in range(n_rows):
+        if n_rows == 1:
+            top_envs_cache[row] = top_env_h
         row_mpo = _build_row_mpo_gi(
             tensors, sites, h_links, v_links, config, row, n_cols
         )
@@ -1082,7 +1001,7 @@ def sweep(
 
     if n_rows == 1:
         amp = _contract_bottom(top_env_h)
-        return GIPEPS.flatten_sample(sites, h_links, v_links), key, amp
+        return GIPEPS.flatten_sample(sites, h_links, v_links), key, amp, tuple(top_envs_cache)
 
     # 3. Vertical link sweeps for all row pairs
     # Recompute bottom_envs after horizontal changes
@@ -1094,6 +1013,7 @@ def sweep(
     row_mpo0 = _build_row_mpo_gi(tensors, sites, h_links, v_links, config, 0, n_cols)
     row_mpo1 = _build_row_mpo_gi(tensors, sites, h_links, v_links, config, 1, n_cols)
     for r in range(n_rows - 1):
+        top_envs_cache[r] = top_env
         key, row_mpo0, row_mpo1, sites, v_links = _vertical_link_sweep_row_pair(
             key,
             tensors,
@@ -1116,10 +1036,11 @@ def sweep(
             row_mpo1 = _build_row_mpo_gi(
                 tensors, sites, h_links, v_links, config, r + 2, n_cols
             )
+    top_envs_cache[n_rows - 1] = top_env
     top_env = strategy.apply(top_env, row_mpo1)
 
     amp = _contract_bottom(top_env)
-    return GIPEPS.flatten_sample(sites, h_links, v_links), key, amp
+    return GIPEPS.flatten_sample(sites, h_links, v_links), key, amp, tuple(top_envs_cache)
 
 
 # --------------------------------------------------------------------------- #

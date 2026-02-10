@@ -1,14 +1,11 @@
 """Core APIs for VMC."""
 from __future__ import annotations
 
-from vmc.core.eval import (
-    _grad,
-    _value,
-    _value_and_grad,
-)
+from vmc.core.sampling import _collect_steps, _sample_counts, _trim_samples, make_mc_sampler
 
 __all__ = [
-    "_value",
-    "_grad",
-    "_value_and_grad",
+    "make_mc_sampler",
+    "_collect_steps",
+    "_sample_counts",
+    "_trim_samples",
 ]

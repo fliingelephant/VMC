@@ -275,7 +275,7 @@ class SRPreconditioner:
         local_energies: jax.Array,
         *,
         grad_factor: complex = 1.0,
-    ) -> dict:
+    ) -> tuple[Any, dict]:
         from vmc.gauge import compute_gauge_projection
 
         dv = (local_energies.reshape(-1) - jnp.mean(local_energies)) / samples.shape[0]
@@ -308,7 +308,7 @@ class SRPreconditioner:
             )
 
         strategy = self.strategy
-        updates_red, self._metrics = _solve_sr(
+        updates_red, metrics = _solve_sr(
             strategy, self.space, jac, dv, self.diag_shift
         )
 
@@ -327,4 +327,4 @@ class SRPreconditioner:
                 updates,
                 params,
             )
-        return tree_cast(updates, params)
+        return tree_cast(updates, params), metrics

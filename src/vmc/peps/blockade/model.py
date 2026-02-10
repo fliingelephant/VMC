@@ -847,7 +847,6 @@ def _sweep_row_pair(
             # 2-column window
             mpo0_c1 = mpo0[c + 1]
             mpo1_c1 = mpo1[c + 1]
-            right_env = right_envs[c + 1] if c + 2 >= n_cols else right_envs[c + 1]
 
             # Current amplitude
             amp_cur = _contract_2row_2col(

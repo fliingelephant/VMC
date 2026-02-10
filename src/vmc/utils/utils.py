@@ -15,6 +15,7 @@ __all__ = [
     "occupancy_to_spin",
     "random_tensor",
     "spin_to_occupancy",
+    "_tree_add_scaled",
 ]
 
 
@@ -54,3 +55,11 @@ def occupancy_to_spin(occupancies: jax.Array) -> jax.Array:
 def spin_to_occupancy(spins: jax.Array) -> jax.Array:
     """Convert -1/+1 spins into 0/1 occupancy variables."""
     return ((spins + 1) // 2).astype(jnp.int32)
+
+
+def _tree_add_scaled(base, delta, scale: float):
+    return jax.tree.map(
+        lambda x, y: x + jnp.asarray(scale, dtype=y.dtype) * y,
+        base,
+        delta,
+    )

@@ -1,8 +1,7 @@
 """TDVP drivers."""
 from __future__ import annotations
 
-from vmc.drivers.tdvp import (
-    TDVPDriver,
+from vmc.drivers.integrators import (
     Euler,
     ImaginaryTimeUnit,
     Integrator,
@@ -10,6 +9,7 @@ from vmc.drivers.tdvp import (
     RealTimeUnit,
     TimeUnit,
 )
+from vmc.drivers.tdvp import TDVPDriver
 
 __all__ = [
     "TDVPDriver",

@@ -146,30 +146,6 @@ class BlockadePEPS(nnx.Module):
         )(keys)
 
 
-# =============================================================================
-# Tensor Assembly
-# =============================================================================
-
-
-def assemble_tensors(
-    tensors: list[list[jax.Array]],
-    config: jax.Array,
-    peps_config: BlockadePEPSConfig,
-) -> list[list[jax.Array]]:
-    """Assemble effective tensors for all sites given configuration."""
-    n_rows, n_cols = peps_config.shape
-    eff = []
-    for r in range(n_rows):
-        row = []
-        for c in range(n_cols):
-            n = config[r, c]
-            kL = config[r, c - 1] if c > 0 else 0
-            kU = config[r - 1, c] if r > 0 else 0
-            row.append(_assemble_site(tensors, peps_config, r, c, n, kL, kU))
-        eff.append(row)
-    return eff
-
-
 def _assemble_site(
     tensors: list[list[jax.Array]],
     peps_config: BlockadePEPSConfig,

@@ -20,6 +20,7 @@ from vmc.peps.blockade import (
     random_independent_set,
     rydberg_hamiltonian,
 )
+from vmc.peps.blockade.compat import assemble_tensors
 
 
 def _sample_with_kernels(
@@ -362,7 +363,7 @@ class GradsAndEnergyTest(unittest.TestCase):
 
         config_2d = sample.reshape(config.shape)
         tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
-        eff_tensors = blockade_model.assemble_tensors(
+        eff_tensors = assemble_tensors(
             tensors,
             config_2d,
             config,
@@ -565,7 +566,7 @@ class DiagonalEnergyTest(unittest.TestCase):
         expected_energy = -Delta * n_ones
         sample = BlockadePEPS.flatten_sample(config_arr)
         tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
-        eff_tensors = blockade_model.assemble_tensors(
+        eff_tensors = assemble_tensors(
             tensors,
             config_arr,
             config,

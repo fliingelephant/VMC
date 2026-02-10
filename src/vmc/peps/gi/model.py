@@ -24,7 +24,6 @@ from vmc.peps.common.contraction import (
     _apply_mpo_from_below,
     _compute_right_envs,
     _contract_bottom,
-    _metropolis_ratio,
 )
 from vmc.peps.common.energy import (
     _compute_2site_horizontal_env,
@@ -34,7 +33,7 @@ from vmc.peps.common.energy import (
 )
 from vmc.peps.gi.compat import gi_apply
 from vmc.operators.local_terms import bucket_terms
-from vmc.utils.utils import random_tensor
+from vmc.utils.utils import random_tensor, _hastings_ratio, _metropolis_hastings_accept
 
 
 @dataclass(frozen=True)
@@ -617,15 +616,6 @@ def estimate(
 # =============================================================================
 
 
-def _update_row_mpo_for_site(
-    row_mpo: tuple, col: int, tensor: jax.Array, phys_index: jax.Array
-) -> tuple:
-    """Update a single site in the row MPO."""
-    row_list = list(row_mpo)
-    row_list[col] = jnp.transpose(tensor[phys_index], (2, 3, 0, 1))
-    return tuple(row_list)
-
-
 def _plaquette_sweep_row_pair(
     key: jax.Array,
     tensors: list[list[jax.Array]],
@@ -676,10 +666,9 @@ def _plaquette_sweep_row_pair(
             right_envs[c + 1],
             optimize=[(1, 5), (3, 6), (1, 2), (1, 2), (0, 2), (2, 4), (1, 3), (0, 2), (0, 1)],
         )
-        ratio = _metropolis_ratio(jnp.abs(amp_cur) ** 2, jnp.abs(amp_prop) ** 2)
-
-        key, accept_key = jax.random.split(key)
-        accept = jax.random.uniform(accept_key) < jnp.minimum(1.0, ratio)
+        key, accept = _metropolis_hastings_accept(
+            key, jnp.abs(amp_cur) ** 2, jnp.abs(amp_prop) ** 2
+        )
 
         # Update MPOs for accepted proposals
         row_mpo0_list = list(row_mpo0)
@@ -766,13 +755,16 @@ def _horizontal_link_sweep_row(
             top_env[c + 1], mpo1, bottom_env[c + 1], right_envs[c + 1],
             optimize=[(0, 1), (0, 6), (0, 5), (0, 3), (1, 2), (1, 2), (0, 1)],
         )
-        ratio = _metropolis_ratio(jnp.abs(amp_cur) ** 2, jnp.abs(amp_prop) ** 2)
-        prop_ratio = (charge_deg[q_left_new] * charge_deg[q_right_new]) / (
-            charge_deg[q_left] * charge_deg[q_right]
+        proposal_ratio = _hastings_ratio(
+            forward_prob=1.0 / (charge_deg[q_left_new] * charge_deg[q_right_new]),
+            backward_prob=1.0 / (charge_deg[q_left] * charge_deg[q_right]),
         )
-        ratio = ratio * prop_ratio
-        key, accept_key = jax.random.split(key)
-        accept = jax.random.uniform(accept_key) < jnp.minimum(1.0, ratio)
+        key, accept = _metropolis_hastings_accept(
+            key,
+            jnp.abs(amp_cur) ** 2,
+            jnp.abs(amp_prop) ** 2,
+            proposal_ratio=proposal_ratio,
+        )
 
         # Update row_mpo, h_links, sites based on accept
         row_mpo_list = list(row_mpo)
@@ -850,13 +842,16 @@ def _vertical_link_sweep_row_pair(
             left_env, top_env[c], mpo0_prop, mpo1_prop, bottom_env[c], right_envs[c],
             optimize=[(0, 1), (0, 4), (1, 2), (1, 2), (0, 1)],
         )
-        ratio = _metropolis_ratio(jnp.abs(amp_cur) ** 2, jnp.abs(amp_prop) ** 2)
-        prop_ratio = (charge_deg[q_top_new] * charge_deg[q_bottom_new]) / (
-            charge_deg[q_top] * charge_deg[q_bottom]
+        proposal_ratio = _hastings_ratio(
+            forward_prob=1.0 / (charge_deg[q_top_new] * charge_deg[q_bottom_new]),
+            backward_prob=1.0 / (charge_deg[q_top] * charge_deg[q_bottom]),
         )
-        ratio = ratio * prop_ratio
-        key, accept_key = jax.random.split(key)
-        accept = jax.random.uniform(accept_key) < jnp.minimum(1.0, ratio)
+        key, accept = _metropolis_hastings_accept(
+            key,
+            jnp.abs(amp_cur) ** 2,
+            jnp.abs(amp_prop) ** 2,
+            proposal_ratio=proposal_ratio,
+        )
 
         # Update row_mpo, v_links, sites based on accept
         row_mpo0_list = list(row_mpo0)

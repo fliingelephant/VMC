@@ -16,7 +16,6 @@ __all__ = [
     "_forward_with_cache",
     "_apply_mpo_from_below",
     "_compute_right_envs",
-    "_metropolis_ratio",
 ]
 
 def _build_row_mpo(tensors, row_indices, row, n_cols):
@@ -84,11 +83,3 @@ def _compute_right_envs(
             optimize=[(0, 3), (0, 2), (0, 1)],
         )
     return right_envs
-
-def _metropolis_ratio(prob_cur: jax.Array, prob_flip: jax.Array) -> jax.Array:
-    """Compute Metropolis acceptance ratio with proper handling of zero probabilities."""
-    return jnp.where(
-        prob_cur > 0.0,
-        prob_flip / prob_cur,
-        jnp.where(prob_flip > 0.0, jnp.inf, 0.0),
-    )

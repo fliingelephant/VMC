@@ -6,7 +6,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 
-from vmc.operators.local_terms import LocalHamiltonian
+from vmc.operators.local_terms import LocalHamiltonian, bucket_terms
 from vmc.peps.blockade import model as blockade_model
 from vmc.peps.blockade.model import BlockadePEPS
 from vmc.peps.standard.kernels import Cache, Context, LocalEstimates, build_mc_kernels
@@ -26,6 +26,7 @@ def build_mc_kernels(
     n_rows, n_cols = shape
     config = model.config
     strategy = model.strategy
+    diagonal_terms, one_site_terms, _, _, _ = bucket_terms(operator.terms, shape)
 
     def init_cache(tensors: Any, config_states: jax.Array) -> Cache:
         config_states_flat = config_states.reshape(config_states.shape[0], n_rows * n_cols)
@@ -74,39 +75,32 @@ def build_mc_kernels(
             config,
             strategy,
             context.top_envs,
+            diagonal_terms=diagonal_terms,
+            one_site_terms=one_site_terms,
         )
         indices = config_state_next.reshape(shape)
-        if full_gradient:
-            grad_parts = []
-            for row in range(n_rows):
-                for col in range(n_cols):
-                    k_l = indices[row, col - 1] if col > 0 else 0
-                    k_u = indices[row - 1, col] if row > 0 else 0
-                    cfg_idx_n0 = k_l * (2 if row > 0 else 1) + k_u
-                    cfg_idx = jnp.where(indices[row, col] == 0, cfg_idx_n0, 0)
+        grad_parts = []
+        p_parts = []
+        for row in range(n_rows):
+            for col in range(n_cols):
+                k_l = indices[row, col - 1] if col > 0 else 0
+                k_u = indices[row - 1, col] if row > 0 else 0
+                cfg_idx_n0 = k_l * (2 if row > 0 else 1) + k_u
+                cfg_idx = jnp.where(indices[row, col] == 0, cfg_idx_n0, 0)
+                env_grad = env_grads[row][col]
+                if full_gradient:
                     grad_full = jnp.zeros_like(jnp.asarray(tensors[row][col]))
-                    grad_full = grad_full.at[indices[row, col], cfg_idx].set(
-                        env_grads[row][col]
+                    grad_parts.append(
+                        grad_full.at[indices[row, col], cfg_idx].set(env_grad).reshape(-1)
                     )
-                    grad_parts.append(grad_full.reshape(-1))
-            local_log_derivatives = jnp.concatenate(grad_parts) / context.amp
-            active_slice_indices = None
-        else:
-            grad_parts = []
-            p_parts = []
-            for row in range(n_rows):
-                for col in range(n_cols):
-                    grad_parts.append(env_grads[row][col].reshape(-1))
-                    combined_idx = (
-                        indices[row, col] * jnp.asarray(tensors[row][col]).shape[1]
-                        + (indices[row, col - 1] if col > 0 else 0) * (2 if row > 0 else 1)
-                        + (indices[row - 1, col] if row > 0 else 0)
-                    )
+                else:
+                    grad_parts.append(env_grad.reshape(-1))
+                    combined_idx = indices[row, col] * jnp.asarray(tensors[row][col]).shape[1] + cfg_idx
                     p_parts.append(
-                        jnp.full((env_grads[row][col].size,), combined_idx, dtype=jnp.int16)
+                        jnp.full((env_grad.size,), combined_idx, dtype=jnp.int16)
                     )
-            local_log_derivatives = jnp.concatenate(grad_parts) / context.amp
-            active_slice_indices = jnp.concatenate(p_parts)
+        local_log_derivatives = jnp.concatenate(grad_parts) / context.amp
+        active_slice_indices = None if full_gradient else jnp.concatenate(p_parts)
         return Cache(bottom_envs=tuple(envs_next)), LocalEstimates(
             local_log_derivatives=local_log_derivatives,
             local_estimate=local_energy,

@@ -15,6 +15,7 @@ __all__ = [
     "occupancy_to_spin",
     "random_tensor",
     "spin_to_occupancy",
+    "_metropolis_hastings_accept",
     "_tree_add_scaled",
 ]
 
@@ -63,3 +64,32 @@ def _tree_add_scaled(base, delta, scale: float):
         base,
         delta,
     )
+
+def _metropolis_ratio(current_prob: jax.Array, proposed_prob: jax.Array) -> jax.Array:
+    """Return Metropolis ratio p(x') / p(x) with proper handling of zero probabilities."""
+    return jnp.where(
+        current_prob > 0.0,
+        proposed_prob / current_prob,
+        jnp.where(proposed_prob > 0.0, jnp.inf, 0.0),
+    )
+
+def _hastings_ratio(
+    forward_prob: jax.Array,
+    backward_prob: jax.Array,
+) -> jax.Array:
+    """Return q(x|x') / q(x'|x) with proper handling of zero probabilities."""
+    return jnp.where(
+        forward_prob > 0.0,
+        backward_prob / forward_prob,
+        jnp.where(backward_prob > 0.0, jnp.inf, 0.0),
+    )
+
+def _metropolis_hastings_accept(
+    key: jax.Array,
+    current_prob: jax.Array,
+    proposed_prob: jax.Array,
+    *,
+    proposal_ratio: jax.Array | float = 1.0,  # q(x|x') / q(x'|x)
+) -> tuple[jax.Array, jax.Array]:
+    key, accept_key = jax.random.split(key)
+    return key, jax.random.uniform(accept_key) < jnp.minimum(1.0, _metropolis_ratio(current_prob, proposed_prob) * proposal_ratio)

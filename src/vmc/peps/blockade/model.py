@@ -31,12 +31,11 @@ from vmc.peps.common.contraction import (
     _apply_mpo_from_below,
     _compute_right_envs,
     _contract_bottom,
-    _metropolis_ratio,
 )
 from vmc.peps.common.energy import _compute_right_envs_2row, _compute_single_gradient
 from vmc.peps.common.strategy import ContractionStrategy, Variational
 from vmc.operators.local_terms import DiagonalTerm, OneSiteTerm, bucket_terms
-from vmc.utils.utils import random_tensor
+from vmc.utils.utils import _metropolis_hastings_accept, random_tensor
 
 
 @dataclass(frozen=True)
@@ -179,6 +178,56 @@ def _assemble_site(
     return tensor * mask_r[None, None, None, None, :]
 
 
+def _assemble_mpo_site(
+    tensors: list[list[jax.Array]],
+    peps_config: BlockadePEPSConfig,
+    config: jax.Array,
+    r: int,
+    c: int,
+    *,
+    n: jax.Array | None = None,
+    k_l: jax.Array | None = None,
+    k_u: jax.Array | None = None,
+) -> jax.Array:
+    """Assemble one site and convert selected physical component to MPO format."""
+    n_val = config[r, c] if n is None else n
+    if k_l is None:
+        k_l_val = config[r, c - 1] if c > 0 else 0
+    else:
+        k_l_val = k_l
+    if k_u is None:
+        k_u_val = config[r - 1, c] if r > 0 else 0
+    else:
+        k_u_val = k_u
+    return jnp.transpose(
+        _assemble_site(
+            tensors,
+            peps_config,
+            r,
+            c,
+            n_val,
+            k_l_val,
+            k_u_val,
+        )[n_val],
+        (2, 3, 0, 1),
+    )
+
+
+def _flip_allowed(
+    config: jax.Array,
+    n_rows: int,
+    n_cols: int,
+    r: int,
+    c: int,
+    n_flip: jax.Array,
+) -> jax.Array:
+    return jnp.where(
+        n_flip == 1,
+        can_flip_to_one(config, n_rows, n_cols, r, c),
+        jnp.ones((), dtype=jnp.bool_),
+    )
+
+
 # =============================================================================
 # Configuration utilities
 # =============================================================================
@@ -244,17 +293,12 @@ def _build_row_mpo(
     """Build row-MPO for PEPS contraction."""
     n_cols = peps_config.shape[1]
     return tuple(
-        jnp.transpose(
-            _assemble_site(
-                tensors,
-                peps_config,
-                row,
-                c,
-                config[row, c],
-                config[row, c - 1] if c > 0 else 0,
-                config[row - 1, c] if row > 0 else 0,
-            )[config[row, c]],
-            (2, 3, 0, 1),
+        _assemble_mpo_site(
+            tensors,
+            peps_config,
+            config,
+            row,
+            c,
         )
         for c in range(n_cols)
     )
@@ -269,6 +313,9 @@ def estimate(
     peps_config: BlockadePEPSConfig,
     strategy: ContractionStrategy,
     top_envs: list[tuple],
+    *,
+    diagonal_terms: list[DiagonalTerm] | None = None,
+    one_site_terms: list[list[list[OneSiteTerm]]] | None = None,
 ) -> tuple[list[list[jax.Array]], jax.Array, list[tuple]]:
     """Compute environment gradients and local energy for BlockadePEPS.
 
@@ -281,13 +328,11 @@ def estimate(
     phys_dim = peps_config.phys_dim
     bottom_envs_cache = [None] * n_rows
 
-    (
-        diagonal_terms,
-        one_site_terms,
-        horizontal_terms,
-        vertical_terms,
-        plaquette_terms,
-    ) = bucket_terms(operator.terms, peps_config.shape)
+    if diagonal_terms is None or one_site_terms is None:
+        diagonal_terms, one_site_terms, _, _, _ = bucket_terms(
+            operator.terms,
+            peps_config.shape,
+        )
 
     env_grads = [[None for _ in range(n_cols)] for _ in range(n_rows)]
 
@@ -304,20 +349,14 @@ def estimate(
     for row in range(n_rows - 1, -1, -1):
         bottom_envs_cache[row] = bottom_env
         top_env = top_envs[row]
-        eff_row = [
-            _assemble_site(
+        mpo = tuple(
+            _assemble_mpo_site(
                 tensors,
                 peps_config,
+                config,
                 row,
                 c,
-                config[row, c],
-                config[row, c - 1] if c > 0 else 0,
-                config[row - 1, c] if row > 0 else 0,
             )
-            for c in range(n_cols)
-        ]
-        mpo = tuple(
-            jnp.transpose(eff_row[c][config[row, c]], (2, 3, 0, 1))
             for c in range(n_cols)
         )
         right_envs = _compute_right_envs(top_env, mpo, bottom_env, dtype)
@@ -327,20 +366,15 @@ def estimate(
         mpo_next = None
         if row_has_x and row < n_rows - 1:
             bottom_env_pair = bottom_envs_cache[row + 1]
-            eff_row_next = [
-                _assemble_site(
+            mpo_next = tuple(
+                _assemble_mpo_site(
                     tensors,
                     peps_config,
+                    config,
                     row + 1,
                     c,
-                    config[row + 1, c],
-                    config[row + 1, c - 1] if c > 0 else 0,
-                    config[row, c],
+                    k_u=config[row, c],
                 )
-                for c in range(n_cols)
-            ]
-            mpo_next = tuple(
-                jnp.transpose(eff_row_next[c][config[row + 1, c]], (2, 3, 0, 1))
                 for c in range(n_cols)
             )
             right_envs_2row = _compute_right_envs_2row(
@@ -360,11 +394,7 @@ def estimate(
             if site_terms:
                 n_cur = config[row, c]
                 n_flip = 1 - n_cur
-                can_flip = jnp.where(
-                    n_flip == 1,
-                    can_flip_to_one(config, n_rows, n_cols, row, c),
-                    jnp.ones((), dtype=jnp.bool_),
-                )
+                can_flip = _flip_allowed(config, n_rows, n_cols, row, c, n_flip)
                 if row < n_rows - 1:
                     # 2-row contraction needs row+1 tensors (kU depends on flip).
                     if c + 1 < n_cols:
@@ -372,39 +402,29 @@ def estimate(
                         right_env = right_envs_2row[c + 1]
 
                         def _compute_flip(_):
-                            eff0_c_flip = _assemble_site(
+                            mpo0_c_flip = _assemble_mpo_site(
                                 tensors,
                                 peps_config,
+                                config,
                                 row,
                                 c,
-                                n_flip,
-                                config[row, c - 1] if c > 0 else 0,
-                                config[row - 1, c] if row > 0 else 0,
+                                n=n_flip,
                             )
-                            eff1_c_flip = _assemble_site(
+                            mpo1_c_flip = _assemble_mpo_site(
                                 tensors,
                                 peps_config,
+                                config,
                                 row + 1,
                                 c,
-                                config[row + 1, c],
-                                config[row + 1, c - 1] if c > 0 else 0,
-                                n_flip,
+                                k_u=n_flip,
                             )
-                            eff0_c1_flip = _assemble_site(
+                            mpo0_c1_flip = _assemble_mpo_site(
                                 tensors,
                                 peps_config,
+                                config,
                                 row,
                                 c + 1,
-                                config[row, c + 1],
-                                n_flip,
-                                config[row - 1, c + 1] if row > 0 else 0,
-                            )
-                            mpo0_c_flip = jnp.transpose(eff0_c_flip[n_flip], (2, 3, 0, 1))
-                            mpo1_c_flip = jnp.transpose(
-                                eff1_c_flip[config[row + 1, c]], (2, 3, 0, 1)
-                            )
-                            mpo0_c1_flip = jnp.transpose(
-                                eff0_c1_flip[config[row, c + 1]], (2, 3, 0, 1)
+                                k_l=n_flip,
                             )
                             return _contract_2row_2col(
                                 left_env_2row,
@@ -427,36 +447,29 @@ def estimate(
                     else:
                         # Last column: no c+1, use 1-col window in 2-row shape.
                         def _compute_flip(_):
-                            eff0_c_flip = _assemble_site(
+                            mpo0_c_flip = _assemble_mpo_site(
                                 tensors,
                                 peps_config,
+                                config,
                                 row,
                                 c,
-                                n_flip,
-                                config[row, c - 1] if c > 0 else 0,
-                                config[row - 1, c] if row > 0 else 0,
+                                n=n_flip,
                             )
-                            eff1_c_flip = _assemble_site(
+                            mpo1_c_flip = _assemble_mpo_site(
                                 tensors,
                                 peps_config,
+                                config,
                                 row + 1,
                                 c,
-                                config[row + 1, c],
-                                config[row + 1, c - 1] if c > 0 else 0,
-                                n_flip,
+                                k_u=n_flip,
                             )
-                            mpo0_c_flip = jnp.transpose(eff0_c_flip[n_flip], (2, 3, 0, 1))
-                            mpo1_c_flip = jnp.transpose(
-                                eff1_c_flip[config[row + 1, c]], (2, 3, 0, 1)
-                            )
-                            right_env_1col = jnp.ones((1, 1, 1, 1), dtype=dtype)
                             return _contract_2row_1col(
                                 left_env_2row,
                                 top_env[c],
                                 mpo0_c_flip,
                                 mpo1_c_flip,
                                 bottom_env_pair[c],
-                                right_env_1col,
+                                jnp.ones((1, 1, 1, 1), dtype=dtype),
                             )
 
                         amp_flip = jax.lax.cond(
@@ -469,46 +482,33 @@ def estimate(
                     # Last row: 1-row contraction (no row+1).
                     if c + 1 < n_cols:
                         # 2-col window: include c+1 because kL depends on flip.
-                        right_env = (
-                            right_envs[c + 1]
-                            if c + 1 < n_cols - 1
-                            else jnp.ones((1, 1, 1), dtype=dtype)
-                        )
+                        right_env = right_envs[c + 1]
 
                         def _compute_flip(_):
-                            eff_c_flip = _assemble_site(
+                            mpo_c_flip = _assemble_mpo_site(
                                 tensors,
                                 peps_config,
+                                config,
                                 row,
                                 c,
-                                n_flip,
-                                config[row, c - 1] if c > 0 else 0,
-                                config[row - 1, c] if row > 0 else 0,
+                                n=n_flip,
                             )
-                            eff_c1_flip = _assemble_site(
+                            mpo_c1_flip = _assemble_mpo_site(
                                 tensors,
                                 peps_config,
+                                config,
                                 row,
                                 c + 1,
-                                config[row, c + 1],
-                                n_flip,
-                                config[row - 1, c + 1] if row > 0 else 0,
+                                k_l=n_flip,
                             )
-                            mpo_c_flip = jnp.transpose(eff_c_flip[n_flip], (2, 3, 0, 1))
-                            mpo_c1_flip = jnp.transpose(
-                                eff_c1_flip[config[row, c + 1]], (2, 3, 0, 1)
-                            )
-                            return jnp.einsum(
-                                "ace,aub,cduv,evf,bpg,dhpq,fqi,ghi->",
+                            return _contract_1row_2col(
                                 left_env,
-                                top_env[c],
+                                top_env,
                                 mpo_c_flip,
-                                bottom_env[c],
-                                top_env[c + 1],
                                 mpo_c1_flip,
-                                bottom_env[c + 1],
+                                bottom_env,
                                 right_env,
-                                optimize=[(0, 1), (0, 4), (0, 3), (0, 2), (2, 3), (0, 2), (0, 1)],
+                                c,
                             )
 
                         amp_flip = jax.lax.cond(
@@ -520,25 +520,20 @@ def estimate(
                     else:
                         # Last column: 1-col window in 1-row shape.
                         def _compute_flip(_):
-                            eff_c_flip = _assemble_site(
+                            mpo_c_flip = _assemble_mpo_site(
                                 tensors,
                                 peps_config,
+                                config,
                                 row,
                                 c,
-                                n_flip,
-                                config[row, c - 1] if c > 0 else 0,
-                                config[row - 1, c] if row > 0 else 0,
+                                n=n_flip,
                             )
-                            mpo_c_flip = jnp.transpose(eff_c_flip[n_flip], (2, 3, 0, 1))
-                            right_env = jnp.ones((1, 1, 1), dtype=dtype)
-                            return jnp.einsum(
-                                "ace,aub,cduv,evf,bdf->",
+                            return _contract_1row_1col(
                                 left_env,
                                 top_env[c],
                                 mpo_c_flip,
                                 bottom_env[c],
-                                right_env,
-                                optimize=[(0, 1), (1, 2), (1, 2), (0, 1)],
+                                jnp.ones((1, 1, 1), dtype=dtype),
                             )
 
                         amp_flip = jax.lax.cond(
@@ -592,25 +587,37 @@ def transition(
     if n_rows == 1:
         top_envs_cache[0] = top_env
         # Single row: standard 1-row sweep
-        key, config = _sweep_single_row(
-            key, tensors, config, peps_config, 0, top_env, envs[0]
+        row_mpo = _build_row_mpo(tensors, config, peps_config, 0)
+        key, config, row_mpo = _sweep_single_row(
+            key, tensors, config, peps_config, 0, top_env, envs[0], row_mpo
         )
-        mpo = _build_row_mpo(tensors, config, peps_config, 0)
-        top_env = strategy.apply(top_env, mpo)
+        top_env = strategy.apply(top_env, row_mpo)
     else:
         # Multi-row: 2-row sweep over overlapping pairs
         # This sweeps rows 0, 1, ..., n_rows-2 (each row r is swept in pair (r, r+1))
+        row_mpo0 = _build_row_mpo(tensors, config, peps_config, 0)
+        row_mpo1 = _build_row_mpo(tensors, config, peps_config, 1)
         for r in range(n_rows - 1):
             top_envs_cache[r] = top_env
             bottom_env_pair = envs[r + 1] if r + 1 < n_rows else tuple(
                 jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols)
             )
-            key, config = _sweep_row_pair(
-                key, tensors, config, peps_config, r, top_env, bottom_env_pair, strategy
+            key, config, row_mpo0, row_mpo1 = _sweep_row_pair(
+                key,
+                tensors,
+                config,
+                peps_config,
+                r,
+                top_env,
+                bottom_env_pair,
+                row_mpo0,
+                row_mpo1,
             )
             # Update top_env with row r
-            mpo_r = _build_row_mpo(tensors, config, peps_config, r)
-            top_env = strategy.apply(top_env, mpo_r)
+            top_env = strategy.apply(top_env, row_mpo0)
+            if r + 2 < n_rows:
+                row_mpo0 = row_mpo1
+                row_mpo1 = _build_row_mpo(tensors, config, peps_config, r + 2)
 
         # Sweep the last row (n_rows-1) with single-row sweep
         # This row wasn't swept in the pair loop above
@@ -618,13 +625,19 @@ def transition(
         bottom_env_last = tuple(
             jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols)
         )
-        key, config = _sweep_single_row(
-            key, tensors, config, peps_config, n_rows - 1, top_env, bottom_env_last
+        key, config, row_mpo1 = _sweep_single_row(
+            key,
+            tensors,
+            config,
+            peps_config,
+            n_rows - 1,
+            top_env,
+            bottom_env_last,
+            row_mpo1,
         )
 
         # Contract final row to get amplitude
-        mpo_last = _build_row_mpo(tensors, config, peps_config, n_rows - 1)
-        top_env = strategy.apply(top_env, mpo_last)
+        top_env = strategy.apply(top_env, row_mpo1)
 
     amp = _contract_bottom(top_env)
     return BlockadePEPS.flatten_sample(config), key, amp, tuple(top_envs_cache)
@@ -638,7 +651,8 @@ def _sweep_single_row(
     r: int,
     top_env: tuple,
     bottom_env: tuple,
-) -> tuple[jax.Array, jax.Array]:
+    row_mpo: tuple,
+) -> tuple[jax.Array, jax.Array, tuple]:
     """Sweep a single row using 2-column window to handle kL dependency.
 
     Like 2-row sweep uses right_envs[c+2], single-row uses right_envs[c+1]
@@ -647,68 +661,63 @@ def _sweep_single_row(
     n_rows, n_cols = peps_config.shape
     dtype = tensors[0][0].dtype
 
-    mpo = _build_row_mpo(tensors, config, peps_config, r)
-    # right_envs[c] covers columns c+1, c+2, ... So right_envs[c+1] covers c+2 onwards
-    right_envs = _compute_right_envs(top_env, mpo, bottom_env, dtype)
+    right_envs = _compute_right_envs(top_env, row_mpo, bottom_env, dtype)
+    mpo = list(row_mpo)
     left_env = jnp.ones((1, 1, 1), dtype=dtype)
+    if n_cols > 1:
+        amp_cur = _contract_1row_2col(
+            left_env,
+            top_env,
+            mpo[0],
+            mpo[1],
+            bottom_env,
+            right_envs[1],
+            0,
+        )
+    else:
+        amp_cur = _contract_1row_1col(
+            left_env,
+            top_env[0],
+            mpo[0],
+            bottom_env[0],
+            right_envs[0],
+        )
 
     for c in range(n_cols):
         n_cur = config[r, c]
         n_flip = 1 - n_cur
-
-        # Check blockade constraint for flip to 1
-        can_flip = jnp.where(
-            n_flip == 1,
-            can_flip_to_one(config, n_rows, n_cols, r, c),
-            jnp.ones((), dtype=jnp.bool_),
-        )
-
+        can_flip = _flip_allowed(config, n_rows, n_cols, r, c, n_flip)
         mpo_c = mpo[c]
 
         if c + 1 < n_cols:
-            # 2-column window: explicitly include c and c+1
-            # right_envs[c+1] covers columns c+2 onwards (doesn't include c+1)
             mpo_c1 = mpo[c + 1]
-            right_env = right_envs[c + 1] if c + 1 < n_cols - 1 else jnp.ones((1, 1, 1), dtype=dtype)
-
-            # Current amplitude
-            # Indices: left_env(ace), top[c](aub), mpo_c(cduv), bottom[c](evf),
-            #          top[c+1](bpg), mpo_c1(dhpq), bottom[c+1](fqi), right_env(ghi)
-            amp_cur = jnp.einsum(
-                "ace,aub,cduv,evf,bpg,dhpq,fqi,ghi->",
-                left_env, top_env[c], mpo_c, bottom_env[c],
-                top_env[c + 1], mpo_c1, bottom_env[c + 1], right_env,
-                optimize=[(0, 1), (0, 4), (0, 3), (0, 2), (2, 3), (0, 2), (0, 1)],
-            )
+            right_env = right_envs[c + 1]
 
             def _compute_flip(_):
-                eff_flip = _assemble_site(
+                mpo_c_flip = _assemble_mpo_site(
                     tensors,
                     peps_config,
+                    config,
                     r,
                     c,
-                    n_flip,
-                    config[r, c - 1] if c > 0 else 0,
-                    config[r - 1, c] if r > 0 else 0,
+                    n=n_flip,
                 )
-                eff_c1_flip = _assemble_site(
+                mpo_c1_flip = _assemble_mpo_site(
                     tensors,
                     peps_config,
+                    config,
                     r,
                     c + 1,
-                    config[r, c + 1],
-                    n_flip,
-                    config[r - 1, c + 1] if r > 0 else 0,
+                    k_l=n_flip,
                 )
-                mpo_c_flip = jnp.transpose(eff_flip[n_flip], (2, 3, 0, 1))
-                mpo_c1_flip = jnp.transpose(
-                    eff_c1_flip[config[r, c + 1]], (2, 3, 0, 1)
-                )
-                amp_flip = jnp.einsum(
-                    "ace,aub,cduv,evf,bpg,dhpq,fqi,ghi->",
-                    left_env, top_env[c], mpo_c_flip, bottom_env[c],
-                    top_env[c + 1], mpo_c1_flip, bottom_env[c + 1], right_env,
-                    optimize=[(0, 1), (0, 4), (0, 3), (0, 2), (2, 3), (0, 2), (0, 1)],
+                amp_flip = _contract_1row_2col(
+                    left_env,
+                    top_env,
+                    mpo_c_flip,
+                    mpo_c1_flip,
+                    bottom_env,
+                    right_env,
+                    c,
                 )
                 return amp_flip, mpo_c_flip, mpo_c1_flip
 
@@ -719,29 +728,23 @@ def _sweep_single_row(
                 can_flip, _compute_flip, _no_flip, operand=None
             )
         else:
-            # Last column: single column window (no c+1 to worry about)
-            right_env = jnp.ones((1, 1, 1), dtype=dtype)
-            amp_cur = jnp.einsum(
-                "ace,aub,cduv,evf,bdf->",
-                left_env, top_env[c], mpo_c, bottom_env[c], right_env,
-                optimize=[(0, 1), (1, 2), (1, 2), (0, 1)],
-            )
+            right_env = right_envs[c]
 
             def _compute_flip(_):
-                eff_flip = _assemble_site(
+                mpo_c_flip = _assemble_mpo_site(
                     tensors,
                     peps_config,
+                    config,
                     r,
                     c,
-                    n_flip,
-                    config[r, c - 1] if c > 0 else 0,
-                    config[r - 1, c] if r > 0 else 0,
+                    n=n_flip,
                 )
-                mpo_c_flip = jnp.transpose(eff_flip[n_flip], (2, 3, 0, 1))
-                amp_flip = jnp.einsum(
-                    "ace,aub,cduv,evf,bdf->",
-                    left_env, top_env[c], mpo_c_flip, bottom_env[c], right_env,
-                    optimize=[(0, 1), (1, 2), (1, 2), (0, 1)],
+                amp_flip = _contract_1row_1col(
+                    left_env,
+                    top_env[c],
+                    mpo_c_flip,
+                    bottom_env[c],
+                    right_env,
                 )
                 return amp_flip, mpo_c_flip
 
@@ -752,30 +755,24 @@ def _sweep_single_row(
                 can_flip, _compute_flip, _no_flip, operand=None
             )
 
-        # Metropolis
-        ratio = _metropolis_ratio(jnp.abs(amp_cur) ** 2, jnp.abs(amp_flip) ** 2)
-        key, accept_key = jax.random.split(key)
-        accept = jax.random.uniform(accept_key) < jnp.minimum(1.0, ratio)
+        key, accept = _metropolis_hastings_accept(key, jnp.abs(amp_cur) ** 2, jnp.abs(amp_flip) ** 2)
 
         config = config.at[r, c].set(jnp.where(accept, n_flip, n_cur))
-
-        # Update mpo[c] for left_env update
-        mpo_c_sel = jnp.where(accept, mpo_c_flip, mpo_c)
-        mpo = tuple(mpo_c_sel if i == c else mpo[i] for i in range(n_cols))
-
-        # Also update mpo[c+1] if we have a next column
+        amp_cur = jnp.where(accept, amp_flip, amp_cur)
+        mpo[c] = jnp.where(accept, mpo_c_flip, mpo_c)
         if c + 1 < n_cols:
-            mpo_c1_sel = jnp.where(accept, mpo_c1_flip, mpo_c1)
-            mpo = tuple(mpo_c1_sel if i == c + 1 else mpo[i] for i in range(n_cols))
+            mpo[c + 1] = jnp.where(accept, mpo_c1_flip, mpo_c1)
 
-        # Update left_env
         left_env = jnp.einsum(
             "ace,aub,cduv,evf->bdf",
-            left_env, top_env[c], mpo[c], bottom_env[c],
+            left_env,
+            top_env[c],
+            mpo[c],
+            bottom_env[c],
             optimize=[(0, 1), (0, 2), (0, 1)],
         )
 
-    return key, config
+    return key, config, tuple(mpo)
 
 
 def _sweep_row_pair(
@@ -786,8 +783,9 @@ def _sweep_row_pair(
     r: int,
     top_env: tuple,
     bottom_env: tuple,
-    strategy: ContractionStrategy,
-) -> tuple[jax.Array, jax.Array]:
+    row_mpo0: tuple,
+    row_mpo1: tuple,
+) -> tuple[jax.Array, jax.Array, tuple, tuple]:
     """Sweep row pair (r, r+1) using 2-column explicit window.
 
     Key insight: just track configuration n and assemble tensors on-demand.
@@ -796,159 +794,191 @@ def _sweep_row_pair(
     n_rows, n_cols = peps_config.shape
     dtype = tensors[0][0].dtype
 
-    # Build initial row MPOs
-    mpo0 = _build_row_mpo(tensors, config, peps_config, r)
-    mpo1 = _build_row_mpo(tensors, config, peps_config, r + 1)
-
-    # Compute 2-row right envs ONCE at start (valid throughout sweep)
-    right_envs = _compute_right_envs_2row(top_env, mpo0, mpo1, bottom_env, dtype)
+    mpo0 = list(row_mpo0)
+    mpo1 = list(row_mpo1)
+    right_envs = _compute_right_envs_2row(
+        top_env,
+        tuple(mpo0),
+        tuple(mpo1),
+        bottom_env,
+        dtype,
+    )
     left_env = jnp.ones((1, 1, 1, 1), dtype=dtype)
+    if n_cols > 1:
+        amp_cur = _contract_2row_2col(
+            left_env,
+            top_env,
+            mpo0[0],
+            mpo1[0],
+            mpo0[1],
+            mpo1[1],
+            bottom_env,
+            right_envs[1],
+            0,
+        )
+    else:
+        amp_cur = _contract_2row_1col(
+            left_env,
+            top_env[0],
+            mpo0[0],
+            mpo1[0],
+            bottom_env[0],
+            right_envs[0],
+        )
 
     for c in range(n_cols):
         n_cur = config[r, c]
         n_flip = 1 - n_cur
-
-        # Check blockade constraint
-        can_flip = jnp.where(
-            n_flip == 1,
-            can_flip_to_one(config, n_rows, n_cols, r, c),
-            jnp.ones((), dtype=jnp.bool_),
-        )
-
-        # Assemble current window tensors (on-demand from config)
+        can_flip = _flip_allowed(config, n_rows, n_cols, r, c, n_flip)
         mpo0_c = mpo0[c]
         mpo1_c = mpo1[c]
 
         if c + 1 < n_cols:
-            # 2-column window
             mpo0_c1 = mpo0[c + 1]
             mpo1_c1 = mpo1[c + 1]
 
-            # Current amplitude
-            amp_cur = _contract_2row_2col(
-                left_env, top_env, mpo0_c, mpo1_c, mpo0_c1, mpo1_c1,
-                bottom_env, right_envs[c + 1], c
-            )
-
             def _compute_flip(_):
-                eff0_c_flip = _assemble_site(
+                mpo0_c_flip = _assemble_mpo_site(
                     tensors,
                     peps_config,
+                    config,
                     r,
                     c,
-                    n_flip,
-                    config[r, c - 1] if c > 0 else 0,
-                    config[r - 1, c] if r > 0 else 0,
+                    n=n_flip,
                 )
-                eff1_c_flip = _assemble_site(
+                mpo1_c_flip = _assemble_mpo_site(
                     tensors,
                     peps_config,
+                    config,
                     r + 1,
                     c,
-                    config[r + 1, c],
-                    config[r + 1, c - 1] if c > 0 else 0,
-                    n_flip,
+                    k_u=n_flip,
                 )
-                eff0_c1_flip = _assemble_site(
+                mpo0_c1_flip = _assemble_mpo_site(
                     tensors,
                     peps_config,
+                    config,
                     r,
                     c + 1,
-                    config[r, c + 1],
-                    n_flip,
-                    config[r - 1, c + 1] if r > 0 else 0,
-                )
-                mpo0_c_flip = jnp.transpose(eff0_c_flip[n_flip], (2, 3, 0, 1))
-                mpo1_c_flip = jnp.transpose(
-                    eff1_c_flip[config[r + 1, c]], (2, 3, 0, 1)
-                )
-                mpo0_c1_flip = jnp.transpose(
-                    eff0_c1_flip[config[r, c + 1]], (2, 3, 0, 1)
+                    k_l=n_flip,
                 )
                 amp_flip = _contract_2row_2col(
-                    left_env, top_env, mpo0_c_flip, mpo1_c_flip, mpo0_c1_flip, mpo1_c1,
-                    bottom_env, right_envs[c + 1], c
+                    left_env,
+                    top_env,
+                    mpo0_c_flip,
+                    mpo1_c_flip,
+                    mpo0_c1_flip,
+                    mpo1_c1,
+                    bottom_env,
+                    right_envs[c + 1],
+                    c,
                 )
                 return amp_flip, mpo0_c_flip, mpo1_c_flip, mpo0_c1_flip
 
             def _no_flip(_):
-                amp_zero = jnp.zeros((), dtype=amp_cur.dtype)
-                return amp_zero, mpo0_c, mpo1_c, mpo0_c1
+                return jnp.zeros((), dtype=amp_cur.dtype), mpo0_c, mpo1_c, mpo0_c1
 
             amp_flip, mpo0_c_flip, mpo1_c_flip, mpo0_c1_flip = jax.lax.cond(
                 can_flip, _compute_flip, _no_flip, operand=None
             )
         else:
-            # Last column: 1-column window in 2-row context
-            right_env_1col = jnp.ones((1, 1, 1, 1), dtype=dtype)
-            amp_cur = _contract_2row_1col(
-                left_env, top_env[c], mpo0_c, mpo1_c, bottom_env[c], right_env_1col
-            )
-
             def _compute_flip(_):
-                eff0_c_flip = _assemble_site(
+                mpo0_c_flip = _assemble_mpo_site(
                     tensors,
                     peps_config,
+                    config,
                     r,
                     c,
-                    n_flip,
-                    config[r, c - 1] if c > 0 else 0,
-                    config[r - 1, c] if r > 0 else 0,
+                    n=n_flip,
                 )
-                eff1_c_flip = _assemble_site(
+                mpo1_c_flip = _assemble_mpo_site(
                     tensors,
                     peps_config,
+                    config,
                     r + 1,
                     c,
-                    config[r + 1, c],
-                    config[r + 1, c - 1] if c > 0 else 0,
-                    n_flip,
-                )
-                mpo0_c_flip = jnp.transpose(eff0_c_flip[n_flip], (2, 3, 0, 1))
-                mpo1_c_flip = jnp.transpose(
-                    eff1_c_flip[config[r + 1, c]], (2, 3, 0, 1)
+                    k_u=n_flip,
                 )
                 amp_flip = _contract_2row_1col(
-                    left_env, top_env[c], mpo0_c_flip, mpo1_c_flip, bottom_env[c], right_env_1col
+                    left_env,
+                    top_env[c],
+                    mpo0_c_flip,
+                    mpo1_c_flip,
+                    bottom_env[c],
+                    right_envs[c],
                 )
                 return amp_flip, mpo0_c_flip, mpo1_c_flip
 
             def _no_flip(_):
-                amp_zero = jnp.zeros((), dtype=amp_cur.dtype)
-                return amp_zero, mpo0_c, mpo1_c
+                return jnp.zeros((), dtype=amp_cur.dtype), mpo0_c, mpo1_c
 
             amp_flip, mpo0_c_flip, mpo1_c_flip = jax.lax.cond(
                 can_flip, _compute_flip, _no_flip, operand=None
             )
 
-        # Metropolis
-        ratio = _metropolis_ratio(jnp.abs(amp_cur) ** 2, jnp.abs(amp_flip) ** 2)
-        key, accept_key = jax.random.split(key)
-        accept = jax.random.uniform(accept_key) < jnp.minimum(1.0, ratio)
+        key, accept = _metropolis_hastings_accept(key, jnp.abs(amp_cur) ** 2, jnp.abs(amp_flip) ** 2)
 
-        # Update config and MPOs
         config = config.at[r, c].set(jnp.where(accept, n_flip, n_cur))
-
-        mpo0_c_new = jnp.where(accept, mpo0_c_flip, mpo0_c)
-        mpo1_c_new = jnp.where(accept, mpo1_c_flip, mpo1_c)
-
-        # Update mpo0 and mpo1 lists
-        mpo0 = tuple(mpo0_c_new if i == c else mpo0[i] for i in range(n_cols))
-        mpo1 = tuple(mpo1_c_new if i == c else mpo1[i] for i in range(n_cols))
-
-        # Also update c+1 MPOs if accept (kL changed)
+        amp_cur = jnp.where(accept, amp_flip, amp_cur)
+        mpo0[c] = jnp.where(accept, mpo0_c_flip, mpo0_c)
+        mpo1[c] = jnp.where(accept, mpo1_c_flip, mpo1_c)
         if c + 1 < n_cols:
-            mpo0_c1_new = jnp.where(accept, mpo0_c1_flip, mpo0_c1)
-            mpo0 = tuple(mpo0_c1_new if i == c + 1 else mpo0[i] for i in range(n_cols))
+            mpo0[c + 1] = jnp.where(accept, mpo0_c1_flip, mpo0_c1)
 
-        # Update left_env (only includes column c)
         left_env = jnp.einsum(
             "alxe,aub,lruv,xyvw,ewf->bryf",
-            left_env, top_env[c], mpo0[c], mpo1[c], bottom_env[c],
+            left_env,
+            top_env[c],
+            mpo0[c],
+            mpo1[c],
+            bottom_env[c],
             optimize=[(0, 1), (0, 3), (0, 2), (0, 1)],
         )
 
-    return key, config
+    return key, config, tuple(mpo0), tuple(mpo1)
+
+
+def _contract_1row_2col(
+    left_env: jax.Array,
+    top_env: tuple,
+    mpo_c: jax.Array,
+    mpo_c1: jax.Array,
+    bottom_env: tuple,
+    right_env: jax.Array,
+    c: int,
+) -> jax.Array:
+    """Contract 1-row, 2-column window for amplitude."""
+    return jnp.einsum(
+        "ace,aub,cduv,evf,bpg,dhpq,fqi,ghi->",
+        left_env,
+        top_env[c],
+        mpo_c,
+        bottom_env[c],
+        top_env[c + 1],
+        mpo_c1,
+        bottom_env[c + 1],
+        right_env,
+        optimize=[(0, 1), (0, 4), (0, 3), (0, 2), (2, 3), (0, 2), (0, 1)],
+    )
+
+
+def _contract_1row_1col(
+    left_env: jax.Array,
+    top: jax.Array,
+    mpo: jax.Array,
+    bottom: jax.Array,
+    right_env: jax.Array,
+) -> jax.Array:
+    """Contract 1-row, 1-column window for amplitude."""
+    return jnp.einsum(
+        "ace,aub,cduv,evf,bdf->",
+        left_env,
+        top,
+        mpo,
+        bottom,
+        right_env,
+        optimize=[(0, 1), (1, 2), (1, 2), (0, 1)],
+    )
 
 
 def _contract_2row_2col(

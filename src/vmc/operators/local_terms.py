@@ -3,9 +3,16 @@ from __future__ import annotations
 
 import abc
 from dataclasses import dataclass
+from typing import TypeAlias
 
 import jax
 import jax.numpy as jnp
+
+IndexedDiagonalTerm: TypeAlias = tuple[int, "DiagonalTerm"]
+IndexedOneSiteTerm: TypeAlias = tuple[int, "OneSiteTerm"]
+IndexedHorizontalTwoSiteTerm: TypeAlias = tuple[int, "HorizontalTwoSiteTerm"]
+IndexedVerticalTwoSiteTerm: TypeAlias = tuple[int, "VerticalTwoSiteTerm"]
+IndexedPlaquetteTerm: TypeAlias = tuple[int, "PlaquetteTerm"]
 
 __all__ = [
     "LocalTerm",
@@ -14,6 +21,7 @@ __all__ = [
     "HorizontalTwoSiteTerm",
     "VerticalTwoSiteTerm",
     "PlaquetteTerm",
+    "BucketedTerms",
     "LocalHamiltonian",
     "bucket_terms",
 ]
@@ -162,16 +170,27 @@ class LocalHamiltonian:
         return cls(shape=shape, terms=terms)
 
 
+@dataclass(frozen=True)
+class BucketedTerms:
+    """Indexed, shape-grouped local terms.
+
+    Each entry stores ``(term_idx, term)`` where ``term_idx`` is the index in
+    the original ``LocalHamiltonian.terms`` tuple. This provides a stable global
+    indexing that remains valid after bucketing.
+    """
+
+    diagonal: tuple[IndexedDiagonalTerm, ...]
+    one_site: tuple[tuple[tuple[IndexedOneSiteTerm, ...], ...], ...]
+    horizontal: tuple[tuple[tuple[IndexedHorizontalTwoSiteTerm, ...], ...], ...]
+    vertical: tuple[tuple[tuple[IndexedVerticalTwoSiteTerm, ...], ...], ...]
+    plaquette: tuple[tuple[tuple[IndexedPlaquetteTerm, ...], ...], ...]
+    n_terms: int
+
+
 def bucket_terms(
     terms: tuple[LocalTerm, ...],
     shape: tuple[int, int],
-) -> tuple[
-    list[DiagonalTerm],
-    list[list[list[OneSiteTerm]]],
-    list[list[list[HorizontalTwoSiteTerm]]],
-    list[list[list[VerticalTwoSiteTerm]]],
-    list[list[list[PlaquetteTerm]]],
-]:
+) -> BucketedTerms:
     """Group terms by type and lattice location."""
     n_rows, n_cols = shape
     one_site_terms = [[[] for _ in range(n_cols)] for _ in range(n_rows)]
@@ -181,20 +200,29 @@ def bucket_terms(
         [[] for _ in range(max(n_cols - 1, 0))]
         for _ in range(max(n_rows - 1, 0))
     ]
-    diagonal_terms: list[DiagonalTerm] = []
+    diagonal_terms: list[IndexedDiagonalTerm] = []
 
-    for term in terms:
+    for term_idx, term in enumerate(terms):
         if isinstance(term, OneSiteTerm):
-            one_site_terms[term.row][term.col].append(term)
+            one_site_terms[term.row][term.col].append((term_idx, term))
         elif isinstance(term, HorizontalTwoSiteTerm):
-            horizontal_terms[term.row][term.col].append(term)
+            horizontal_terms[term.row][term.col].append((term_idx, term))
         elif isinstance(term, VerticalTwoSiteTerm):
-            vertical_terms[term.row][term.col].append(term)
+            vertical_terms[term.row][term.col].append((term_idx, term))
         elif isinstance(term, DiagonalTerm):
-            diagonal_terms.append(term)
+            diagonal_terms.append((term_idx, term))
         elif isinstance(term, PlaquetteTerm):
-            plaquette_terms[term.row][term.col].append(term)
+            plaquette_terms[term.row][term.col].append((term_idx, term))
         else:
             raise TypeError(f"Unsupported term type: {type(term)!r}")
 
-    return diagonal_terms, one_site_terms, horizontal_terms, vertical_terms, plaquette_terms
+    return BucketedTerms(
+        diagonal=tuple(diagonal_terms),
+        one_site=tuple(tuple(tuple(cell) for cell in row) for row in one_site_terms),
+        horizontal=tuple(
+            tuple(tuple(cell) for cell in row) for row in horizontal_terms
+        ),
+        vertical=tuple(tuple(tuple(cell) for cell in row) for row in vertical_terms),
+        plaquette=tuple(tuple(tuple(cell) for cell in row) for row in plaquette_terms),
+        n_terms=len(terms),
+    )

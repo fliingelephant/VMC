@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from vmc.operators.local_terms import (
+    BucketedTerms,
     LocalHamiltonian,
     DiagonalTerm,
     HorizontalTwoSiteTerm,
@@ -11,8 +12,15 @@ from vmc.operators.local_terms import (
     VerticalTwoSiteTerm,
     bucket_terms,
 )
+from vmc.operators.time_dependent import (
+    AffineSchedule,
+    TermCoefficientSchedule,
+    TimeDependentHamiltonian,
+    coeffs_at,
+)
 
 __all__ = [
+    "BucketedTerms",
     "LocalHamiltonian",
     "DiagonalTerm",
     "HorizontalTwoSiteTerm",
@@ -21,4 +29,8 @@ __all__ = [
     "PlaquetteTerm",
     "VerticalTwoSiteTerm",
     "bucket_terms",
+    "TermCoefficientSchedule",
+    "AffineSchedule",
+    "TimeDependentHamiltonian",
+    "coeffs_at",
 ]

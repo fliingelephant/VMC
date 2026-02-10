@@ -7,6 +7,7 @@ import jax
 import jax.numpy as jnp
 
 from vmc.operators.local_terms import LocalHamiltonian, bucket_terms
+from vmc.operators.time_dependent import TimeDependentHamiltonian
 from vmc.peps.blockade import model as blockade_model
 from vmc.peps.blockade.model import BlockadePEPS
 from vmc.peps.standard.kernels import Cache, Context, LocalEstimates, build_mc_kernels
@@ -26,7 +27,7 @@ def build_mc_kernels(
     n_rows, n_cols = shape
     config = model.config
     strategy = model.strategy
-    diagonal_terms, one_site_terms, _, _, _ = bucket_terms(operator.terms, shape)
+    bucketed_terms = bucket_terms(operator.terms, shape)
 
     def init_cache(tensors: Any, config_states: jax.Array) -> Cache:
         config_states_flat = config_states.reshape(config_states.shape[0], n_rows * n_cols)
@@ -75,8 +76,7 @@ def build_mc_kernels(
             config,
             strategy,
             context.top_envs,
-            diagonal_terms=diagonal_terms,
-            one_site_terms=one_site_terms,
+            terms=bucketed_terms,
         )
         indices = config_state_next.reshape(shape)
         grad_parts = []
@@ -109,3 +109,16 @@ def build_mc_kernels(
         )
 
     return init_cache, transition, estimate
+
+
+@build_mc_kernels.dispatch
+def build_mc_kernels(
+    model: BlockadePEPS,
+    operator: TimeDependentHamiltonian,
+    *,
+    full_gradient: bool = False,
+) -> tuple[Any, Any, Any]:
+    del model, operator, full_gradient
+    raise NotImplementedError(
+        "TimeDependentHamiltonian is not implemented for BlockadePEPS."
+    )

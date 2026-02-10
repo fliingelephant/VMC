@@ -32,7 +32,7 @@ from vmc.peps.common.energy import (
     _compute_single_gradient,
 )
 from vmc.peps.gi.compat import gi_apply
-from vmc.operators.local_terms import bucket_terms
+from vmc.operators.local_terms import BucketedTerms, bucket_terms
 from vmc.utils.utils import random_tensor, _hastings_ratio, _metropolis_hastings_accept
 
 
@@ -397,6 +397,8 @@ def estimate(
     config: GIPEPSConfig,
     strategy: Any,
     top_envs: list[tuple],
+    *,
+    terms: BucketedTerms | None = None,
 ) -> tuple[list[list[jax.Array]], jax.Array, list[tuple]]:
     """Compute environment gradients and local energy for GI-PEPS."""
     from vmc.peps.gi.local_terms import LinkDiagonalTerm
@@ -407,19 +409,19 @@ def estimate(
     phys_dim = config.phys_dim
     bottom_envs_cache = [None] * n_rows
 
-    (
-        diagonal_terms,
-        one_site_terms,
-        horizontal_terms,
-        vertical_terms,
-        plaquette_terms,
-    ) = bucket_terms(operator.terms, config.shape)
+    if terms is None:
+        terms = bucket_terms(operator.terms, config.shape)
+    diagonal_terms = terms.diagonal
+    one_site_terms = terms.one_site
+    horizontal_terms = terms.horizontal
+    vertical_terms = terms.vertical
+    plaquette_terms = terms.plaquette
 
     env_grads = [[None for _ in range(n_cols)] for _ in range(n_rows)]
 
     # Compute diagonal energy
     energy = jnp.zeros((), dtype=amp.dtype)
-    for term in diagonal_terms:
+    for _, term in diagonal_terms:
         if isinstance(term, LinkDiagonalTerm):
             energy = energy + term.energy(h_links, v_links)
             continue
@@ -476,7 +478,7 @@ def estimate(
             if site_terms:
                 amps_site = jnp.einsum("pudlr,udlr->p", eff_row[c], env_grad)
                 spin_idx = sites[row, c]
-                for term in site_terms:
+                for _, term in site_terms:
                     energy = energy + jnp.dot(term.op[:, spin_idx], amps_site) / amp
 
             # Horizontal energy
@@ -502,7 +504,7 @@ def estimate(
                     spin1 = sites[row, c + 1]
                     col_idx = spin0 * phys_dim + spin1
                     amps_flat = amps_edge.reshape(-1)
-                    for term in edge_terms:
+                    for _, term in edge_terms:
                         energy = energy + jnp.dot(term.op[:, col_idx], amps_flat) / amp
 
             # Direct einsum for left_env update
@@ -593,10 +595,10 @@ def estimate(
                             optimize=[(1, 5), (3, 6), (1, 2), (1, 2), (0, 2), (2, 4), (1, 3), (0, 2), (0, 1)],
                         )
                         if len(plaquette_here) == 1:
-                            coeff = plaquette_here[0].coeff
+                            coeff = plaquette_here[0][1].coeff
                         else:
                             coeff = jnp.sum(
-                                jnp.asarray([term.coeff for term in plaquette_here])
+                                jnp.asarray([term.coeff for _, term in plaquette_here])
                             )
                         energy = energy + coeff * (amp_plus + amp_minus) / amp
                         # Direct einsum for left_env_2row update

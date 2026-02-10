@@ -8,6 +8,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 
+from vmc.operators.local_terms import BucketedTerms
 from vmc.peps.common.contraction import _apply_mpo_from_below, _build_row_mpo, _compute_right_envs
 from vmc.peps.common.strategy import ContractionStrategy
 
@@ -53,10 +54,11 @@ def _compute_row_pair_vertical_energy(
     tensors_row1: list[jax.Array],
     spins_row0: jax.Array,
     spins_row1: jax.Array,
-    terms_row: list[list],
+    terms_row: tuple[tuple[tuple[tuple[int, Any], ...], ...], ...] | list[list],
     amp: jax.Array,
     phys_dim: int,
     *,
+    coeffs: jax.Array | None = None,
     right_envs_2row: list[jax.Array] | None = None,
 ) -> jax.Array:
     """Compute vertical 2-site energy contributions for a row pair."""
@@ -84,8 +86,9 @@ def _compute_row_pair_vertical_energy(
             spin1 = spins_row1[c]
             col_idx = spin0 * phys_dim + spin1
             amps_flat = amps_edge.reshape(-1)
-            for term in col_terms:
-                energy = energy + jnp.dot(term.op[:, col_idx], amps_flat) / amp
+            for term_idx, term in col_terms:
+                coeff = 1.0 if coeffs is None else coeffs[term_idx]
+                energy = energy + coeff * jnp.dot(term.op[:, col_idx], amps_flat) / amp
         # Direct einsum for left_env_2row update
         left_env = jnp.einsum(
             "alxe,aub,lruv,xyvw,ewf->bryf",
@@ -128,10 +131,8 @@ def _compute_all_env_grads_and_energy(
     strategy: ContractionStrategy,
     top_envs: list[tuple],
     *,
-    diagonal_terms: list,
-    one_site_terms: list[list[list]],
-    horizontal_terms: list[list[list]],
-    vertical_terms: list[list[list]],
+    terms: BucketedTerms,
+    coeffs: jax.Array | None = None,
     collect_grads: bool = True,
 ) -> tuple[list[list[jax.Array]], jax.Array, list[tuple]]:
     """Backward pass: use cached top_envs, build and cache bottom_envs."""
@@ -146,13 +147,18 @@ def _compute_all_env_grads_and_energy(
     )
     bottom_envs_cache = [None] * n_rows
     energy = jnp.zeros((), dtype=amp.dtype)
+    diagonal_terms = terms.diagonal
+    one_site_terms = terms.one_site
+    horizontal_terms = terms.horizontal
+    vertical_terms = terms.vertical
 
     # Diagonal terms
-    for term in diagonal_terms:
+    for term_idx, term in diagonal_terms:
         idx = jnp.asarray(0, dtype=jnp.int32)
         for row, col in term.sites:
             idx = idx * phys_dim + spins[row, col]
-        energy = energy + term.diag[idx]
+        coeff = 1.0 if coeffs is None else coeffs[term_idx]
+        energy = energy + coeff * term.diag[idx]
 
     # Backward pass: bottom → top
     bottom_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
@@ -175,8 +181,12 @@ def _compute_all_env_grads_and_energy(
                 if site_terms:
                     amps_site = jnp.einsum("pudlr,udlr->p", tensors[row][c], env_grad)
                     spin_idx = spins[row, c]
-                    for term in site_terms:
-                        energy = energy + jnp.dot(term.op[:, spin_idx], amps_site) / amp
+                    for term_idx, term in site_terms:
+                        coeff = 1.0 if coeffs is None else coeffs[term_idx]
+                        energy = (
+                            energy
+                            + coeff * jnp.dot(term.op[:, spin_idx], amps_site) / amp
+                        )
             if c < n_cols - 1:
                 edge_terms = horizontal_terms[row][c]
                 if edge_terms:
@@ -196,8 +206,12 @@ def _compute_all_env_grads_and_energy(
                     spin1 = spins[row, c + 1]
                     col_idx = spin0 * phys_dim + spin1
                     amps_flat = amps_edge.reshape(-1)
-                    for term in edge_terms:
-                        energy = energy + jnp.dot(term.op[:, col_idx], amps_flat) / amp
+                    for term_idx, term in edge_terms:
+                        coeff = 1.0 if coeffs is None else coeffs[term_idx]
+                        energy = (
+                            energy
+                            + coeff * jnp.dot(term.op[:, col_idx], amps_flat) / amp
+                        )
             left_env = jnp.einsum(
                 "ace,aub,cduv,evf->bdf",
                 left_env, top_env[c], mpo[c], bottom_env[c],
@@ -217,6 +231,7 @@ def _compute_all_env_grads_and_energy(
                 vertical_terms[row],
                 amp,
                 phys_dim,
+                coeffs=coeffs,
             )
         bottom_env = _apply_mpo_from_below(bottom_env, mpo, strategy)
         next_row_mpo = mpo

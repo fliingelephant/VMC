@@ -34,7 +34,7 @@ from vmc.peps.common.contraction import (
 )
 from vmc.peps.common.energy import _compute_right_envs_2row, _compute_single_gradient
 from vmc.peps.common.strategy import ContractionStrategy, Variational
-from vmc.operators.local_terms import DiagonalTerm, OneSiteTerm, bucket_terms
+from vmc.operators.local_terms import BucketedTerms, bucket_terms
 from vmc.utils.utils import _metropolis_hastings_accept, random_tensor
 
 
@@ -314,8 +314,7 @@ def estimate(
     strategy: ContractionStrategy,
     top_envs: list[tuple],
     *,
-    diagonal_terms: list[DiagonalTerm] | None = None,
-    one_site_terms: list[list[list[OneSiteTerm]]] | None = None,
+    terms: BucketedTerms | None = None,
 ) -> tuple[list[list[jax.Array]], jax.Array, list[tuple]]:
     """Compute environment gradients and local energy for BlockadePEPS.
 
@@ -328,17 +327,16 @@ def estimate(
     phys_dim = peps_config.phys_dim
     bottom_envs_cache = [None] * n_rows
 
-    if diagonal_terms is None or one_site_terms is None:
-        diagonal_terms, one_site_terms, _, _, _ = bucket_terms(
-            operator.terms,
-            peps_config.shape,
-        )
+    if terms is None:
+        terms = bucket_terms(operator.terms, peps_config.shape)
+    diagonal_terms = terms.diagonal
+    one_site_terms = terms.one_site
 
     env_grads = [[None for _ in range(n_cols)] for _ in range(n_rows)]
 
     # 1. Diagonal energy - NO tensor operations!
     energy = jnp.zeros((), dtype=amp.dtype)
-    for term in diagonal_terms:
+    for _, term in diagonal_terms:
         idx = jnp.asarray(0, dtype=jnp.int32)
         for row, col in term.sites:
             idx = idx * phys_dim + config[row, col]
@@ -543,7 +541,7 @@ def estimate(
                             operand=None,
                         )
 
-                for term in site_terms:
+                for _, term in site_terms:
                     energy = energy + term.op[n_flip, n_cur] * amp_flip / amp
 
             # Update left_env

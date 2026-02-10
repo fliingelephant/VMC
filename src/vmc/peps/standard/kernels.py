@@ -17,7 +17,8 @@ from vmc.peps.common.contraction import (
 )
 from vmc.peps.common.energy import _compute_all_env_grads_and_energy
 from vmc.peps.standard.model import PEPS
-from vmc.operators.local_terms import LocalHamiltonian, bucket_terms
+from vmc.operators.local_terms import BucketedTerms, LocalHamiltonian, bucket_terms
+from vmc.operators.time_dependent import TimeDependentHamiltonian
 from vmc.utils.smallo import params_per_site as params_per_site_fn
 from vmc.utils.utils import _metropolis_hastings_accept
 
@@ -33,6 +34,7 @@ class Cache(NamedTuple):
     """Persistent cache across sweeps."""
 
     bottom_envs: Any
+    coeffs: jax.Array | None = None
 
 
 class Context(NamedTuple):
@@ -40,6 +42,7 @@ class Context(NamedTuple):
 
     amp: jax.Array
     top_envs: Any
+    coeffs: jax.Array | None = None
 
 
 class LocalEstimates(NamedTuple):
@@ -88,12 +91,12 @@ def _assemble_log_derivatives(
     return jnp.concatenate(grad_parts) / amp, active_slice_indices
 
 
-@dispatch
-def build_mc_kernels(
+def _build_standard_mc_kernels(
     model: PEPS,
-    operator: LocalHamiltonian,
+    terms: BucketedTerms,
     *,
     full_gradient: bool = False,
+    dynamic_coefficients: bool = False,
 ) -> tuple[Callable, Callable, Callable]:
     """Build PEPS init_cache/transition/estimate kernels.
 
@@ -107,11 +110,14 @@ def build_mc_kernels(
     params_per_site = tuple(int(p) for p in params_per_site_fn(model))
     params_per_site_repeats = jnp.asarray(params_per_site, dtype=jnp.int32)
     total_active_params = int(sum(params_per_site))
-    diagonal_terms, one_site_terms, horizontal_terms, vertical_terms, _ = bucket_terms(
-        operator.terms, shape
-    )
 
-    def init_cache(tensors: Any, samples: jax.Array) -> Cache:
+    def init_cache(
+        tensors: Any,
+        samples: jax.Array,
+        coeffs: jax.Array | None = None,
+    ) -> Cache:
+        samples_flat = samples.reshape(-1, n_sites)
+
         def build_one_bottom_envs(sample: jax.Array):
             sample = sample.reshape(shape)
             dtype = tensors[0][0].dtype
@@ -123,7 +129,16 @@ def build_mc_kernels(
                 env = _apply_mpo_from_below(env, mpo, model.strategy)
             return tuple(envs)
 
-        return Cache(bottom_envs=jax.vmap(build_one_bottom_envs)(samples.reshape(-1, n_sites)))
+        coeffs_batch = None
+        if dynamic_coefficients:
+            coeffs_batch = jnp.broadcast_to(
+                coeffs,
+                (samples_flat.shape[0], coeffs.shape[0]),
+            )
+        return Cache(
+            bottom_envs=jax.vmap(build_one_bottom_envs)(samples_flat),
+            coeffs=coeffs_batch,
+        )
 
     def transition(
         tensors: Any,
@@ -186,10 +201,18 @@ def build_mc_kernels(
                     right_envs[col],
                     optimize=[(0, 1), (1, 2), (1, 2), (0, 1)],
                 )
-                key, accept = _metropolis_hastings_accept(key, jnp.abs(current_amplitude)**2, jnp.abs(proposed_amplitude)**2)
+                key, accept = _metropolis_hastings_accept(
+                    key,
+                    jnp.abs(current_amplitude) ** 2,
+                    jnp.abs(proposed_amplitude) ** 2,
+                )
 
-                sample = sample.at[row, col].set(jnp.where(accept, proposed_idx, current_idx))
-                current_amplitude = jnp.where(accept, proposed_amplitude, current_amplitude)
+                sample = sample.at[row, col].set(
+                    jnp.where(accept, proposed_idx, current_idx)
+                )
+                current_amplitude = jnp.where(
+                    accept, proposed_amplitude, current_amplitude
+                )
                 updated_mpo = jnp.where(accept, proposed_mpo, mpo_row[col])
 
                 updated_row.append(updated_mpo)
@@ -206,7 +229,11 @@ def build_mc_kernels(
             # Update the running top environment
             top_env = model.strategy.apply(top_env, tuple(updated_row))
 
-        return sample.reshape(-1), key, Context(amp=_contract_bottom(top_env), top_envs=tuple(top_envs_cache))
+        return sample.reshape(-1), key, Context(
+            amp=_contract_bottom(top_env),
+            top_envs=tuple(top_envs_cache),
+            coeffs=cache.coeffs,
+        )
 
     def estimate(
         tensors: Any,
@@ -221,10 +248,8 @@ def build_mc_kernels(
             shape,
             model.strategy,
             context.top_envs,
-            diagonal_terms=diagonal_terms,
-            one_site_terms=one_site_terms,
-            horizontal_terms=horizontal_terms,
-            vertical_terms=vertical_terms,
+            terms=terms,
+            coeffs=context.coeffs,
             collect_grads=True,
         )
         local_log_derivatives, active_slice_indices = _assemble_log_derivatives(
@@ -237,7 +262,10 @@ def build_mc_kernels(
             context.amp,
             full_gradient=full_gradient,
         )
-        return Cache(bottom_envs=tuple(bottom_envs_next)), LocalEstimates(
+        return Cache(
+            bottom_envs=tuple(bottom_envs_next),
+            coeffs=context.coeffs,
+        ), LocalEstimates(
             local_log_derivatives=local_log_derivatives,
             local_estimate=local_estimate,
             active_slice_indices=active_slice_indices,
@@ -245,3 +273,44 @@ def build_mc_kernels(
         )
 
     return init_cache, transition, estimate
+
+
+@dispatch
+def build_mc_kernels(
+    model: PEPS,
+    operator: LocalHamiltonian,
+    *,
+    full_gradient: bool = False,
+) -> tuple[Callable, Callable, Callable]:
+    """Build PEPS init_cache/transition/estimate kernels.
+
+    The returned kernels are intentionally not jitted. For tVMC, jit the outer
+    entrypoint that calls the sampler and donate chain state buffers there, e.g.
+    donate `(config_states, chain_keys, cache)`.
+    """
+    return _build_standard_mc_kernels(
+        model,
+        bucket_terms(operator.terms, model.shape),
+        full_gradient=full_gradient,
+        dynamic_coefficients=False,
+    )
+
+
+@build_mc_kernels.dispatch
+def build_mc_kernels(
+    model: PEPS,
+    operator: TimeDependentHamiltonian,
+    *,
+    full_gradient: bool = False,
+) -> tuple[Callable, Callable, Callable]:
+    base = operator.base
+    if not isinstance(base, LocalHamiltonian):
+        raise NotImplementedError(
+            "TimeDependentHamiltonian for standard PEPS requires a LocalHamiltonian base."
+        )
+    return _build_standard_mc_kernels(
+        model,
+        bucket_terms(base.terms, model.shape),
+        full_gradient=full_gradient,
+        dynamic_coefficients=True,
+    )

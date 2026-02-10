@@ -143,13 +143,15 @@ def local_estimate(
     samples = jnp.asarray(samples)
     amps = jnp.asarray(amps)
     shape = model.shape
-    diagonal_terms, one_site_terms, horizontal_terms, vertical_terms, _ = bucket_terms(
-        operator.terms, shape
+    bucketed_terms = bucket_terms(operator.terms, shape)
+    has_diag = bool(bucketed_terms.diagonal)
+    has_one_site = any(term_list for row in bucketed_terms.one_site for term_list in row)
+    has_horizontal = any(
+        term_list for row in bucketed_terms.horizontal for term_list in row
     )
-    has_diag = bool(diagonal_terms)
-    has_one_site = any(term_list for row in one_site_terms for term_list in row)
-    has_horizontal = any(term_list for row in horizontal_terms for term_list in row)
-    has_vertical = any(term_list for row in vertical_terms for term_list in row)
+    has_vertical = any(
+        term_list for row in bucketed_terms.vertical for term_list in row
+    )
     has_offdiag = has_one_site or has_horizontal or has_vertical
 
     if not has_diag and not has_offdiag:
@@ -161,7 +163,7 @@ def local_estimate(
         def diag_only(sample):
             spins = spin_to_occupancy(sample).reshape(shape)
             total = jnp.zeros((), dtype=amps.dtype)
-            for term in diagonal_terms:
+            for _, term in bucketed_terms.diagonal:
                 idx = jnp.asarray(0, dtype=jnp.int32)
                 for row, col in term.sites:
                     idx = idx * phys_dim + spins[row, col]
@@ -183,10 +185,7 @@ def local_estimate(
             shape,
             model.strategy,
             top_envs,
-            diagonal_terms=diagonal_terms,
-            one_site_terms=one_site_terms,
-            horizontal_terms=horizontal_terms,
-            vertical_terms=vertical_terms,
+            terms=bucketed_terms,
             collect_grads=False,
         )
         return energy

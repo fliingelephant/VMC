@@ -6,6 +6,8 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 
+from vmc.operators.local_terms import bucket_terms
+from vmc.operators.time_dependent import TimeDependentHamiltonian
 from vmc.peps.gi import model as gi_model
 from vmc.peps.gi.local_terms import GILocalHamiltonian
 from vmc.peps.gi.model import GIPEPS, _link_value_or_zero, _site_cfg_index
@@ -29,6 +31,7 @@ def build_mc_kernels(
     charge_of_site = jnp.asarray(model.charge_of_site, dtype=jnp.int32)
     charge_to_indices = model.charge_to_indices
     charge_deg = model.charge_deg
+    bucketed_terms = bucket_terms(operator.terms, shape)
 
     def init_cache(tensors: Any, config_states: jax.Array) -> Cache:
         def build_one(config_state: jax.Array):
@@ -80,6 +83,7 @@ def build_mc_kernels(
             config,
             strategy,
             context.top_envs,
+            terms=bucketed_terms,
         )
         sites, h_links, v_links = GIPEPS.unflatten_sample(config_state_next, shape)
         if full_gradient:
@@ -124,3 +128,14 @@ def build_mc_kernels(
         )
 
     return init_cache, transition, estimate
+
+
+@build_mc_kernels.dispatch
+def build_mc_kernels(
+    model: GIPEPS,
+    operator: TimeDependentHamiltonian,
+    *,
+    full_gradient: bool = False,
+) -> tuple[Any, Any, Any]:
+    del model, operator, full_gradient
+    raise NotImplementedError("TimeDependentHamiltonian is not implemented for GIPEPS.")

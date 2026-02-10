@@ -92,7 +92,6 @@ def run_optimization(
     dt: float = 0.01,
     diag_shift: float = 0.1,
     seed: int = 42,
-    log_interval: int = 10,
     data: SimulationData | None = None,
 ) -> TDVPDriver:
     """Run imaginary-time ground state optimization."""
@@ -107,19 +106,25 @@ def run_optimization(
         full_gradient=True,
     )
 
-    for step in range(n_steps):
-        driver.step()
-        if step % log_interval == 0 and driver.energy is not None:
+    k = 5
+    n_chunks = n_steps // k
+    assert n_steps == n_chunks * k, (
+        f"n_steps={n_steps} must be a multiple of chunk size k={k}"
+    )
+    for chunk in range(n_chunks):
+        driver.run(k * dt)
+        completed_steps = (chunk + 1) * k
+        if driver.energy is not None:
             e = driver.energy
             logger.info(format_step_log(
-                step=step,
+                step=completed_steps,
                 energy=e.mean.real,
                 energy_error=e.error_of_mean.real,
                 energy_variance=e.variance.real,
             ))
             if data is not None:
                 data.add_step(
-                    step=step,
+                    step=completed_steps,
                     time=driver.t,
                     energy=e.mean.real,
                     energy_error=e.error_of_mean.real,

@@ -70,11 +70,17 @@ def run_optimization(
         time_unit=ImaginaryTimeUnit(),
         sampler_key=jax.random.key(seed),
         n_samples=n_samples,
+        n_chains=64,
         full_gradient=False,
     )
 
-    for step in range(n_steps):
-        driver.step()
+    k = 5
+    n_chunks = n_steps // k
+    assert n_steps == n_chunks * k, (
+        f"n_steps={n_steps} must be a multiple of chunk size k={k}"
+    )
+    for _ in range(n_chunks):
+        driver.run(k * dt)
 
     e = driver.energy
     logger.info("Final: E = %.6f ± %.4f [σ²=%.4f]", e.mean.real, e.error_of_mean.real, e.variance.real)

@@ -162,7 +162,7 @@ class TDVPDriver:
         )
         return updates, (key, config_states), (local_energies, metrics)
 
-    @functools.partial(jax.jit, static_argnums=(0,))
+    @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(3, 4))
     def _run_n_steps(
         self,
         tensors: Any,
@@ -178,6 +178,7 @@ class TDVPDriver:
             self.dt,
             (key, config_states),
         )
+        jax.debug.print("E_mean={e}", e=local_energies.real.mean())
 
         def body(
             _: int,
@@ -191,6 +192,7 @@ class TDVPDriver:
                 self.dt,
                 (key_cur, configs_cur),
             )
+            jax.debug.print("E_mean={e}", e=energies_next.real.mean())
             return state, t_next, key_next, configs_next, energies_next, metrics_next
 
         return jax.lax.fori_loop(

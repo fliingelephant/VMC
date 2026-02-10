@@ -69,7 +69,7 @@ class TDVPKernelCacheTest(unittest.TestCase):
             )
             self.assertEqual(mocked_build.call_count, 1)
 
-    def test_run_jit_multiple_steps_exact_multiple(self) -> None:
+    def test_run_chunked_k5(self) -> None:
         model = PEPS(
             rngs=nnx.Rngs(0),
             shape=(1, 1),
@@ -84,9 +84,11 @@ class TDVPKernelCacheTest(unittest.TestCase):
             n_samples=1,
             n_chains=1,
         )
-        driver.run(0.3)
-        self.assertEqual(driver.step_count, 3)
-        self.assertAlmostEqual(driver.t, 0.3, places=12)
+        k = 5
+        for _ in range(2):
+            driver.run(k * driver.dt)
+        self.assertEqual(driver.step_count, 10)
+        self.assertAlmostEqual(driver.t, 1.0, places=12)
 
 if __name__ == "__main__":
     unittest.main()

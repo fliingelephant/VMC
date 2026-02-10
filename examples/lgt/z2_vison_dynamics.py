@@ -85,11 +85,22 @@ def run_ground_state(
         full_gradient=True,
     )
     
-    for step in range(n_steps):
-        driver.step()
-        if step % 50 == 0 and driver.energy is not None:
+    k = 5
+    n_chunks = n_steps // k
+    assert n_steps == n_chunks * k, (
+        f"n_steps={n_steps} must be a multiple of chunk size k={k}"
+    )
+    for chunk in range(n_chunks):
+        driver.run(k * dt)
+        completed_steps = (chunk + 1) * k
+        if completed_steps % 50 == 0 and driver.energy is not None:
             e = driver.energy
-            logger.info("GS Step %4d | E = %.6f ± %.4f", step, e.mean.real, e.error_of_mean.real)
+            logger.info(
+                "GS Step %4d | E = %.6f ± %.4f",
+                completed_steps,
+                e.mean.real,
+                e.error_of_mean.real,
+            )
     
     logger.info("Ground state energy: %.6f", driver.energy.mean.real)
     return driver
@@ -126,30 +137,34 @@ def run_real_time(
     
     initial_energy = None
     n_steps = int(T / dt)
-    log_interval = max(1, n_steps // 20)
     
-    for step in range(n_steps):
-        driver.step()
+    k = 5
+    n_chunks = n_steps // k
+    assert n_steps == n_chunks * k, (
+        f"n_steps={n_steps} must be a multiple of chunk size k={k}"
+    )
+    for chunk in range(n_chunks):
+        driver.run(k * dt)
+        completed_steps = (chunk + 1) * k
         if driver.energy is not None:
             if initial_energy is None:
                 initial_energy = driver.energy.mean.real
-            if step % log_interval == 0:
-                e = driver.energy.mean.real
-                drift = abs(e - initial_energy) / abs(initial_energy) * 100
-                logger.info(
-                    "RT Step %4d (t=%.3f) | E = %.6f | drift = %.2f%%",
-                    step, driver.t, e, drift
+            e = driver.energy.mean.real
+            drift = abs(e - initial_energy) / abs(initial_energy) * 100
+            logger.info(
+                "RT Step %4d (t=%.3f) | E = %.6f | drift = %.2f%%",
+                completed_steps, driver.t, e, drift
+            )
+            if data is not None:
+                data.add_step(
+                    step=completed_steps,
+                    time=driver.t,
+                    energy=e,
+                    energy_error=driver.energy.error_of_mean.real,
+                    energy_variance=driver.energy.variance.real,
                 )
-                if data is not None:
-                    data.add_step(
-                        step=step,
-                        time=driver.t,
-                        energy=e,
-                        energy_error=driver.energy.error_of_mean.real,
-                        energy_variance=driver.energy.variance.real,
-                    )
-                    # TODO: Add plaquette expectation values
-                    # data.add_plaquette_map(compute_plaquette_map(model, operator))
+                # TODO: Add plaquette expectation values
+                # data.add_plaquette_map(compute_plaquette_map(model, operator))
     
     logger.info("Final energy: %.6f (drift: %.2f%%)", 
                 driver.energy.mean.real,

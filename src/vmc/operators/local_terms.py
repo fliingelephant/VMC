@@ -22,7 +22,6 @@ __all__ = [
     "BucketedOperators",
     "LocalHamiltonian",
     "support_span",
-    "eval_span",
     "bucket_operators",
 ]
 
@@ -200,33 +199,23 @@ def support_span(term: TransitionOperator) -> tuple[int, int]:
 
 
 @support_span.dispatch
-def support_span(term: OneSiteOperator) -> tuple[int, int]:
-    del term
+def support_span(_: OneSiteOperator) -> tuple[int, int]:
     return 1, 1
 
 
 @support_span.dispatch
-def support_span(term: HorizontalTwoSiteOperator) -> tuple[int, int]:
-    del term
+def support_span(_: HorizontalTwoSiteOperator) -> tuple[int, int]:
     return 1, 2
 
 
 @support_span.dispatch
-def support_span(term: VerticalTwoSiteOperator) -> tuple[int, int]:
-    del term
+def support_span(_: VerticalTwoSiteOperator) -> tuple[int, int]:
     return 2, 1
 
 
 @support_span.dispatch
-def support_span(term: PlaquetteOperator) -> tuple[int, int]:
-    del term
+def support_span(_: PlaquetteOperator) -> tuple[int, int]:
     return 2, 2
-
-
-@dispatch
-def eval_span(model: object, term: TransitionOperator) -> tuple[int, int]:
-    del model
-    return support_span(term)
 
 
 def bucket_operators(
@@ -235,7 +224,7 @@ def bucket_operators(
     *,
     eval_span: Callable[[TransitionOperator], tuple[int, int]] | None = None,
 ) -> BucketedOperators:
-    """Group terms by type and lattice location."""
+    """Group terms by eval span and anchor location."""
     n_rows, n_cols = shape
     span_of = support_span if eval_span is None else eval_span
     span_11 = [[[] for _ in range(n_cols)] for _ in range(n_rows)]

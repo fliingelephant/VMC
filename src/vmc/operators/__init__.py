@@ -12,7 +12,6 @@ from vmc.operators.local_terms import (
     TransitionOperator,
     VerticalTwoSiteOperator,
     bucket_operators,
-    eval_span,
     support_span,
 )
 from vmc.operators.time_dependent import (
@@ -35,7 +34,6 @@ __all__ = [
     "VerticalTwoSiteOperator",
     "bucket_operators",
     "support_span",
-    "eval_span",
     "TermCoefficientSchedule",
     "AffineSchedule",
     "TimeDependentHamiltonian",

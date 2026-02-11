@@ -34,7 +34,7 @@ def build_mc_kernels(
     bucketed_terms = bucket_operators(
         operator.terms,
         shape,
-        eval_span=lambda op: type(model).eval_span(op),
+        eval_span=type(model).eval_span,
     )
 
     def init_cache(

@@ -417,7 +417,7 @@ def estimate(
         terms = bucket_operators(
             operator.terms,
             config.shape,
-            eval_span=lambda op: GIPEPS.eval_span(op),
+            eval_span=GIPEPS.eval_span,
         )
     diagonal_terms = terms.diagonal
     span_11_terms = terms.span_11

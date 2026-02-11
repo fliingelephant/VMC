@@ -348,7 +348,7 @@ def estimate(
         terms = bucket_operators(
             operator.terms,
             peps_config.shape,
-            eval_span=lambda op: BlockadePEPS.eval_span(op),
+            eval_span=BlockadePEPS.eval_span,
         )
     diagonal_terms = terms.diagonal
     span_22_terms = terms.span_22

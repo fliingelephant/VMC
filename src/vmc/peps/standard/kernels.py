@@ -103,7 +103,7 @@ def _bucketed_terms_for_standard_operator(
     return bucket_operators(
         operator.terms,
         model.shape,
-        eval_span=lambda op: type(model).eval_span(op),
+        eval_span=type(model).eval_span,
     )
 
 
@@ -120,7 +120,7 @@ def _bucketed_terms_for_standard_operator(
     return bucket_operators(
         base.terms,
         model.shape,
-        eval_span=lambda op: type(model).eval_span(op),
+        eval_span=type(model).eval_span,
     )
 
 

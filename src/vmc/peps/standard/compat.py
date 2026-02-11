@@ -146,7 +146,7 @@ def local_estimate(
     bucketed_terms = bucket_operators(
         operator.terms,
         shape,
-        eval_span=lambda op: type(model).eval_span(op),
+        eval_span=type(model).eval_span,
     )
     has_diag = bool(bucketed_terms.diagonal)
     has_offdiag = (

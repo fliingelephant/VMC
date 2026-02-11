@@ -29,7 +29,12 @@ def build_mc_kernels(
     strategy = model.strategy
     bucketed_terms = bucket_terms(operator.terms, shape)
 
-    def init_cache(tensors: Any, config_states: jax.Array) -> Cache:
+    def init_cache(
+        tensors: Any,
+        config_states: jax.Array,
+        coeffs: jax.Array | None = None,
+    ) -> Cache:
+        del coeffs
         config_states_flat = config_states.reshape(config_states.shape[0], n_rows * n_cols)
 
         def build_one(config_state: jax.Array):

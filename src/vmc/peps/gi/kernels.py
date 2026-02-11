@@ -33,7 +33,12 @@ def build_mc_kernels(
     charge_deg = model.charge_deg
     bucketed_terms = bucket_terms(operator.terms, shape)
 
-    def init_cache(tensors: Any, config_states: jax.Array) -> Cache:
+    def init_cache(
+        tensors: Any,
+        config_states: jax.Array,
+        coeffs: jax.Array | None = None,
+    ) -> Cache:
+        del coeffs
         def build_one(config_state: jax.Array):
             sites, h_links, v_links = GIPEPS.unflatten_sample(config_state, shape)
             dtype = tensors[0][0].dtype

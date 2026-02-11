@@ -10,7 +10,7 @@ import jax
 import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
 
-from vmc.operators.local_terms import LocalHamiltonian, bucket_terms
+from vmc.operators.local_terms import LocalHamiltonian, bucket_operators, eval_span
 from vmc.peps.common.contraction import _forward_with_cache
 from vmc.peps.common.energy import (
     _compute_all_env_grads_and_energy,
@@ -143,16 +143,17 @@ def local_estimate(
     samples = jnp.asarray(samples)
     amps = jnp.asarray(amps)
     shape = model.shape
-    bucketed_terms = bucket_terms(operator.terms, shape)
+    bucketed_terms = bucket_operators(
+        operator.terms,
+        shape,
+        eval_span=lambda op: eval_span(model, op),
+    )
     has_diag = bool(bucketed_terms.diagonal)
-    has_one_site = any(term_list for row in bucketed_terms.one_site for term_list in row)
-    has_horizontal = any(
-        term_list for row in bucketed_terms.horizontal for term_list in row
+    has_offdiag = (
+        any(cell for row in bucketed_terms.span_11 for cell in row)
+        or any(cell for row in bucketed_terms.span_12 for cell in row)
+        or any(cell for row in bucketed_terms.span_21 for cell in row)
     )
-    has_vertical = any(
-        term_list for row in bucketed_terms.vertical for term_list in row
-    )
-    has_offdiag = has_one_site or has_horizontal or has_vertical
 
     if not has_diag and not has_offdiag:
         return jnp.zeros((samples.shape[0],), dtype=amps.dtype)

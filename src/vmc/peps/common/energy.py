@@ -8,7 +8,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 
-from vmc.operators.local_terms import BucketedTerms
+from vmc.operators.local_terms import BucketedOperators
 from vmc.peps.common.contraction import _apply_mpo_from_below, _build_row_mpo, _compute_right_envs
 from vmc.peps.common.strategy import ContractionStrategy
 
@@ -131,7 +131,7 @@ def _compute_all_env_grads_and_energy(
     strategy: ContractionStrategy,
     top_envs: list[tuple],
     *,
-    terms: BucketedTerms,
+    terms: BucketedOperators,
     coeffs: jax.Array | None = None,
     collect_grads: bool = True,
 ) -> tuple[list[list[jax.Array]], jax.Array, list[tuple]]:
@@ -148,9 +148,9 @@ def _compute_all_env_grads_and_energy(
     bottom_envs_cache = [None] * n_rows
     energy = jnp.zeros((), dtype=amp.dtype)
     diagonal_terms = terms.diagonal
-    one_site_terms = terms.one_site
-    horizontal_terms = terms.horizontal
-    vertical_terms = terms.vertical
+    span_11_terms = terms.span_11
+    span_12_terms = terms.span_12
+    span_21_terms = terms.span_21
 
     # Diagonal terms
     for term_idx, term in diagonal_terms:
@@ -162,16 +162,30 @@ def _compute_all_env_grads_and_energy(
 
     # Backward pass: bottom → top
     bottom_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
+    empty_row_terms = tuple(() for _ in range(n_cols))
     next_row_mpo = None
     for row in range(n_rows - 1, -1, -1):
         bottom_envs_cache[row] = bottom_env
         top_env = top_envs[row]
         mpo = _build_row_mpo(tensors, spins[row], row, n_cols)
         right_envs = _compute_right_envs(top_env, mpo, bottom_env, dtype)
+        vertical_row_terms = span_21_terms[row] if row < n_rows - 1 else empty_row_terms
+        has_vertical_terms = row < n_rows - 1 and any(vertical_row_terms)
+        if has_vertical_terms:
+            bottom_env_next = bottom_envs_cache[row + 1]
+            right_envs_2row = _compute_right_envs_2row(
+                top_env, mpo, next_row_mpo, bottom_env_next, dtype
+            )
+            left_env_2row = jnp.ones((1, 1, 1, 1), dtype=dtype)
+        else:
+            vertical_row_terms = empty_row_terms
         left_env = jnp.ones((1, 1, 1), dtype=dtype)
         for c in range(n_cols):
-            site_terms = one_site_terms[row][c]
-            need_env_grad = collect_grads or site_terms
+            site_terms = span_11_terms[row][c]
+            horizontal_terms = span_12_terms[row][c] if c < n_cols - 1 else ()
+            vertical_terms = vertical_row_terms[c]
+            need_env_grad = collect_grads or bool(site_terms)
+            amps_site = None
             if need_env_grad:
                 env_grad = _compute_single_gradient(
                     left_env, right_envs[c], top_env[c], bottom_env[c]
@@ -180,59 +194,67 @@ def _compute_all_env_grads_and_energy(
                     env_grads[row][c] = env_grad
                 if site_terms:
                     amps_site = jnp.einsum("pudlr,udlr->p", tensors[row][c], env_grad)
-                    spin_idx = spins[row, c]
-                    for term_idx, term in site_terms:
-                        coeff = 1.0 if coeffs is None else coeffs[term_idx]
-                        energy = (
-                            energy
-                            + coeff * jnp.dot(term.op[:, spin_idx], amps_site) / amp
-                        )
-            if c < n_cols - 1:
-                edge_terms = horizontal_terms[row][c]
-                if edge_terms:
-                    amps_edge = jnp.einsum(
-                        "ace,aub,edf,pudcr,qvwrx,bvg,fwi,gxi->pq",
-                        left_env,
-                        top_env[c],
-                        bottom_env[c],
-                        tensors[row][c],
-                        tensors[row][c + 1],
-                        top_env[c + 1],
-                        bottom_env[c + 1],
-                        right_envs[c + 1],
-                        optimize=[(0, 1), (1, 6), (0, 5), (1, 3), (1, 2), (1, 2), (0, 1)],
-                    )
-                    spin0 = spins[row, c]
-                    spin1 = spins[row, c + 1]
-                    col_idx = spin0 * phys_dim + spin1
-                    amps_flat = amps_edge.reshape(-1)
-                    for term_idx, term in edge_terms:
-                        coeff = 1.0 if coeffs is None else coeffs[term_idx]
-                        energy = (
-                            energy
-                            + coeff * jnp.dot(term.op[:, col_idx], amps_flat) / amp
-                        )
+            amps_horizontal = None
+            if horizontal_terms:
+                amps_horizontal = jnp.einsum(
+                    "ace,aub,edf,pudcr,qvwrx,bvg,fwi,gxi->pq",
+                    left_env,
+                    top_env[c],
+                    bottom_env[c],
+                    tensors[row][c],
+                    tensors[row][c + 1],
+                    top_env[c + 1],
+                    bottom_env[c + 1],
+                    right_envs[c + 1],
+                    optimize=[(0, 1), (1, 6), (0, 5), (1, 3), (1, 2), (1, 2), (0, 1)],
+                )
+            amps_vertical = None
+            if vertical_terms:
+                amps_vertical = jnp.einsum(
+                    "almg,aub,puvlr,qvwmn,gwf,brnf->pq",
+                    left_env_2row,
+                    top_env[c],
+                    tensors[row][c],
+                    tensors[row + 1][c],
+                    bottom_env_next[c],
+                    right_envs_2row[c],
+                    optimize=[(0, 1), (2, 3), (0, 2), (1, 2), (0, 1)],
+                )
+            for term_idx, term in site_terms:
+                coeff = 1.0 if coeffs is None else coeffs[term_idx]
+                spin_idx = spins[row, c]
+                energy = energy + coeff * jnp.dot(term.op[:, spin_idx], amps_site) / amp
+            for term_idx, term in horizontal_terms:
+                coeff = 1.0 if coeffs is None else coeffs[term_idx]
+                spin0 = spins[row, c]
+                spin1 = spins[row, c + 1]
+                col_idx = spin0 * phys_dim + spin1
+                energy = energy + coeff * jnp.dot(
+                    term.op[:, col_idx], amps_horizontal.reshape(-1)
+                ) / amp
+            for term_idx, term in vertical_terms:
+                coeff = 1.0 if coeffs is None else coeffs[term_idx]
+                spin0 = spins[row, c]
+                spin1 = spins[row + 1, c]
+                col_idx = spin0 * phys_dim + spin1
+                energy = energy + coeff * jnp.dot(
+                    term.op[:, col_idx], amps_vertical.reshape(-1)
+                ) / amp
             left_env = jnp.einsum(
                 "ace,aub,cduv,evf->bdf",
                 left_env, top_env[c], mpo[c], bottom_env[c],
                 optimize=[(0, 1), (0, 2), (0, 1)],
             )
-        # Vertical energy between row and row+1
-        if row < n_rows - 1:
-            energy = energy + _compute_row_pair_vertical_energy(
-                top_env,
-                bottom_envs_cache[row + 1],
-                mpo,
-                next_row_mpo,
-                tensors[row],
-                tensors[row + 1],
-                spins[row],
-                spins[row + 1],
-                vertical_terms[row],
-                amp,
-                phys_dim,
-                coeffs=coeffs,
-            )
+            if has_vertical_terms:
+                left_env_2row = jnp.einsum(
+                    "alxe,aub,lruv,xyvw,ewf->bryf",
+                    left_env_2row,
+                    top_env[c],
+                    mpo[c],
+                    next_row_mpo[c],
+                    bottom_env_next[c],
+                    optimize=[(0, 1), (0, 3), (0, 2), (0, 1)],
+                )
         bottom_env = _apply_mpo_from_below(bottom_env, mpo, strategy)
         next_row_mpo = mpo
 

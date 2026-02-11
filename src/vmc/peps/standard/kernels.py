@@ -17,7 +17,12 @@ from vmc.peps.common.contraction import (
 )
 from vmc.peps.common.energy import _compute_all_env_grads_and_energy
 from vmc.peps.standard.model import PEPS
-from vmc.operators.local_terms import BucketedTerms, LocalHamiltonian, bucket_terms
+from vmc.operators.local_terms import (
+    BucketedOperators,
+    LocalHamiltonian,
+    bucket_operators,
+    eval_span,
+)
 from vmc.operators.time_dependent import TimeDependentHamiltonian
 from vmc.utils.smallo import params_per_site as params_per_site_fn
 from vmc.utils.utils import _metropolis_hastings_accept
@@ -93,23 +98,31 @@ def _assemble_log_derivatives(
 
 @dispatch
 def _bucketed_terms_for_standard_operator(
+    model: PEPS,
     operator: LocalHamiltonian,
-    shape: tuple[int, int],
-) -> BucketedTerms:
-    return bucket_terms(operator.terms, shape)
+) -> BucketedOperators:
+    return bucket_operators(
+        operator.terms,
+        model.shape,
+        eval_span=lambda op: eval_span(model, op),
+    )
 
 
 @_bucketed_terms_for_standard_operator.dispatch
 def _bucketed_terms_for_standard_operator(
+    model: PEPS,
     operator: TimeDependentHamiltonian,
-    shape: tuple[int, int],
-) -> BucketedTerms:
+) -> BucketedOperators:
     base = operator.base
     if not isinstance(base, LocalHamiltonian):
         raise NotImplementedError(
             "TimeDependentHamiltonian for standard PEPS requires a LocalHamiltonian base."
         )
-    return bucket_terms(base.terms, shape)
+    return bucket_operators(
+        base.terms,
+        model.shape,
+        eval_span=lambda op: eval_span(model, op),
+    )
 
 
 @dispatch
@@ -131,7 +144,7 @@ def build_mc_kernels(
     params_per_site = tuple(int(p) for p in params_per_site_fn(model))
     params_per_site_repeats = jnp.asarray(params_per_site, dtype=jnp.int32)
     total_active_params = int(sum(params_per_site))
-    terms = _bucketed_terms_for_standard_operator(operator, shape)
+    terms = _bucketed_terms_for_standard_operator(model, operator)
 
     def init_cache(
         tensors: Any,

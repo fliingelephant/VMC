@@ -6,7 +6,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 
-from vmc.operators.local_terms import bucket_terms
+from vmc.operators.local_terms import bucket_operators, eval_span
 from vmc.operators.time_dependent import TimeDependentHamiltonian
 from vmc.peps.gi import model as gi_model
 from vmc.peps.gi.local_terms import GILocalHamiltonian
@@ -31,7 +31,11 @@ def build_mc_kernels(
     charge_of_site = jnp.asarray(model.charge_of_site, dtype=jnp.int32)
     charge_to_indices = model.charge_to_indices
     charge_deg = model.charge_deg
-    bucketed_terms = bucket_terms(operator.terms, shape)
+    bucketed_terms = bucket_operators(
+        operator.terms,
+        shape,
+        eval_span=lambda op: eval_span(model, op),
+    )
 
     def init_cache(
         tensors: Any,

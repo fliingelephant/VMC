@@ -18,7 +18,7 @@ import netket as nk
 from flax import nnx
 
 from vmc.drivers import TDVPDriver, ImaginaryTimeUnit
-from vmc.operators import DiagonalTerm, LocalHamiltonian, OneSiteTerm
+from vmc.operators import DiagonalOperator, LocalHamiltonian, OneSiteOperator
 from vmc.peps import PEPS, ZipUp
 from vmc.preconditioners import SRPreconditioner, DirectSolve
 from vmc.qgt import SampleSpace
@@ -39,11 +39,11 @@ def build_ising_2d(
     terms = []
     for row in range(n_rows):
         for col in range(n_cols):
-            terms.append(OneSiteTerm(row, col, op_x))
+            terms.append(OneSiteOperator(row, col, op_x))
             if col + 1 < n_cols:
-                terms.append(DiagonalTerm(((row, col), (row, col + 1)), diag_zz))
+                terms.append(DiagonalOperator(((row, col), (row, col + 1)), diag_zz))
             if row + 1 < n_rows:
-                terms.append(DiagonalTerm(((row, col), (row + 1, col)), diag_zz))
+                terms.append(DiagonalOperator(((row, col), (row + 1, col)), diag_zz))
     return LocalHamiltonian(shape=shape, terms=tuple(terms))
 
 

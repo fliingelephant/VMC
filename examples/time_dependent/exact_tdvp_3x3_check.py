@@ -24,9 +24,9 @@ from vmc import config  # noqa: F401 - JAX config must be imported first
 from vmc.drivers import RK4, RealTimeUnit, TDVPDriver
 from vmc.operators import (
     AffineSchedule,
-    DiagonalTerm,
+    DiagonalOperator,
     LocalHamiltonian,
-    OneSiteTerm,
+    OneSiteOperator,
     TimeDependentHamiltonian,
 )
 from vmc.peps import NoTruncation, PEPS
@@ -46,7 +46,7 @@ class RunConfig:
 
     shape: tuple[int, int] = (3, 3)
     steps: int = 10
-    dt: float = 0.02
+    dt: float = 0.005
     jzz: float = -1.0
     hx0: float = 0.4
     hx_slope: float = -0.15
@@ -55,7 +55,7 @@ class RunConfig:
     n_samples: int = 4096
     n_chains: int = 64
     solver: str = "svd"
-    bond_dim: int = 1
+    bond_dim: int = 2
     diag_shift: float = 1e-8
     exact_substeps: int = 8
     csv: str | None = None
@@ -129,12 +129,12 @@ def _build_vmc_time_dependent_hamiltonian(
     n_rows, n_cols = shape
     for row in range(n_rows):
         for col in range(n_cols):
-            terms.append(OneSiteTerm(row=row, col=col, op=-sigmax))
+            terms.append(OneSiteOperator(row=row, col=col, op=-sigmax))
             offsets.append(hx0)
             slopes.append(hx_slope)
             if col + 1 < n_cols:
                 terms.append(
-                    DiagonalTerm(
+                    DiagonalOperator(
                         sites=((row, col), (row, col + 1)),
                         diag=jzz * sigmaz_sigmaz_diag,
                     )
@@ -143,7 +143,7 @@ def _build_vmc_time_dependent_hamiltonian(
                 slopes.append(0.0)
             if row + 1 < n_rows:
                 terms.append(
-                    DiagonalTerm(
+                    DiagonalOperator(
                         sites=((row, col), (row + 1, col)),
                         diag=jzz * sigmaz_sigmaz_diag,
                     )
@@ -243,7 +243,7 @@ def _parse_args() -> RunConfig:
         description="Benchmark 3x3 time-dependent PEPS TDVP against exact evolution."
     )
     parser.add_argument("--steps", type=int, default=10)
-    parser.add_argument("--dt", type=float, default=0.02)
+    parser.add_argument("--dt", type=float, default=0.005)
     parser.add_argument("--jzz", type=float, default=-1.0)
     parser.add_argument("--hx0", type=float, default=0.4)
     parser.add_argument("--hx-slope", type=float, default=-0.15)
@@ -257,7 +257,7 @@ def _parse_args() -> RunConfig:
         choices=("cholesky", "svd", "cg"),
         default="svd",
     )
-    parser.add_argument("--bond-dim", type=int, default=1)
+    parser.add_argument("--bond-dim", type=int, default=2)
     parser.add_argument("--diag-shift", type=float, default=1e-8)
     parser.add_argument("--exact-substeps", type=int, default=8)
     parser.add_argument("--csv", type=str, default=None)

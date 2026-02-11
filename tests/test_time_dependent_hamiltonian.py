@@ -11,7 +11,7 @@ from flax import nnx
 
 from vmc.core import make_mc_sampler
 from vmc.drivers import TDVPDriver
-from vmc.operators.local_terms import DiagonalTerm, LocalHamiltonian
+from vmc.operators.local_terms import DiagonalOperator, LocalHamiltonian
 from vmc.operators.time_dependent import (
     AffineSchedule,
     TimeDependentHamiltonian,
@@ -50,7 +50,7 @@ def _diag_one_hamiltonian(shape: tuple[int, int]) -> LocalHamiltonian:
     return LocalHamiltonian(
         shape=shape,
         terms=(
-            DiagonalTerm(
+            DiagonalOperator(
                 sites=((0, 0),),
                 diag=jnp.asarray([1.0, 1.0], dtype=jnp.complex128),
             ),

@@ -13,9 +13,9 @@ from netket import stats as nkstats
 
 from vmc.core import _sample_counts, _trim_samples, make_mc_sampler
 from vmc.operators.local_terms import (
-    HorizontalTwoSiteTerm,
+    HorizontalTwoSiteOperator,
     LocalHamiltonian,
-    VerticalTwoSiteTerm,
+    VerticalTwoSiteOperator,
 )
 from vmc.peps import PEPS, build_mc_kernels
 from vmc.peps.standard.compat import _value, local_estimate
@@ -71,9 +71,9 @@ class FullSumBenchmarkTest(unittest.TestCase):
         for r in range(shape[0]):
             for c in range(shape[1]):
                 if c + 1 < shape[1]:
-                    horizontal_terms.append(HorizontalTwoSiteTerm(r, c, bond_op))
+                    horizontal_terms.append(HorizontalTwoSiteOperator(r, c, bond_op))
                 if r + 1 < shape[0]:
-                    vertical_terms.append(VerticalTwoSiteTerm(r, c, bond_op))
+                    vertical_terms.append(VerticalTwoSiteOperator(r, c, bond_op))
         local_operator = LocalHamiltonian(
             shape=shape,
             terms=tuple(horizontal_terms + vertical_terms),

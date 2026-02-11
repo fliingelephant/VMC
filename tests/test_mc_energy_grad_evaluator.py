@@ -13,9 +13,9 @@ from flax import nnx
 
 from vmc.core import _sample_counts, _trim_samples, make_mc_sampler
 from vmc.operators.local_terms import (
-    HorizontalTwoSiteTerm,
+    HorizontalTwoSiteOperator,
     LocalHamiltonian,
-    VerticalTwoSiteTerm,
+    VerticalTwoSiteOperator,
 )
 from vmc.peps import NoTruncation, PEPS, build_mc_kernels
 from vmc.peps.standard.compat import _value_and_grad, local_estimate
@@ -49,9 +49,9 @@ def _heisenberg_local_hamiltonian(shape: tuple[int, int]) -> LocalHamiltonian:
     for r in range(shape[0]):
         for c in range(shape[1]):
             if c + 1 < shape[1]:
-                horizontal_terms.append(HorizontalTwoSiteTerm(r, c, bond_op))
+                horizontal_terms.append(HorizontalTwoSiteOperator(r, c, bond_op))
             if r + 1 < shape[0]:
-                vertical_terms.append(VerticalTwoSiteTerm(r, c, bond_op))
+                vertical_terms.append(VerticalTwoSiteOperator(r, c, bond_op))
     return LocalHamiltonian(shape=shape, terms=tuple(horizontal_terms + vertical_terms))
 
 

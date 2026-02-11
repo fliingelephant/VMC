@@ -6,7 +6,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 
-from vmc.operators.local_terms import LocalHamiltonian, bucket_terms
+from vmc.operators.local_terms import LocalHamiltonian, bucket_operators, eval_span
 from vmc.operators.time_dependent import TimeDependentHamiltonian
 from vmc.peps.blockade import model as blockade_model
 from vmc.peps.blockade.model import BlockadePEPS
@@ -27,7 +27,11 @@ def build_mc_kernels(
     n_rows, n_cols = shape
     config = model.config
     strategy = model.strategy
-    bucketed_terms = bucket_terms(operator.terms, shape)
+    bucketed_terms = bucket_operators(
+        operator.terms,
+        shape,
+        eval_span=lambda op: eval_span(model, op),
+    )
 
     def init_cache(
         tensors: Any,

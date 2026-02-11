@@ -10,9 +10,9 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from vmc.operators.local_terms import (
-    DiagonalTerm,
+    DiagonalOperator,
     LocalHamiltonian,
-    OneSiteTerm,
+    OneSiteOperator,
 )
 
 __all__ = ["rydberg_hamiltonian"]
@@ -57,9 +57,9 @@ def rydberg_hamiltonian(
     for r in range(n_rows):
         for c in range(n_cols):
             # X term (off-diagonal)
-            terms.append(OneSiteTerm(row=r, col=c, op=0.5 * Omega * sigma_x))
+            terms.append(OneSiteOperator(row=r, col=c, op=0.5 * Omega * sigma_x))
             # n_i term (diagonal)
-            terms.append(DiagonalTerm(sites=((r, c),), diag=n_diag))
+            terms.append(DiagonalOperator(sites=((r, c),), diag=n_diag))
 
     # NNN interactions (diagonal, NOT always 0)
     if V_nnn != 0.0:
@@ -68,12 +68,12 @@ def rydberg_hamiltonian(
                 # Diagonal NNN: (r, c) and (r+1, c+1)
                 if r + 1 < n_rows and c + 1 < n_cols:
                     terms.append(
-                        DiagonalTerm(sites=((r, c), (r + 1, c + 1)), diag=nn_diag)
+                        DiagonalOperator(sites=((r, c), (r + 1, c + 1)), diag=nn_diag)
                     )
                 # Anti-diagonal NNN: (r, c) and (r+1, c-1)
                 if r + 1 < n_rows and c - 1 >= 0:
                     terms.append(
-                        DiagonalTerm(sites=((r, c), (r + 1, c - 1)), diag=nn_diag)
+                        DiagonalOperator(sites=((r, c), (r + 1, c - 1)), diag=nn_diag)
                     )
 
     return LocalHamiltonian(shape=shape, terms=tuple(terms))

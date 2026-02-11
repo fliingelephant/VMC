@@ -28,7 +28,7 @@ import jax.numpy as jnp
 from flax import nnx
 
 from vmc.drivers import TDVPDriver, ImaginaryTimeUnit
-from vmc.operators import PlaquetteTerm
+from vmc.operators import PlaquetteOperator
 from vmc.peps import ZipUp
 from vmc.peps.gi.local_terms import GILocalHamiltonian, build_electric_terms
 from vmc.peps.gi.model import GIPEPS, GIPEPSConfig
@@ -58,7 +58,7 @@ def build_z2_hamiltonian(
     
     # Plaquette terms: -h (P + P†) = -2h Re(P)
     plaquette_terms = tuple(
-        PlaquetteTerm(row=r, col=c, coeff=-h)
+        PlaquetteOperator(row=r, col=c, coeff=-h)
         for r in range(n_rows - 1)
         for c in range(n_cols - 1)
     )

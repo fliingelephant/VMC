@@ -32,7 +32,10 @@ from vmc.peps.common.energy import (
     _compute_single_gradient,
 )
 from vmc.peps.gi.compat import gi_apply
-from vmc.operators.local_terms import BucketedTerms, bucket_terms
+from vmc.operators.local_terms import (
+    BucketedOperators,
+    bucket_operators,
+)
 from vmc.utils.utils import random_tensor, _hastings_ratio, _metropolis_hastings_accept
 
 
@@ -141,7 +144,6 @@ class GIPEPS(nnx.Module):
         return sites, h_links, v_links
 
     apply = staticmethod(gi_apply)
-
     def random_physical_configuration(
         self,
         key: jax.Array,
@@ -398,7 +400,7 @@ def estimate(
     strategy: Any,
     top_envs: list[tuple],
     *,
-    terms: BucketedTerms | None = None,
+    terms: BucketedOperators | None = None,
 ) -> tuple[list[list[jax.Array]], jax.Array, list[tuple]]:
     """Compute environment gradients and local energy for GI-PEPS."""
     from vmc.peps.gi.local_terms import LinkDiagonalTerm
@@ -410,12 +412,12 @@ def estimate(
     bottom_envs_cache = [None] * n_rows
 
     if terms is None:
-        terms = bucket_terms(operator.terms, config.shape)
+        terms = bucket_operators(operator.terms, config.shape)
     diagonal_terms = terms.diagonal
-    one_site_terms = terms.one_site
-    horizontal_terms = terms.horizontal
-    vertical_terms = terms.vertical
-    plaquette_terms = terms.plaquette
+    span_11_terms = terms.span_11
+    span_12_terms = terms.span_12
+    span_21_terms = terms.span_21
+    span_22_terms = terms.span_22
 
     env_grads = [[None for _ in range(n_cols)] for _ in range(n_rows)]
 
@@ -437,15 +439,14 @@ def estimate(
         top_env = top_envs[row]
         row_mpo = _build_row_mpo_gi(tensors, sites, h_links, v_links, config, row, n_cols)
 
-        # Check what terms exist for this row
-        row_has_one_site = any(one_site_terms[row][c] for c in range(n_cols))
-        row_has_horizontal = any(horizontal_terms[row][c] for c in range(n_cols - 1))
-        row_has_vertical = row < n_rows - 1 and any(
-            vertical_terms[row][c] for c in range(n_cols)
-        )
-        row_has_plaquette = row < n_rows - 1 and any(
-            plaquette_terms[row][c] for c in range(n_cols - 1)
-        )
+        site_row_terms = span_11_terms[row]
+        horizontal_row_terms = span_12_terms[row]
+        vertical_row_terms = span_21_terms[row] if row < n_rows - 1 else ()
+        plaquette_row_terms = span_22_terms[row] if row < n_rows - 1 else ()
+        row_has_one_site = any(site_row_terms)
+        row_has_horizontal = any(horizontal_row_terms)
+        row_has_vertical = row < n_rows - 1 and any(vertical_row_terms)
+        row_has_plaquette = row < n_rows - 1 and any(plaquette_row_terms)
 
         # 1-row right envs (always needed for gradients)
         right_envs = _compute_right_envs(top_env, row_mpo, bottom_env, dtype)
@@ -473,39 +474,38 @@ def estimate(
             )
             env_grads[row][c] = env_grad
 
-            # Single-site energy
-            site_terms = one_site_terms[row][c]
+            site_terms = site_row_terms[c]
+            horizontal_terms = horizontal_row_terms[c] if c < n_cols - 1 else ()
+
+            amps_site = None
             if site_terms:
                 amps_site = jnp.einsum("pudlr,udlr->p", eff_row[c], env_grad)
+            amps_edge = None
+            if horizontal_terms:
+                env_2site = _compute_2site_horizontal_env(
+                    left_env,
+                    right_envs[c + 1],
+                    top_env[c],
+                    bottom_env[c],
+                    top_env[c + 1],
+                    bottom_env[c + 1],
+                )
+                amps_edge = jnp.einsum(
+                    "pudlr,qverx,udlvex->pq",
+                    eff_row[c],
+                    eff_row[c + 1],
+                    env_2site,
+                    optimize=[(0, 2), (0, 1)],
+                )
+            for _, term in site_terms:
                 spin_idx = sites[row, c]
-                for _, term in site_terms:
-                    energy = energy + jnp.dot(term.op[:, spin_idx], amps_site) / amp
-
-            # Horizontal energy
-            if c < n_cols - 1:
-                edge_terms = horizontal_terms[row][c]
-                if edge_terms:
-                    env_2site = _compute_2site_horizontal_env(
-                        left_env,
-                        right_envs[c + 1],
-                        top_env[c],
-                        bottom_env[c],
-                        top_env[c + 1],
-                        bottom_env[c + 1],
-                    )
-                    amps_edge = jnp.einsum(
-                        "pudlr,qverx,udlvex->pq",
-                        eff_row[c],
-                        eff_row[c + 1],
-                        env_2site,
-                        optimize=[(0, 2), (0, 1)],
-                    )
-                    spin0 = sites[row, c]
-                    spin1 = sites[row, c + 1]
-                    col_idx = spin0 * phys_dim + spin1
-                    amps_flat = amps_edge.reshape(-1)
-                    for _, term in edge_terms:
-                        energy = energy + jnp.dot(term.op[:, col_idx], amps_flat) / amp
+                energy = energy + jnp.dot(term.op[:, spin_idx], amps_site) / amp
+            for _, term in horizontal_terms:
+                spin0 = sites[row, c]
+                spin1 = sites[row, c + 1]
+                col_idx = spin0 * phys_dim + spin1
+                amps_flat = amps_edge.reshape(-1)
+                energy = energy + jnp.dot(term.op[:, col_idx], amps_flat) / amp
 
             # Direct einsum for left_env update
             left_env = jnp.einsum(
@@ -536,7 +536,7 @@ def estimate(
                         eff_row_next,
                         sites[row],
                         sites[row + 1],
-                        vertical_terms[row],
+                        vertical_row_terms,
                         amp,
                         phys_dim,
                         right_envs_2row=right_envs_2row,
@@ -546,7 +546,7 @@ def estimate(
                 if row_has_plaquette:
                     left_env_2row = jnp.ones((1, 1, 1, 1), dtype=dtype)
                     for c in range(n_cols - 1):
-                        plaquette_here = plaquette_terms[row][c]
+                        plaquette_here = plaquette_row_terms[c]
                         if not plaquette_here:
                             # Direct einsum for left_env_2row update
                             left_env_2row = jnp.einsum(

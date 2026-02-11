@@ -2,15 +2,18 @@
 from __future__ import annotations
 
 from vmc.operators.local_terms import (
-    BucketedTerms,
+    BucketedOperators,
     LocalHamiltonian,
-    DiagonalTerm,
-    HorizontalTwoSiteTerm,
-    LocalTerm,
-    OneSiteTerm,
-    PlaquetteTerm,
-    VerticalTwoSiteTerm,
-    bucket_terms,
+    DiagonalOperator,
+    HorizontalTwoSiteOperator,
+    Operator,
+    OneSiteOperator,
+    PlaquetteOperator,
+    TransitionOperator,
+    VerticalTwoSiteOperator,
+    bucket_operators,
+    eval_span,
+    support_span,
 )
 from vmc.operators.time_dependent import (
     AffineSchedule,
@@ -21,15 +24,18 @@ from vmc.operators.time_dependent import (
 )
 
 __all__ = [
-    "BucketedTerms",
+    "BucketedOperators",
     "LocalHamiltonian",
-    "DiagonalTerm",
-    "HorizontalTwoSiteTerm",
-    "LocalTerm",
-    "OneSiteTerm",
-    "PlaquetteTerm",
-    "VerticalTwoSiteTerm",
-    "bucket_terms",
+    "DiagonalOperator",
+    "HorizontalTwoSiteOperator",
+    "Operator",
+    "OneSiteOperator",
+    "PlaquetteOperator",
+    "TransitionOperator",
+    "VerticalTwoSiteOperator",
+    "bucket_operators",
+    "support_span",
+    "eval_span",
     "TermCoefficientSchedule",
     "AffineSchedule",
     "TimeDependentHamiltonian",

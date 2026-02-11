@@ -6,7 +6,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 
-from vmc.operators.local_terms import bucket_operators, eval_span
+from vmc.operators.local_terms import bucket_operators
 from vmc.operators.time_dependent import TimeDependentHamiltonian
 from vmc.peps.gi import model as gi_model
 from vmc.peps.gi.local_terms import GILocalHamiltonian
@@ -34,7 +34,7 @@ def build_mc_kernels(
     bucketed_terms = bucket_operators(
         operator.terms,
         shape,
-        eval_span=lambda op: eval_span(model, op),
+        eval_span=lambda op: type(model).eval_span(op),
     )
 
     def init_cache(

@@ -25,6 +25,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 from flax import nnx
+from plum import dispatch
 
 from vmc.peps.blockade.compat import blockade_apply
 from vmc.peps.common.contraction import (
@@ -36,12 +37,22 @@ from vmc.peps.common.energy import _compute_right_envs_2row, _compute_single_gra
 from vmc.peps.common.strategy import ContractionStrategy, Variational
 from vmc.operators.local_terms import (
     BucketedOperators,
-    eval_span,
     OneSiteOperator,
+    TransitionOperator,
     bucket_operators,
     support_span,
 )
 from vmc.utils.utils import _metropolis_hastings_accept, random_tensor
+
+
+@dispatch
+def eval_span(term: TransitionOperator) -> tuple[int, int]:
+    return support_span(term)
+
+
+@eval_span.dispatch
+def eval_span(_: OneSiteOperator) -> tuple[int, int]:
+    return 2, 2
 
 
 @dataclass(frozen=True)
@@ -138,6 +149,7 @@ class BlockadePEPS(nnx.Module):
         return sample.reshape(shape)
 
     apply = staticmethod(blockade_apply)
+    eval_span = staticmethod(eval_span)
     def random_physical_configuration(
         self,
         key: jax.Array,
@@ -148,12 +160,6 @@ class BlockadePEPS(nnx.Module):
         return jax.vmap(
             lambda k: random_independent_set(k, self.shape)
         )(keys)
-
-
-@eval_span.dispatch
-def eval_span(model: BlockadePEPS, term: OneSiteOperator) -> tuple[int, int]:
-    del model, term
-    return 2, 2
 
 
 def _assemble_site(
@@ -342,7 +348,7 @@ def estimate(
         terms = bucket_operators(
             operator.terms,
             peps_config.shape,
-            eval_span=lambda op: (2, 2) if isinstance(op, OneSiteOperator) else support_span(op),
+            eval_span=lambda op: BlockadePEPS.eval_span(op),
         )
     diagonal_terms = terms.diagonal
     span_22_terms = terms.span_22

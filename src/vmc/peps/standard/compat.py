@@ -10,7 +10,7 @@ import jax
 import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
 
-from vmc.operators.local_terms import LocalHamiltonian, bucket_operators, eval_span
+from vmc.operators.local_terms import LocalHamiltonian, bucket_operators
 from vmc.peps.common.contraction import _forward_with_cache
 from vmc.peps.common.energy import (
     _compute_all_env_grads_and_energy,
@@ -146,7 +146,7 @@ def local_estimate(
     bucketed_terms = bucket_operators(
         operator.terms,
         shape,
-        eval_span=lambda op: eval_span(model, op),
+        eval_span=lambda op: type(model).eval_span(op),
     )
     has_diag = bool(bucketed_terms.diagonal)
     has_offdiag = (

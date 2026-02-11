@@ -21,7 +21,6 @@ from vmc.operators.local_terms import (
     BucketedOperators,
     LocalHamiltonian,
     bucket_operators,
-    eval_span,
 )
 from vmc.operators.time_dependent import TimeDependentHamiltonian
 from vmc.utils.smallo import params_per_site as params_per_site_fn
@@ -104,7 +103,7 @@ def _bucketed_terms_for_standard_operator(
     return bucket_operators(
         operator.terms,
         model.shape,
-        eval_span=lambda op: eval_span(model, op),
+        eval_span=lambda op: type(model).eval_span(op),
     )
 
 
@@ -121,7 +120,7 @@ def _bucketed_terms_for_standard_operator(
     return bucket_operators(
         base.terms,
         model.shape,
-        eval_span=lambda op: eval_span(model, op),
+        eval_span=lambda op: type(model).eval_span(op),
     )
 
 

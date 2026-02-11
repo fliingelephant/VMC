@@ -11,6 +11,7 @@ from flax import nnx
 
 from vmc.peps.common.strategy import ContractionStrategy, Variational
 from vmc.peps.standard.compat import peps_apply
+from vmc.operators.local_terms import support_span
 from vmc.utils.utils import random_tensor
 
 if TYPE_CHECKING:
@@ -74,6 +75,7 @@ class PEPS(nnx.Module):
         ]
 
     apply = staticmethod(peps_apply)
+    eval_span = staticmethod(support_span)
 
     @staticmethod
     def unflatten_sample(sample: jax.Array, shape: tuple[int, int]) -> jax.Array:

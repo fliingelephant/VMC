@@ -35,6 +35,7 @@ from vmc.peps.gi.compat import gi_apply
 from vmc.operators.local_terms import (
     BucketedOperators,
     bucket_operators,
+    support_span,
 )
 from vmc.utils.utils import random_tensor, _hastings_ratio, _metropolis_hastings_accept
 
@@ -144,6 +145,7 @@ class GIPEPS(nnx.Module):
         return sites, h_links, v_links
 
     apply = staticmethod(gi_apply)
+    eval_span = staticmethod(support_span)
     def random_physical_configuration(
         self,
         key: jax.Array,
@@ -412,7 +414,11 @@ def estimate(
     bottom_envs_cache = [None] * n_rows
 
     if terms is None:
-        terms = bucket_operators(operator.terms, config.shape)
+        terms = bucket_operators(
+            operator.terms,
+            config.shape,
+            eval_span=lambda op: GIPEPS.eval_span(op),
+        )
     diagonal_terms = terms.diagonal
     span_11_terms = terms.span_11
     span_12_terms = terms.span_12

@@ -10,6 +10,7 @@ import jax.numpy as jnp
 from plum import dispatch
 
 IndexedOperator: TypeAlias = tuple[int, "Operator"]
+AnchoredTransitionOperator: TypeAlias = tuple[int, "TransitionOperator", tuple[int, int]]
 
 __all__ = [
     "Operator",
@@ -178,18 +179,17 @@ class LocalHamiltonian:
 
 @dataclass(frozen=True)
 class BucketedOperators:
-    """Indexed, shape-grouped local terms.
+    """Indexed, anchor-grouped local terms.
 
     Each entry stores ``(term_idx, term)`` where ``term_idx`` is the index in
     the original ``LocalHamiltonian.terms`` tuple. This provides a stable global
-    indexing that remains valid after bucketing.
+    indexing that remains valid after bucketing. Transition terms additionally
+    store their evaluation span ``(dr, dc)``.
     """
 
     diagonal: tuple[IndexedOperator, ...]
-    span_11: tuple[tuple[tuple[IndexedOperator, ...], ...], ...]
-    span_12: tuple[tuple[tuple[IndexedOperator, ...], ...], ...]
-    span_21: tuple[tuple[tuple[IndexedOperator, ...], ...], ...]
-    span_22: tuple[tuple[tuple[IndexedOperator, ...], ...], ...]
+    anchored: tuple[tuple[tuple[AnchoredTransitionOperator, ...], ...], ...]
+    row_spans: tuple[tuple[int, ...], ...]
     n_terms: int
 
 
@@ -224,19 +224,11 @@ def bucket_operators(
     *,
     eval_span: Callable[[TransitionOperator], tuple[int, int]] | None = None,
 ) -> BucketedOperators:
-    """Group terms by eval span and anchor location."""
+    """Group terms by anchor and annotate each with its eval span."""
     n_rows, n_cols = shape
     span_of = support_span if eval_span is None else eval_span
-    span_11 = [[[] for _ in range(n_cols)] for _ in range(n_rows)]
-    span_12 = [[[] for _ in range(n_cols)] for _ in range(n_rows)]
-    span_21 = [[[] for _ in range(n_cols)] for _ in range(n_rows)]
-    span_22 = [[[] for _ in range(n_cols)] for _ in range(n_rows)]
-    span_grids = {
-        (1, 1): span_11,
-        (1, 2): span_12,
-        (2, 1): span_21,
-        (2, 2): span_22,
-    }
+    anchored = [[[] for _ in range(n_cols)] for _ in range(n_rows)]
+    row_spans = [set() for _ in range(n_rows)]
     diagonal_operators: list[IndexedOperator] = []
 
     for term_idx, term in enumerate(terms):
@@ -245,32 +237,25 @@ def bucket_operators(
             continue
         if not isinstance(term, TransitionOperator):
             raise TypeError(f"Unsupported term type: {type(term)!r}")
-        dr, dc = support_span(term)
+        support_dr, support_dc = support_span(term)
         if not (
             0 <= term.row < n_rows
             and 0 <= term.col < n_cols
-            and term.row + dr <= n_rows
-            and term.col + dc <= n_cols
+            and term.row + support_dr <= n_rows
+            and term.col + support_dc <= n_cols
         ):
             raise ValueError(f"Operator {term!r} is outside shape {shape}.")
         dr_eval, dc_eval = span_of(term)
-        grid = span_grids.get((dr_eval, dc_eval))
-        if grid is None:
+        if dr_eval <= 0 or dc_eval <= 0:
             raise ValueError(
                 f"Unsupported eval span {(dr_eval, dc_eval)} for {term!r}."
             )
-        grid[term.row][term.col].append((term_idx, term))
-
-    frozen_span_grids = {
-        span: tuple(tuple(tuple(cell) for cell in row) for row in grid)
-        for span, grid in span_grids.items()
-    }
+        anchored[term.row][term.col].append((term_idx, term, (dr_eval, dc_eval)))
+        row_spans[term.row].add(min(dr_eval, n_rows - term.row))
 
     return BucketedOperators(
         diagonal=tuple(diagonal_operators),
-        span_11=frozen_span_grids[(1, 1)],
-        span_12=frozen_span_grids[(1, 2)],
-        span_21=frozen_span_grids[(2, 1)],
-        span_22=frozen_span_grids[(2, 2)],
+        anchored=tuple(tuple(tuple(cell) for cell in row) for row in anchored),
+        row_spans=tuple(tuple(sorted(spans)) for spans in row_spans),
         n_terms=len(terms),
     )

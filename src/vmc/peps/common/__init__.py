@@ -14,7 +14,6 @@ from vmc.peps.common.energy import (
     _compute_all_gradients,
     _compute_all_row_gradients,
     _compute_right_envs_2row,
-    _compute_row_pair_vertical_energy,
     _compute_single_gradient,
 )
 from vmc.peps.common.strategy import (
@@ -41,6 +40,5 @@ __all__ = [
     "_compute_all_gradients",
     "_compute_all_row_gradients",
     "_compute_right_envs_2row",
-    "_compute_row_pair_vertical_energy",
     "_compute_single_gradient",
 ]

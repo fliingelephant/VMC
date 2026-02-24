@@ -149,11 +149,7 @@ def local_estimate(
         eval_span=type(model).eval_span,
     )
     has_diag = bool(bucketed_terms.diagonal)
-    has_offdiag = (
-        any(cell for row in bucketed_terms.span_11 for cell in row)
-        or any(cell for row in bucketed_terms.span_12 for cell in row)
-        or any(cell for row in bucketed_terms.span_21 for cell in row)
-    )
+    has_offdiag = any(cell for row in bucketed_terms.anchored for cell in row)
 
     if not has_diag and not has_offdiag:
         return jnp.zeros((samples.shape[0],), dtype=amps.dtype)

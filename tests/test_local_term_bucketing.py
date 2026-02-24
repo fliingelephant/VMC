@@ -48,8 +48,10 @@ class LocalTermBucketingTest(unittest.TestCase):
             terms=(OneSiteOperator(row=1, col=1, op=jnp.eye(2)),),
         )
         terms = bucket_operators(ham.terms, ham.shape, eval_span=lambda _: (2, 2))
-        self.assertEqual(len(terms.span_22[1][1]), 1)
-        self.assertEqual(len(terms.span_11[1][1]), 0)
+        self.assertEqual(len(terms.anchored[1][1]), 1)
+        self.assertEqual(terms.anchored[1][1][0][2], (2, 2))
+        self.assertEqual(terms.row_spans[1], (1,))
+        self.assertEqual(terms.row_spans[0], ())
 
 
 if __name__ == "__main__":

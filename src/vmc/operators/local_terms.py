@@ -179,18 +179,16 @@ class LocalHamiltonian:
 
 @dataclass(frozen=True)
 class BucketedOperators:
-    """Indexed, anchor-grouped local terms.
-
-    Each entry stores ``(term_idx, term)`` where ``term_idx`` is the index in
-    the original ``LocalHamiltonian.terms`` tuple. This provides a stable global
-    indexing that remains valid after bucketing. Transition terms additionally
-    store their evaluation span ``(dr, dc)``.
-    """
+    """Indexed local terms grouped by row and effective row span."""
 
     diagonal: tuple[IndexedOperator, ...]
-    anchored: tuple[tuple[tuple[AnchoredTransitionOperator, ...], ...], ...]
-    row_spans: tuple[tuple[int, ...], ...]
-    n_terms: int
+    rows: tuple[
+        tuple[
+            tuple[int, tuple[tuple[AnchoredTransitionOperator, ...], ...]],
+            ...,
+        ],
+        ...,
+    ]
 
 
 @dispatch
@@ -224,11 +222,12 @@ def bucket_operators(
     *,
     eval_span: Callable[[TransitionOperator], tuple[int, int]] | None = None,
 ) -> BucketedOperators:
-    """Group terms by anchor and annotate each with its eval span."""
+    """Group terms by row and effective row span."""
     n_rows, n_cols = shape
     span_of = support_span if eval_span is None else eval_span
-    anchored = [[[] for _ in range(n_cols)] for _ in range(n_rows)]
-    row_spans = [set() for _ in range(n_rows)]
+    rows: list[dict[int, list[list[AnchoredTransitionOperator]]]] = [
+        {} for _ in range(n_rows)
+    ]
     diagonal_operators: list[IndexedOperator] = []
 
     for term_idx, term in enumerate(terms):
@@ -250,12 +249,20 @@ def bucket_operators(
             raise ValueError(
                 f"Unsupported eval span {(dr_eval, dc_eval)} for {term!r}."
             )
-        anchored[term.row][term.col].append((term_idx, term, (dr_eval, dc_eval)))
-        row_spans[term.row].add(min(dr_eval, n_rows - term.row))
+        dr_eff = min(dr_eval, n_rows - term.row)
+        dc_eff = min(dc_eval, n_cols - term.col)
+        row_passes = rows[term.row]
+        if dr_eff not in row_passes:
+            row_passes[dr_eff] = [[] for _ in range(n_cols)]
+        row_passes[dr_eff][term.col].append((term_idx, term, (dr_eff, dc_eff)))
 
     return BucketedOperators(
         diagonal=tuple(diagonal_operators),
-        anchored=tuple(tuple(tuple(cell) for cell in row) for row in anchored),
-        row_spans=tuple(tuple(sorted(spans)) for spans in row_spans),
-        n_terms=len(terms),
+        rows=tuple(
+            tuple(
+                (dr, tuple(tuple(cell) for cell in cols))
+                for dr, cols in sorted(row_passes.items())
+            )
+            for row_passes in rows
+        ),
     )

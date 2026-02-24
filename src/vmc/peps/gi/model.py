@@ -438,109 +438,112 @@ def estimate(
 
     # Main row iteration
     bottom_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
+    empty_cols = tuple(() for _ in range(n_cols))
+    next_row_mpo = None
     for row in range(n_rows - 1, -1, -1):
         bottom_envs_cache[row] = bottom_env
         top_env = top_envs[row]
         row_mpo = _build_row_mpo_gi(tensors, sites, h_links, v_links, config, row, n_cols)
-        by_dr: dict[int, list[list[tuple[int, Any, tuple[int, int]]]]] = {}
-        for col in range(n_cols):
-            for term_entry in terms.anchored[row][col]:
-                _, _, span = term_entry
-                dr_eff = min(span[0], n_rows - row)
-                if dr_eff not in by_dr:
-                    by_dr[dr_eff] = [[] for _ in range(n_cols)]
-                by_dr[dr_eff][col].append(term_entry)
+        row_passes = terms.rows[row]
+        if not any(dr == 1 for dr, _ in row_passes):
+            row_passes = ((1, empty_cols),) + row_passes
 
-        # dr=1 pass: gradients + 1-row terms
-        right_envs = _compute_right_envs(top_env, row_mpo, bottom_env, dtype)
-        dr1_terms = by_dr.get(1, [[] for _ in range(n_cols)])
-        has_site = any(
-            isinstance(term, OneSiteOperator)
-            for col_terms in dr1_terms
-            for _, term, _ in col_terms
-        )
-        has_horizontal = any(
-            isinstance(term, HorizontalTwoSiteOperator)
-            for col_terms in dr1_terms
-            for _, term, _ in col_terms
-        )
         eff_row = None
-        if has_site or has_horizontal:
-            eff_row = [
-                _assemble_site(tensors, h_links, v_links, config, row, c)
-                for c in range(n_cols)
-            ]
-        left_env = jnp.ones((1, 1, 1), dtype=dtype)
-        for col in range(n_cols):
-            env_grad = _compute_single_gradient(
-                left_env, right_envs[col], top_env[col], bottom_env[col]
+
+        def _eval_dr1(
+            energy_acc: jax.Array,
+            eff_row_acc: list[jax.Array] | None,
+            col_terms: tuple[tuple[tuple[int, Any, tuple[int, int]], ...], ...],
+        ) -> tuple[jax.Array, list[jax.Array] | None]:
+            right_envs = _compute_right_envs(top_env, row_mpo, bottom_env, dtype)
+            has_site = any(
+                isinstance(term, OneSiteOperator)
+                for terms_at_col in col_terms
+                for _, term, _ in terms_at_col
             )
-            env_grads[row][col] = env_grad
-
-            site_terms = []
-            horizontal_terms = []
-            for term_idx, term, span in dr1_terms[col]:
-                if isinstance(term, OneSiteOperator):
-                    site_terms.append((term_idx, term))
-                elif isinstance(term, HorizontalTwoSiteOperator):
-                    horizontal_terms.append((term_idx, term, span[1]))
-                else:
-                    raise NotImplementedError(
-                        f"Unsupported GI dr=1 term type: {type(term)!r}"
-                    )
-
-            amps_site = None
-            if site_terms:
-                amps_site = jnp.einsum("pudlr,udlr->p", eff_row[col], env_grad)
-            amps_edge = None
-            if horizontal_terms:
-                col_span_eff = min(
-                    max(span_c for _, _, span_c in horizontal_terms),
-                    n_cols - col,
+            has_horizontal = any(
+                isinstance(term, HorizontalTwoSiteOperator)
+                for terms_at_col in col_terms
+                for _, term, _ in terms_at_col
+            )
+            if has_site or has_horizontal:
+                eff_row_acc = [
+                    _assemble_site(tensors, h_links, v_links, config, row, c)
+                    for c in range(n_cols)
+                ]
+            left_env = jnp.ones((1, 1, 1), dtype=dtype)
+            for col in range(n_cols):
+                env_grad = _compute_single_gradient(
+                    left_env, right_envs[col], top_env[col], bottom_env[col]
                 )
-                if col_span_eff != 2:
-                    raise NotImplementedError(
-                        "GI dr=1 terms with effective dc != 2 are not implemented."
+                env_grads[row][col] = env_grad
+
+                site_terms = []
+                horizontal_terms = []
+                for term_idx, term, span in col_terms[col]:
+                    if isinstance(term, OneSiteOperator):
+                        site_terms.append((term_idx, term))
+                    elif isinstance(term, HorizontalTwoSiteOperator):
+                        horizontal_terms.append((term_idx, term, span[1]))
+                    else:
+                        raise NotImplementedError(
+                            f"Unsupported GI dr=1 term type: {type(term)!r}"
+                        )
+
+                amps_site = None
+                if site_terms:
+                    amps_site = jnp.einsum("pudlr,udlr->p", eff_row_acc[col], env_grad)
+                amps_edge = None
+                if horizontal_terms:
+                    col_span_eff = max(span_c for _, _, span_c in horizontal_terms)
+                    if col_span_eff != 2:
+                        raise NotImplementedError(
+                            "GI dr=1 terms with effective dc != 2 are not implemented."
+                        )
+                    env_2site = _compute_2site_horizontal_env(
+                        left_env,
+                        right_envs[col + 1],
+                        top_env[col],
+                        bottom_env[col],
+                        top_env[col + 1],
+                        bottom_env[col + 1],
                     )
-                env_2site = _compute_2site_horizontal_env(
+                    amps_edge = jnp.einsum(
+                        "pudlr,qverx,udlvex->pq",
+                        eff_row_acc[col],
+                        eff_row_acc[col + 1],
+                        env_2site,
+                        optimize=[(0, 2), (0, 1)],
+                    )
+                for _, term in site_terms:
+                    spin_idx = sites[row, col]
+                    energy_acc = energy_acc + jnp.dot(term.op[:, spin_idx], amps_site) / amp
+                for _, term, _ in horizontal_terms:
+                    spin0 = sites[row, col]
+                    spin1 = sites[row, col + 1]
+                    col_idx = spin0 * phys_dim + spin1
+                    energy_acc = energy_acc + jnp.dot(term.op[:, col_idx], amps_edge.reshape(-1)) / amp
+
+                left_env = jnp.einsum(
+                    "ace,aub,cduv,evf->bdf",
                     left_env,
-                    right_envs[col + 1],
                     top_env[col],
+                    row_mpo[col],
                     bottom_env[col],
-                    top_env[col + 1],
-                    bottom_env[col + 1],
+                    optimize=[(0, 1), (0, 2), (0, 1)],
                 )
-                amps_edge = jnp.einsum(
-                    "pudlr,qverx,udlvex->pq",
-                    eff_row[col],
-                    eff_row[col + 1],
-                    env_2site,
-                    optimize=[(0, 2), (0, 1)],
-                )
-            for _, term in site_terms:
-                spin_idx = sites[row, col]
-                energy = energy + jnp.dot(term.op[:, spin_idx], amps_site) / amp
-            for _, term, _ in horizontal_terms:
-                spin0 = sites[row, col]
-                spin1 = sites[row, col + 1]
-                col_idx = spin0 * phys_dim + spin1
-                energy = energy + jnp.dot(term.op[:, col_idx], amps_edge.reshape(-1)) / amp
+            return energy_acc, eff_row_acc
 
-            left_env = jnp.einsum(
-                "ace,aub,cduv,evf->bdf",
-                left_env,
-                top_env[col],
-                row_mpo[col],
-                bottom_env[col],
-                optimize=[(0, 1), (0, 2), (0, 1)],
-            )
-
-        # dr=2 pass: vertical + plaquette
-        if 2 in by_dr and row < n_rows - 1:
-            dr2_terms = by_dr[2]
-            row_mpo_next = _build_row_mpo_gi(
-                tensors, sites, h_links, v_links, config, row + 1, n_cols
-            )
+        def _eval_dr2(
+            energy_acc: jax.Array,
+            eff_row_acc: list[jax.Array] | None,
+            col_terms: tuple[tuple[tuple[int, Any, tuple[int, int]], ...], ...],
+        ) -> tuple[jax.Array, list[jax.Array] | None]:
+            if row >= n_rows - 1:
+                return energy_acc, eff_row_acc
+            if next_row_mpo is None:
+                raise NotImplementedError("Missing next-row MPO for GI dr=2 evaluation.")
+            row_mpo_next = next_row_mpo
             bottom_env_next = bottom_envs_cache[row + 1]
             right_envs_2row = _compute_right_envs_2row(
                 top_env, row_mpo, row_mpo_next, bottom_env_next, dtype
@@ -548,13 +551,13 @@ def estimate(
 
             has_vertical = any(
                 isinstance(term, VerticalTwoSiteOperator)
-                for col_terms in dr2_terms
-                for _, term, _ in col_terms
+                for terms_at_col in col_terms
+                for _, term, _ in terms_at_col
             )
             eff_row_next = None
             if has_vertical:
-                if eff_row is None:
-                    eff_row = [
+                if eff_row_acc is None:
+                    eff_row_acc = [
                         _assemble_site(tensors, h_links, v_links, config, row, c)
                         for c in range(n_cols)
                     ]
@@ -567,7 +570,7 @@ def estimate(
             for col in range(n_cols):
                 vertical_terms = []
                 plaquette_terms = []
-                for term_idx, term, span in dr2_terms[col]:
+                for term_idx, term, span in col_terms[col]:
                     if isinstance(term, VerticalTwoSiteOperator):
                         vertical_terms.append((term_idx, term, span[1]))
                     elif isinstance(term, PlaquetteOperator):
@@ -578,10 +581,7 @@ def estimate(
                         )
 
                 if vertical_terms:
-                    col_span_eff = min(
-                        max(span_c for _, _, span_c in vertical_terms),
-                        n_cols - col,
-                    )
+                    col_span_eff = max(span_c for _, _, span_c in vertical_terms)
                     if col_span_eff != 1:
                         raise NotImplementedError(
                             "GI dr=2 vertical terms with effective dc != 1 are not implemented."
@@ -590,7 +590,7 @@ def estimate(
                         "almg,aub,puvlr,qvwmn,gwf,brnf->pq",
                         left_env_2row,
                         top_env[col],
-                        eff_row[col],
+                        eff_row_acc[col],
                         eff_row_next[col],
                         bottom_env_next[col],
                         right_envs_2row[col],
@@ -600,15 +600,12 @@ def estimate(
                         spin0 = sites[row, col]
                         spin1 = sites[row + 1, col]
                         col_idx = spin0 * phys_dim + spin1
-                        energy = energy + jnp.dot(
+                        energy_acc = energy_acc + jnp.dot(
                             term.op[:, col_idx], amps_vertical.reshape(-1)
                         ) / amp
 
                 if plaquette_terms:
-                    col_span_eff = min(
-                        max(span_c for _, _, span_c in plaquette_terms),
-                        n_cols - col,
-                    )
+                    col_span_eff = max(span_c for _, _, span_c in plaquette_terms)
                     if col_span_eff != 2:
                         raise NotImplementedError(
                             "GI dr=2 plaquette terms with effective dc != 2 are not implemented."
@@ -666,7 +663,7 @@ def estimate(
                     coeff = jnp.sum(
                         jnp.asarray([term.coeff for _, term, _ in plaquette_terms])
                     )
-                    energy = energy + coeff * (amp_plus + amp_minus) / amp
+                    energy_acc = energy_acc + coeff * (amp_plus + amp_minus) / amp
 
                 left_env_2row = jnp.einsum(
                     "alxe,aub,lruv,xyvw,ewf->bryf",
@@ -677,14 +674,22 @@ def estimate(
                     bottom_env_next[col],
                     optimize=[(0, 1), (0, 3), (0, 2), (0, 1)],
                 )
+            return energy_acc, eff_row_acc
 
-        for dr in by_dr:
-            if dr not in (1, 2):
+        pass_evaluators = {
+            1: _eval_dr1,
+            2: _eval_dr2,
+        }
+        for dr, col_terms in row_passes:
+            evaluator = pass_evaluators.get(dr)
+            if evaluator is None:
                 raise NotImplementedError(
                     f"GI transition evaluation for dr={dr} is not implemented."
                 )
+            energy, eff_row = evaluator(energy, eff_row, col_terms)
 
         bottom_env = _apply_mpo_from_below(bottom_env, row_mpo, strategy)
+        next_row_mpo = row_mpo
 
     return env_grads, energy, bottom_envs_cache
 

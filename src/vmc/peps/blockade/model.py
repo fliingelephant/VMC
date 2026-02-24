@@ -363,6 +363,8 @@ def estimate(
 
     # 2. Gradients and X term energy with incremental bottom-env construction
     bottom_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
+    empty_cols = tuple(() for _ in range(n_cols))
+    next_row_mpo = None
     for row in range(n_rows - 1, -1, -1):
         bottom_envs_cache[row] = bottom_env
         top_env = top_envs[row]
@@ -376,130 +378,123 @@ def estimate(
             )
             for c in range(n_cols)
         )
-        by_dr: dict[int, list[list[tuple[int, Any, tuple[int, int]]]]] = {}
-        for col in range(n_cols):
-            for term_entry in terms.anchored[row][col]:
-                _, _, span = term_entry
-                dr_eff = min(span[0], n_rows - row)
-                if dr_eff not in by_dr:
-                    by_dr[dr_eff] = [[] for _ in range(n_cols)]
-                by_dr[dr_eff][col].append(term_entry)
+        row_passes = terms.rows[row]
+        if not any(dr == 1 for dr, _ in row_passes):
+            row_passes = ((1, empty_cols),) + row_passes
 
-        # dr=1 pass: gradients + boundary-effective X terms
-        right_envs = _compute_right_envs(top_env, mpo, bottom_env, dtype)
-        left_env = jnp.ones((1, 1, 1), dtype=dtype)
-        dr1_terms = by_dr.get(1, [[] for _ in range(n_cols)])
-        for c in range(n_cols):
-            env_grad = _compute_single_gradient(
-                left_env, right_envs[c], top_env[c], bottom_env[c]
-            )
-            env_grads[row][c] = env_grad
-
-            if dr1_terms[c]:
-                n_cur = config[row, c]
-                n_flip = 1 - n_cur
-                can_flip = _flip_allowed(config, n_rows, n_cols, row, c, n_flip)
-                dc_eff = min(max(span[1] for _, _, span in dr1_terms[c]), n_cols - c)
-                if dc_eff == 2:
-                    right_env = right_envs[c + 1]
-
-                    def _compute_flip(_):
-                        mpo_c_flip = _assemble_mpo_site(
-                            tensors,
-                            peps_config,
-                            config,
-                            row,
-                            c,
-                            n=n_flip,
-                        )
-                        mpo_c1_flip = _assemble_mpo_site(
-                            tensors,
-                            peps_config,
-                            config,
-                            row,
-                            c + 1,
-                            k_l=n_flip,
-                        )
-                        return _contract_1row_2col(
-                            left_env,
-                            top_env,
-                            mpo_c_flip,
-                            mpo_c1_flip,
-                            bottom_env,
-                            right_env,
-                            c,
-                        )
-                elif dc_eff == 1:
-
-                    def _compute_flip(_):
-                        mpo_c_flip = _assemble_mpo_site(
-                            tensors,
-                            peps_config,
-                            config,
-                            row,
-                            c,
-                            n=n_flip,
-                        )
-                        return _contract_1row_1col(
-                            left_env,
-                            top_env[c],
-                            mpo_c_flip,
-                            bottom_env[c],
-                            jnp.ones((1, 1, 1), dtype=dtype),
-                        )
-                else:
-                    raise NotImplementedError(
-                        f"Blockade dr=1 term with effective dc={dc_eff} is not implemented."
-                    )
-
-                amp_flip = jax.lax.cond(
-                    can_flip,
-                    _compute_flip,
-                    lambda _: jnp.zeros((), dtype=amp.dtype),
-                    operand=None,
+        def _eval_dr1(
+            energy_acc: jax.Array,
+            col_terms: tuple[tuple[tuple[int, Any, tuple[int, int]], ...], ...],
+        ) -> jax.Array:
+            right_envs = _compute_right_envs(top_env, mpo, bottom_env, dtype)
+            left_env = jnp.ones((1, 1, 1), dtype=dtype)
+            for c in range(n_cols):
+                env_grad = _compute_single_gradient(
+                    left_env, right_envs[c], top_env[c], bottom_env[c]
                 )
-                for _, term, _ in dr1_terms[c]:
-                    if not isinstance(term, OneSiteOperator):
+                env_grads[row][c] = env_grad
+
+                if col_terms[c]:
+                    n_cur = config[row, c]
+                    n_flip = 1 - n_cur
+                    can_flip = _flip_allowed(config, n_rows, n_cols, row, c, n_flip)
+                    dc_eff = max(span[1] for _, _, span in col_terms[c])
+                    if dc_eff == 2:
+                        right_env = right_envs[c + 1]
+
+                        def _compute_flip(_):
+                            mpo_c_flip = _assemble_mpo_site(
+                                tensors,
+                                peps_config,
+                                config,
+                                row,
+                                c,
+                                n=n_flip,
+                            )
+                            mpo_c1_flip = _assemble_mpo_site(
+                                tensors,
+                                peps_config,
+                                config,
+                                row,
+                                c + 1,
+                                k_l=n_flip,
+                            )
+                            return _contract_1row_2col(
+                                left_env,
+                                top_env,
+                                mpo_c_flip,
+                                mpo_c1_flip,
+                                bottom_env,
+                                right_env,
+                                c,
+                            )
+                    elif dc_eff == 1:
+
+                        def _compute_flip(_):
+                            mpo_c_flip = _assemble_mpo_site(
+                                tensors,
+                                peps_config,
+                                config,
+                                row,
+                                c,
+                                n=n_flip,
+                            )
+                            return _contract_1row_1col(
+                                left_env,
+                                top_env[c],
+                                mpo_c_flip,
+                                bottom_env[c],
+                                jnp.ones((1, 1, 1), dtype=dtype),
+                            )
+                    else:
                         raise NotImplementedError(
-                            f"Unsupported blockade dr=1 term type: {type(term)!r}"
+                            f"Blockade dr=1 term with effective dc={dc_eff} is not implemented."
                         )
-                    energy = energy + term.op[n_flip, n_cur] * amp_flip / amp
 
-            left_env = jnp.einsum(
-                "ace,aub,cduv,evf->bdf",
-                left_env,
-                top_env[c],
-                mpo[c],
-                bottom_env[c],
-                optimize=[(0, 1), (0, 2), (0, 1)],
-            )
+                    amp_flip = jax.lax.cond(
+                        can_flip,
+                        _compute_flip,
+                        lambda _: jnp.zeros((), dtype=amp.dtype),
+                        operand=None,
+                    )
+                    for _, term, _ in col_terms[c]:
+                        if not isinstance(term, OneSiteOperator):
+                            raise NotImplementedError(
+                                f"Unsupported blockade dr=1 term type: {type(term)!r}"
+                            )
+                        energy_acc = energy_acc + term.op[n_flip, n_cur] * amp_flip / amp
 
-        # dr=2 pass: bulk X terms
-        if 2 in by_dr and row < n_rows - 1:
-            dr2_terms = by_dr[2]
-            bottom_env_pair = bottom_envs_cache[row + 1]
-            mpo_next = tuple(
-                _assemble_mpo_site(
-                    tensors,
-                    peps_config,
-                    config,
-                    row + 1,
-                    c,
-                    k_u=config[row, c],
+                left_env = jnp.einsum(
+                    "ace,aub,cduv,evf->bdf",
+                    left_env,
+                    top_env[c],
+                    mpo[c],
+                    bottom_env[c],
+                    optimize=[(0, 1), (0, 2), (0, 1)],
                 )
-                for c in range(n_cols)
-            )
+            return energy_acc
+
+        def _eval_dr2(
+            energy_acc: jax.Array,
+            col_terms: tuple[tuple[tuple[int, Any, tuple[int, int]], ...], ...],
+        ) -> jax.Array:
+            if row >= n_rows - 1:
+                return energy_acc
+            if next_row_mpo is None:
+                raise NotImplementedError("Missing next-row MPO for blockade dr=2 evaluation.")
+            mpo_next = next_row_mpo
+            bottom_env_pair = bottom_envs_cache[row + 1]
             right_envs_2row = _compute_right_envs_2row(
                 top_env, mpo, mpo_next, bottom_env_pair, dtype
             )
             left_env_2row = jnp.ones((1, 1, 1, 1), dtype=dtype)
 
             for c in range(n_cols):
-                if dr2_terms[c]:
+                if col_terms[c]:
                     n_cur = config[row, c]
                     n_flip = 1 - n_cur
                     can_flip = _flip_allowed(config, n_rows, n_cols, row, c, n_flip)
-                    dc_eff = min(max(span[1] for _, _, span in dr2_terms[c]), n_cols - c)
+                    dc_eff = max(span[1] for _, _, span in col_terms[c])
                     if dc_eff == 2:
                         right_env = right_envs_2row[c + 1]
 
@@ -577,12 +572,12 @@ def estimate(
                         lambda _: jnp.zeros((), dtype=amp.dtype),
                         operand=None,
                     )
-                    for _, term, _ in dr2_terms[c]:
+                    for _, term, _ in col_terms[c]:
                         if not isinstance(term, OneSiteOperator):
                             raise NotImplementedError(
                                 f"Unsupported blockade dr=2 term type: {type(term)!r}"
                             )
-                        energy = energy + term.op[n_flip, n_cur] * amp_flip / amp
+                        energy_acc = energy_acc + term.op[n_flip, n_cur] * amp_flip / amp
 
                 left_env_2row = jnp.einsum(
                     "alxe,aub,lruv,xyvw,ewf->bryf",
@@ -593,14 +588,22 @@ def estimate(
                     bottom_env_pair[c],
                     optimize=[(0, 1), (0, 3), (0, 2), (0, 1)],
                 )
+            return energy_acc
 
-        for dr in by_dr:
-            if dr not in (1, 2):
+        pass_evaluators = {
+            1: _eval_dr1,
+            2: _eval_dr2,
+        }
+        for dr, col_terms in row_passes:
+            evaluator = pass_evaluators.get(dr)
+            if evaluator is None:
                 raise NotImplementedError(
                     f"Blockade transition evaluation for dr={dr} is not implemented."
                 )
+            energy = evaluator(energy, col_terms)
 
         bottom_env = _apply_mpo_from_below(bottom_env, mpo, strategy)
+        next_row_mpo = mpo
 
     return env_grads, energy, bottom_envs_cache
 

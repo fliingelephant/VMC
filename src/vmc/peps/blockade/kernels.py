@@ -10,6 +10,7 @@ from vmc.operators.local_terms import LocalHamiltonian, bucket_operators
 from vmc.operators.time_dependent import TimeDependentHamiltonian
 from vmc.peps.blockade import model as blockade_model
 from vmc.peps.blockade.model import BlockadePEPS
+from vmc.peps.common.contraction import _apply_mpo_from_below
 from vmc.peps.standard.kernels import Cache, Context, LocalEstimates, build_mc_kernels
 
 __all__ = ["build_mc_kernels"]
@@ -49,7 +50,7 @@ def build_mc_kernels(
             for row in range(n_rows - 1, -1, -1):
                 envs[row] = env
                 row_mpo = blockade_model._build_row_mpo(tensors, indices, config, row)
-                env = blockade_model._apply_mpo_from_below(env, row_mpo, strategy)
+                env = _apply_mpo_from_below(env, row_mpo, strategy)
             return tuple(envs)
 
         return Cache(bottom_envs=jax.vmap(build_one)(config_states_flat))

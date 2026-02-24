@@ -13,6 +13,8 @@ from vmc.peps.common.strategy import ContractionStrategy
 __all__ = [
     "_build_row_mpo",
     "_contract_bottom",
+    "_contract_2row_2col",
+    "_contract_2row_1col",
     "_forward_with_cache",
     "_apply_mpo_from_below",
     "_compute_right_envs",
@@ -83,3 +85,22 @@ def _compute_right_envs(
             optimize=[(0, 3), (0, 2), (0, 1)],
         )
     return right_envs
+
+
+def _contract_2row_2col(left_env, top_env, mpo0_c, mpo1_c, mpo0_c1, mpo1_c1, bottom_env, right_env, c):
+    """Contract 2-row, 2-column window for amplitude."""
+    return jnp.einsum(
+        "alxe,aub,lruv,xyvw,ewf,bgc,rsgh,ythi,fij,cstj->",
+        left_env, top_env[c], mpo0_c, mpo1_c, bottom_env[c],
+        top_env[c + 1], mpo0_c1, mpo1_c1, bottom_env[c + 1], right_env,
+        optimize=[(1, 5), (3, 6), (1, 2), (1, 2), (0, 2), (2, 4), (1, 3), (0, 2), (0, 1)],
+    )
+
+
+def _contract_2row_1col(left_env, top, mpo0, mpo1, bottom, right_env):
+    """Contract 2-row, 1-column for amplitude (last column)."""
+    return jnp.einsum(
+        "alxe,aub,lruv,xyvw,ewf,bryf->",
+        left_env, top, mpo0, mpo1, bottom, right_env,
+        optimize=[(0, 1), (0, 4), (1, 2), (1, 2), (0, 1)],
+    )

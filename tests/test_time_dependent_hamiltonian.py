@@ -135,6 +135,34 @@ class TimeDependentHamiltonianTest(unittest.TestCase):
         self.assertAlmostEqual(float(jnp.mean(local_0).real), 1.0, places=12)
         self.assertAlmostEqual(float(jnp.mean(local_2).real), 7.0, places=12)
 
+    def test_scalar_schedule_works(self) -> None:
+        """AffineSchedule with scalar offset/slope should work for a 1-term Hamiltonian."""
+        model = PEPS(
+            rngs=nnx.Rngs(0),
+            shape=(1, 1),
+            bond_dim=1,
+            contraction_strategy=NoTruncation(),
+        )
+        operator = TimeDependentHamiltonian(
+            base=_diag_one_hamiltonian((1, 1)),
+            schedule=AffineSchedule(offset=2.5, slope=0.0),
+        )
+        init_cache, transition, estimate = build_mc_kernels(
+            model, operator, full_gradient=True,
+        )
+        tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
+        config_states = jnp.zeros((1, 1), dtype=jnp.int32)
+        coeffs = coeffs_at(operator.schedule, 0.0)
+        cache = init_cache(tensors, config_states, coeffs)
+        chain_keys = jax.random.split(jax.random.key(1), 1)
+        mc_sampler = make_mc_sampler(transition, estimate)
+        (_, _, _), (_, estimates) = mc_sampler(
+            tensors, config_states, chain_keys, cache, n_steps=1,
+        )
+        self.assertAlmostEqual(
+            float(estimates.local_estimate[0, 0].real), 2.5, places=12,
+        )
+
     def test_gi_time_dependent_not_implemented(self) -> None:
         model = GIPEPS(
             rngs=nnx.Rngs(0),

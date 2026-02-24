@@ -31,8 +31,8 @@ class AffineSchedule(TermCoefficientSchedule):
     slope: jax.Array
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "offset", jnp.asarray(self.offset))
-        object.__setattr__(self, "slope", jnp.asarray(self.slope))
+        object.__setattr__(self, "offset", jnp.atleast_1d(self.offset))
+        object.__setattr__(self, "slope", jnp.atleast_1d(self.slope))
 
     def tree_flatten(self):
         return (self.offset, self.slope), ()

@@ -31,9 +31,16 @@ from vmc.peps.blockade.compat import blockade_apply
 from vmc.peps.common.contraction import (
     _apply_mpo_from_below,
     _compute_right_envs,
+    _contract_2row_1col,
+    _contract_2row_2col,
     _contract_bottom,
 )
-from vmc.peps.common.energy import _compute_right_envs_2row, _compute_single_gradient
+from vmc.peps.common.energy import (
+    _compute_right_envs_2row,
+    _compute_single_gradient,
+    _update_left_env_1row,
+    _update_left_env_2row,
+)
 from vmc.peps.common.strategy import ContractionStrategy, Variational
 from vmc.operators.local_terms import (
     BucketedOperators,
@@ -321,6 +328,41 @@ def _build_row_mpo(
     )
 
 
+def _blockade_flip_amplitude_1row(
+    tensors, peps_config, config, row, c, n_flip, n_cols,
+    left_env, top_env, bottom_env, right_envs, dtype,
+):
+    """Compute 1-row flipped amplitude for blockade OneSiteOperator at (row, c)."""
+    mpo_c_flip = _assemble_mpo_site(tensors, peps_config, config, row, c, n=n_flip)
+    if c + 1 < n_cols:
+        mpo_c1_flip = _assemble_mpo_site(tensors, peps_config, config, row, c + 1, k_l=n_flip)
+        return _contract_1row_2col(
+            left_env, top_env, mpo_c_flip, mpo_c1_flip, bottom_env, right_envs[c + 1], c,
+        )
+    return _contract_1row_1col(
+        left_env, top_env[c], mpo_c_flip, bottom_env[c], jnp.ones((1, 1, 1), dtype=dtype),
+    )
+
+
+def _blockade_flip_amplitude_2row(
+    tensors, peps_config, config, row, c, n_flip, n_cols,
+    left_env_2row, top_env, mpo_next, bottom_env_pair, right_envs_2row, dtype,
+):
+    """Compute 2-row flipped amplitude for blockade OneSiteOperator at (row, c)."""
+    mpo0_c_flip = _assemble_mpo_site(tensors, peps_config, config, row, c, n=n_flip)
+    mpo1_c_flip = _assemble_mpo_site(tensors, peps_config, config, row + 1, c, k_u=n_flip)
+    if c + 1 < n_cols:
+        mpo0_c1_flip = _assemble_mpo_site(tensors, peps_config, config, row, c + 1, k_l=n_flip)
+        return _contract_2row_2col(
+            left_env_2row, top_env, mpo0_c_flip, mpo1_c_flip,
+            mpo0_c1_flip, mpo_next[c + 1], bottom_env_pair, right_envs_2row[c + 1], c,
+        )
+    return _contract_2row_1col(
+        left_env_2row, top_env[c], mpo0_c_flip, mpo1_c_flip,
+        bottom_env_pair[c], jnp.ones((1, 1, 1, 1), dtype=dtype),
+    )
+
+
 def estimate(
     tensors: list[list[jax.Array]],
     sample: jax.Array,
@@ -389,89 +431,24 @@ def estimate(
             right_envs = _compute_right_envs(top_env, mpo, bottom_env, dtype)
             left_env = jnp.ones((1, 1, 1), dtype=dtype)
             for c in range(n_cols):
-                env_grad = _compute_single_gradient(
+                env_grads[row][c] = _compute_single_gradient(
                     left_env, right_envs[c], top_env[c], bottom_env[c]
                 )
-                env_grads[row][c] = env_grad
-
                 if col_terms[c]:
                     n_cur = config[row, c]
                     n_flip = 1 - n_cur
-                    can_flip = _flip_allowed(config, n_rows, n_cols, row, c, n_flip)
-                    dc_eff = max(span[1] for _, _, span in col_terms[c])
-                    if dc_eff == 2:
-                        right_env = right_envs[c + 1]
-
-                        def _compute_flip(_):
-                            mpo_c_flip = _assemble_mpo_site(
-                                tensors,
-                                peps_config,
-                                config,
-                                row,
-                                c,
-                                n=n_flip,
-                            )
-                            mpo_c1_flip = _assemble_mpo_site(
-                                tensors,
-                                peps_config,
-                                config,
-                                row,
-                                c + 1,
-                                k_l=n_flip,
-                            )
-                            return _contract_1row_2col(
-                                left_env,
-                                top_env,
-                                mpo_c_flip,
-                                mpo_c1_flip,
-                                bottom_env,
-                                right_env,
-                                c,
-                            )
-                    elif dc_eff == 1:
-
-                        def _compute_flip(_):
-                            mpo_c_flip = _assemble_mpo_site(
-                                tensors,
-                                peps_config,
-                                config,
-                                row,
-                                c,
-                                n=n_flip,
-                            )
-                            return _contract_1row_1col(
-                                left_env,
-                                top_env[c],
-                                mpo_c_flip,
-                                bottom_env[c],
-                                jnp.ones((1, 1, 1), dtype=dtype),
-                            )
-                    else:
-                        raise NotImplementedError(
-                            f"Blockade dr=1 term with effective dc={dc_eff} is not implemented."
-                        )
-
                     amp_flip = jax.lax.cond(
-                        can_flip,
-                        _compute_flip,
+                        _flip_allowed(config, n_rows, n_cols, row, c, n_flip),
+                        lambda _: _blockade_flip_amplitude_1row(
+                            tensors, peps_config, config, row, c, n_flip, n_cols,
+                            left_env, top_env, bottom_env, right_envs, dtype,
+                        ),
                         lambda _: jnp.zeros((), dtype=amp.dtype),
                         operand=None,
                     )
                     for _, term, _ in col_terms[c]:
-                        if not isinstance(term, OneSiteOperator):
-                            raise NotImplementedError(
-                                f"Unsupported blockade dr=1 term type: {type(term)!r}"
-                            )
                         energy_acc = energy_acc + term.op[n_flip, n_cur] * amp_flip / amp
-
-                left_env = jnp.einsum(
-                    "ace,aub,cduv,evf->bdf",
-                    left_env,
-                    top_env[c],
-                    mpo[c],
-                    bottom_env[c],
-                    optimize=[(0, 1), (0, 2), (0, 1)],
-                )
+                left_env = _update_left_env_1row(left_env, top_env[c], mpo[c], bottom_env[c])
             return energy_acc
 
         def _eval_dr2(
@@ -488,106 +465,22 @@ def estimate(
                 top_env, mpo, mpo_next, bottom_env_pair, dtype
             )
             left_env_2row = jnp.ones((1, 1, 1, 1), dtype=dtype)
-
             for c in range(n_cols):
                 if col_terms[c]:
                     n_cur = config[row, c]
                     n_flip = 1 - n_cur
-                    can_flip = _flip_allowed(config, n_rows, n_cols, row, c, n_flip)
-                    dc_eff = max(span[1] for _, _, span in col_terms[c])
-                    if dc_eff == 2:
-                        right_env = right_envs_2row[c + 1]
-
-                        def _compute_flip(_):
-                            mpo0_c_flip = _assemble_mpo_site(
-                                tensors,
-                                peps_config,
-                                config,
-                                row,
-                                c,
-                                n=n_flip,
-                            )
-                            mpo1_c_flip = _assemble_mpo_site(
-                                tensors,
-                                peps_config,
-                                config,
-                                row + 1,
-                                c,
-                                k_u=n_flip,
-                            )
-                            mpo0_c1_flip = _assemble_mpo_site(
-                                tensors,
-                                peps_config,
-                                config,
-                                row,
-                                c + 1,
-                                k_l=n_flip,
-                            )
-                            return _contract_2row_2col(
-                                left_env_2row,
-                                top_env,
-                                mpo0_c_flip,
-                                mpo1_c_flip,
-                                mpo0_c1_flip,
-                                mpo_next[c + 1],
-                                bottom_env_pair,
-                                right_env,
-                                c,
-                            )
-                    elif dc_eff == 1:
-
-                        def _compute_flip(_):
-                            mpo0_c_flip = _assemble_mpo_site(
-                                tensors,
-                                peps_config,
-                                config,
-                                row,
-                                c,
-                                n=n_flip,
-                            )
-                            mpo1_c_flip = _assemble_mpo_site(
-                                tensors,
-                                peps_config,
-                                config,
-                                row + 1,
-                                c,
-                                k_u=n_flip,
-                            )
-                            return _contract_2row_1col(
-                                left_env_2row,
-                                top_env[c],
-                                mpo0_c_flip,
-                                mpo1_c_flip,
-                                bottom_env_pair[c],
-                                jnp.ones((1, 1, 1, 1), dtype=dtype),
-                            )
-                    else:
-                        raise NotImplementedError(
-                            f"Blockade dr=2 term with effective dc={dc_eff} is not implemented."
-                        )
-
                     amp_flip = jax.lax.cond(
-                        can_flip,
-                        _compute_flip,
+                        _flip_allowed(config, n_rows, n_cols, row, c, n_flip),
+                        lambda _: _blockade_flip_amplitude_2row(
+                            tensors, peps_config, config, row, c, n_flip, n_cols,
+                            left_env_2row, top_env, mpo_next, bottom_env_pair, right_envs_2row, dtype,
+                        ),
                         lambda _: jnp.zeros((), dtype=amp.dtype),
                         operand=None,
                     )
                     for _, term, _ in col_terms[c]:
-                        if not isinstance(term, OneSiteOperator):
-                            raise NotImplementedError(
-                                f"Unsupported blockade dr=2 term type: {type(term)!r}"
-                            )
                         energy_acc = energy_acc + term.op[n_flip, n_cur] * amp_flip / amp
-
-                left_env_2row = jnp.einsum(
-                    "alxe,aub,lruv,xyvw,ewf->bryf",
-                    left_env_2row,
-                    top_env[c],
-                    mpo[c],
-                    mpo_next[c],
-                    bottom_env_pair[c],
-                    optimize=[(0, 1), (0, 3), (0, 2), (0, 1)],
-                )
+                left_env_2row = _update_left_env_2row(left_env_2row, top_env[c], mpo[c], mpo_next[c], bottom_env_pair[c])
             return energy_acc
 
         pass_evaluators = {
@@ -807,14 +700,7 @@ def _sweep_single_row(
         if c + 1 < n_cols:
             mpo[c + 1] = jnp.where(accept, mpo_c1_flip, mpo_c1)
 
-        left_env = jnp.einsum(
-            "ace,aub,cduv,evf->bdf",
-            left_env,
-            top_env[c],
-            mpo[c],
-            bottom_env[c],
-            optimize=[(0, 1), (0, 2), (0, 1)],
-        )
+        left_env = _update_left_env_1row(left_env, top_env[c], mpo[c], bottom_env[c])
 
     return key, config, tuple(mpo)
 
@@ -969,15 +855,7 @@ def _sweep_row_pair(
         if c + 1 < n_cols:
             mpo0[c + 1] = jnp.where(accept, mpo0_c1_flip, mpo0_c1)
 
-        left_env = jnp.einsum(
-            "alxe,aub,lruv,xyvw,ewf->bryf",
-            left_env,
-            top_env[c],
-            mpo0[c],
-            mpo1[c],
-            bottom_env[c],
-            optimize=[(0, 1), (0, 3), (0, 2), (0, 1)],
-        )
+        left_env = _update_left_env_2row(left_env, top_env[c], mpo0[c], mpo1[c], bottom_env[c])
 
     return key, config, tuple(mpo0), tuple(mpo1)
 
@@ -1022,42 +900,6 @@ def _contract_1row_1col(
         bottom,
         right_env,
         optimize=[(0, 1), (1, 2), (1, 2), (0, 1)],
-    )
-
-
-def _contract_2row_2col(
-    left_env: jax.Array,
-    top_env: tuple,
-    mpo0_c: jax.Array,
-    mpo1_c: jax.Array,
-    mpo0_c1: jax.Array,
-    mpo1_c1: jax.Array,
-    bottom_env: tuple,
-    right_env: jax.Array,
-    c: int,
-) -> jax.Array:
-    """Contract 2-row, 2-column window for amplitude."""
-    return jnp.einsum(
-        "alxe,aub,lruv,xyvw,ewf,bgc,rsgh,ythi,fij,cstj->",
-        left_env, top_env[c], mpo0_c, mpo1_c, bottom_env[c],
-        top_env[c + 1], mpo0_c1, mpo1_c1, bottom_env[c + 1], right_env,
-        optimize=[(1, 5), (3, 6), (1, 2), (1, 2), (0, 2), (2, 4), (1, 3), (0, 2), (0, 1)],
-    )
-
-
-def _contract_2row_1col(
-    left_env: jax.Array,
-    top: jax.Array,
-    mpo0: jax.Array,
-    mpo1: jax.Array,
-    bottom: jax.Array,
-    right_env: jax.Array,
-) -> jax.Array:
-    """Contract 2-row, 1-column for amplitude (last column)."""
-    return jnp.einsum(
-        "alxe,aub,lruv,xyvw,ewf,bryf->",
-        left_env, top, mpo0, mpo1, bottom, right_env,
-        optimize=[(0, 1), (0, 4), (1, 2), (1, 2), (0, 1)],
     )
 
 

@@ -18,13 +18,32 @@ from vmc.peps.common.contraction import _apply_mpo_from_below, _build_row_mpo, _
 from vmc.peps.common.strategy import ContractionStrategy
 
 __all__ = [
+    "_update_left_env_1row",
+    "_update_left_env_2row",
     "_compute_right_envs_2row",
     "_compute_all_row_gradients",
     "_compute_all_env_grads_and_energy",
-    "_compute_2site_horizontal_env",
     "_compute_single_gradient",
     "_compute_all_gradients",
 ]
+
+def _update_left_env_1row(left_env, top, mpo, bottom):
+    """Advance 1-row left environment by one column."""
+    return jnp.einsum(
+        "ace,aub,cduv,evf->bdf",
+        left_env, top, mpo, bottom,
+        optimize=[(0, 1), (0, 2), (0, 1)],
+    )
+
+
+def _update_left_env_2row(left_env, top, mpo0, mpo1, bottom):
+    """Advance 2-row left environment by one column."""
+    return jnp.einsum(
+        "alxe,aub,lruv,xyvw,ewf->bryf",
+        left_env, top, mpo0, mpo1, bottom,
+        optimize=[(0, 1), (0, 3), (0, 2), (0, 1)],
+    )
+
 
 def _compute_right_envs_2row(
     top_env: tuple,
@@ -65,12 +84,7 @@ def _compute_all_row_gradients(
         env_grads.append(
             _compute_single_gradient(left_env, right_envs[c], top_mps[c], bottom_mps[c])
         )
-        # Direct einsum for left_env update: left_env @ top @ mpo @ bot -> new_left_env
-        left_env = jnp.einsum(
-            "ace,aub,cduv,evf->bdf",
-            left_env, top_mps[c], mpo[c], bottom_mps[c],
-            optimize=[(0, 1), (0, 2), (0, 1)],
-        )
+        left_env = _update_left_env_1row(left_env, top_mps[c], mpo[c], bottom_mps[c])
     return env_grads
 
 
@@ -193,14 +207,7 @@ def _compute_all_env_grads_and_energy(
                         term.op[:, col_idx], amps_horizontal.reshape(-1)
                     ) / amp
 
-                left_env = jnp.einsum(
-                    "ace,aub,cduv,evf->bdf",
-                    left_env,
-                    top_env[col],
-                    mpo[col],
-                    bottom_env[col],
-                    optimize=[(0, 1), (0, 2), (0, 1)],
-                )
+                left_env = _update_left_env_1row(left_env, top_env[col], mpo[col], bottom_env[col])
             return energy_acc
 
         def _eval_dr2(
@@ -249,15 +256,7 @@ def _compute_all_env_grads_and_energy(
                         energy_acc = energy_acc + coeff * jnp.dot(
                             term.op[:, col_idx], amps_vertical.reshape(-1)
                         ) / amp
-                left_env_2row = jnp.einsum(
-                    "alxe,aub,lruv,xyvw,ewf->bryf",
-                    left_env_2row,
-                    top_env[col],
-                    mpo[col],
-                    next_row_mpo[col],
-                    bottom_env_next[col],
-                    optimize=[(0, 1), (0, 3), (0, 2), (0, 1)],
-                )
+                left_env_2row = _update_left_env_2row(left_env_2row, top_env[col], mpo[col], next_row_mpo[col], bottom_env_next[col])
             return energy_acc
 
         pass_evaluators = {
@@ -275,38 +274,6 @@ def _compute_all_env_grads_and_energy(
         next_row_mpo = mpo
 
     return env_grads, energy, bottom_envs_cache
-
-
-def _compute_2site_horizontal_env(
-    left_env: jax.Array,
-    right_env: jax.Array,
-    top0: jax.Array,
-    bot0: jax.Array,
-    top1: jax.Array,
-    bot1: jax.Array,
-) -> jax.Array:
-    """Compute 2-site environment for horizontal edge (c, c+1).
-
-    Index conventions:
-        left_env: (tL, mL, bL) - top/mpo/bottom left bonds
-        right_env: (tR, mR, bR) - top/mpo/bottom right bonds
-        top0/top1: (left, up, right) - boundary boundary state
-        bot0/bot1: (left, down, right) - boundary boundary state
-
-    Returns tensor with shape (up0, down0, mL, up1, down1, mR).
-    """
-    env = jnp.einsum(
-        "ace,aub,edf,bvg,ghi,fwi->cudvhw",
-        left_env,
-        top0,
-        bot0,
-        top1,
-        right_env,
-        bot1,
-        optimize=[(0, 1), (0, 1), (1, 2), (1, 2), (0, 1)],
-    )
-    # Transpose to (up0, down0, mL, up1, down1, mR)
-    return jnp.transpose(env, (1, 2, 0, 3, 5, 4))
 
 
 def _compute_single_gradient(

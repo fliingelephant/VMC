@@ -3,10 +3,11 @@ from __future__ import annotations
 
 from vmc import config  # noqa: F401 - JAX config must be imported first
 
-from typing import Any
+from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
+from plum import dispatch
 
 from vmc.operators.local_terms import (
     BucketedOperators,
@@ -18,6 +19,9 @@ from vmc.peps.common.contraction import _apply_mpo_from_below, _build_row_mpo, _
 from vmc.peps.common.strategy import ContractionStrategy
 
 __all__ = [
+    "RowEnvs",
+    "TwoRowEnvs",
+    "_eval_term",
     "_update_left_env_1row",
     "_update_left_env_2row",
     "_compute_right_envs_2row",
@@ -26,6 +30,26 @@ __all__ = [
     "_compute_single_gradient",
     "_compute_all_gradients",
 ]
+
+
+class RowEnvs(NamedTuple):
+    """1-row environment context for dr=1 evaluation."""
+    left_env: jax.Array
+    right_envs: list
+    top_env: tuple
+    bottom_env: tuple
+    env_grad: jax.Array
+    row_tensors: list
+
+
+class TwoRowEnvs(NamedTuple):
+    """2-row environment context for dr=2 evaluation."""
+    left_env: jax.Array
+    right_envs: list
+    top_env: tuple
+    bottom_env_next: tuple
+    row_tensors: list
+    row_tensors_next: list
 
 def _update_left_env_1row(left_env, top, mpo, bottom):
     """Advance 1-row left environment by one column."""
@@ -88,6 +112,72 @@ def _compute_all_row_gradients(
     return env_grads
 
 
+@dispatch
+def _eval_term(
+    term: OneSiteOperator,
+    envs: RowEnvs,
+    tensors: Any,
+    row: int,
+    col: int,
+    spins: jax.Array,
+    phys_dim: int,
+) -> jax.Array:
+    amps = jnp.einsum("pudlr,udlr->p", envs.row_tensors[col], envs.env_grad)
+    return jnp.dot(term.op[:, spins[row, col]], amps)
+
+
+@_eval_term.dispatch
+def _eval_term(
+    term: HorizontalTwoSiteOperator,
+    envs: RowEnvs,
+    tensors: Any,
+    row: int,
+    col: int,
+    spins: jax.Array,
+    phys_dim: int,
+) -> jax.Array:
+    amps = jnp.einsum(
+        "ace,aub,edf,pudcr,qvwrx,bvg,fwi,gxi->pq",
+        envs.left_env,
+        envs.top_env[col],
+        envs.bottom_env[col],
+        envs.row_tensors[col],
+        envs.row_tensors[col + 1],
+        envs.top_env[col + 1],
+        envs.bottom_env[col + 1],
+        envs.right_envs[col + 1],
+        optimize=[
+            (0, 1), (1, 6), (0, 5), (1, 3), (1, 2), (1, 2), (0, 1),
+        ],
+    )
+    s0, s1 = spins[row, col], spins[row, col + 1]
+    return jnp.dot(term.op[:, s0 * phys_dim + s1], amps.reshape(-1))
+
+
+@_eval_term.dispatch
+def _eval_term(
+    term: VerticalTwoSiteOperator,
+    envs: TwoRowEnvs,
+    tensors: Any,
+    row: int,
+    col: int,
+    spins: jax.Array,
+    phys_dim: int,
+) -> jax.Array:
+    amps = jnp.einsum(
+        "almg,aub,puvlr,qvwmn,gwf,brnf->pq",
+        envs.left_env,
+        envs.top_env[col],
+        envs.row_tensors[col],
+        envs.row_tensors_next[col],
+        envs.bottom_env_next[col],
+        envs.right_envs[col],
+        optimize=[(0, 1), (2, 3), (0, 2), (1, 2), (0, 1)],
+    )
+    s0, s1 = spins[row, col], spins[row + 1, col]
+    return jnp.dot(term.op[:, s0 * phys_dim + s1], amps.reshape(-1))
+
+
 def _compute_all_env_grads_and_energy(
     tensors: Any,
     spins: jax.Array,
@@ -140,73 +230,17 @@ def _compute_all_env_grads_and_energy(
             right_envs = _compute_right_envs(top_env, mpo, bottom_env, dtype)
             left_env = jnp.ones((1, 1, 1), dtype=dtype)
             for col in range(n_cols):
-                one_site_terms = []
-                horizontal_terms = []
+                env_grad = _compute_single_gradient(
+                    left_env, right_envs[col], top_env[col], bottom_env[col]
+                )
+                if collect_grads:
+                    env_grads[row][col] = env_grad
+                envs = RowEnvs(left_env, right_envs, top_env, bottom_env, env_grad, tensors[row])
                 for term_idx, term, span in col_terms[col]:
-                    if isinstance(term, OneSiteOperator):
-                        one_site_terms.append((term_idx, term))
-                    elif isinstance(term, HorizontalTwoSiteOperator):
-                        horizontal_terms.append((term_idx, term, span[1]))
-                    else:
-                        raise NotImplementedError(
-                            f"Unsupported dr=1 term type: {type(term)!r}"
-                        )
-
-                need_env_grad = collect_grads or bool(one_site_terms)
-                env_grad = None
-                amps_site = None
-                if need_env_grad:
-                    env_grad = _compute_single_gradient(
-                        left_env, right_envs[col], top_env[col], bottom_env[col]
-                    )
-                    if collect_grads:
-                        env_grads[row][col] = env_grad
-                    if one_site_terms:
-                        amps_site = jnp.einsum(
-                            "pudlr,udlr->p", tensors[row][col], env_grad
-                        )
-
-                amps_horizontal = None
-                if horizontal_terms:
-                    col_span_eff = max(span_c for _, _, span_c in horizontal_terms)
-                    if col_span_eff != 2:
-                        raise NotImplementedError(
-                            "dr=1 terms with effective dc != 2 are not implemented."
-                        )
-                    amps_horizontal = jnp.einsum(
-                        "ace,aub,edf,pudcr,qvwrx,bvg,fwi,gxi->pq",
-                        left_env,
-                        top_env[col],
-                        bottom_env[col],
-                        tensors[row][col],
-                        tensors[row][col + 1],
-                        top_env[col + 1],
-                        bottom_env[col + 1],
-                        right_envs[col + 1],
-                        optimize=[
-                            (0, 1),
-                            (1, 6),
-                            (0, 5),
-                            (1, 3),
-                            (1, 2),
-                            (1, 2),
-                            (0, 1),
-                        ],
-                    )
-
-                for term_idx, term in one_site_terms:
                     coeff = 1.0 if coeffs is None else coeffs[term_idx]
-                    spin_idx = spins[row, col]
-                    energy_acc = energy_acc + coeff * jnp.dot(term.op[:, spin_idx], amps_site) / amp
-                for term_idx, term, _ in horizontal_terms:
-                    coeff = 1.0 if coeffs is None else coeffs[term_idx]
-                    spin0 = spins[row, col]
-                    spin1 = spins[row, col + 1]
-                    col_idx = spin0 * phys_dim + spin1
-                    energy_acc = energy_acc + coeff * jnp.dot(
-                        term.op[:, col_idx], amps_horizontal.reshape(-1)
+                    energy_acc = energy_acc + coeff * _eval_term(
+                        term, envs, tensors, row, col, spins, phys_dim,
                     ) / amp
-
                 left_env = _update_left_env_1row(left_env, top_env[col], mpo[col], bottom_env[col])
             return energy_acc
 
@@ -224,38 +258,15 @@ def _compute_all_env_grads_and_energy(
             )
             left_env_2row = jnp.ones((1, 1, 1, 1), dtype=dtype)
             for col in range(n_cols):
-                vertical_terms = []
+                envs = TwoRowEnvs(
+                    left_env_2row, right_envs_2row, top_env, bottom_env_next,
+                    tensors[row], tensors[row + 1],
+                )
                 for term_idx, term, span in col_terms[col]:
-                    if isinstance(term, VerticalTwoSiteOperator):
-                        vertical_terms.append((term_idx, term, span[1]))
-                    else:
-                        raise NotImplementedError(
-                            f"Unsupported dr=2 term type: {type(term)!r}"
-                        )
-                if vertical_terms:
-                    col_span_eff = max(span_c for _, _, span_c in vertical_terms)
-                    if col_span_eff != 1:
-                        raise NotImplementedError(
-                            "dr=2 terms with effective dc != 1 are not implemented."
-                        )
-                    amps_vertical = jnp.einsum(
-                        "almg,aub,puvlr,qvwmn,gwf,brnf->pq",
-                        left_env_2row,
-                        top_env[col],
-                        tensors[row][col],
-                        tensors[row + 1][col],
-                        bottom_env_next[col],
-                        right_envs_2row[col],
-                        optimize=[(0, 1), (2, 3), (0, 2), (1, 2), (0, 1)],
-                    )
-                    for term_idx, term, _ in vertical_terms:
-                        coeff = 1.0 if coeffs is None else coeffs[term_idx]
-                        spin0 = spins[row, col]
-                        spin1 = spins[row + 1, col]
-                        col_idx = spin0 * phys_dim + spin1
-                        energy_acc = energy_acc + coeff * jnp.dot(
-                            term.op[:, col_idx], amps_vertical.reshape(-1)
-                        ) / amp
+                    coeff = 1.0 if coeffs is None else coeffs[term_idx]
+                    energy_acc = energy_acc + coeff * _eval_term(
+                        term, envs, tensors, row, col, spins, phys_dim,
+                    ) / amp
                 left_env_2row = _update_left_env_2row(left_env_2row, top_env[col], mpo[col], next_row_mpo[col], bottom_env_next[col])
             return energy_acc
 

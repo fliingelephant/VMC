@@ -93,7 +93,7 @@ def _contract_2row_2col(left_env, top_env, mpo0_c, mpo1_c, mpo0_c1, mpo1_c1, bot
         "alxe,aub,lruv,xyvw,ewf,bgc,rsgh,ythi,fij,cstj->",
         left_env, top_env[c], mpo0_c, mpo1_c, bottom_env[c],
         top_env[c + 1], mpo0_c1, mpo1_c1, bottom_env[c + 1], right_env,
-        optimize=[(1, 5), (3, 6), (1, 2), (1, 2), (0, 2), (2, 4), (1, 3), (0, 2), (0, 1)],
+        optimize=[(0, 1), (0, 8), (0, 7), (0, 6), (0, 4), (0, 4), (1, 2), (1, 2), (0, 1)],
     )
 
 

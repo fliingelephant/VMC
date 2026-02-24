@@ -880,7 +880,7 @@ def _contract_1row_2col(
         mpo_c1,
         bottom_env[c + 1],
         right_env,
-        optimize=[(0, 1), (0, 4), (0, 3), (0, 2), (2, 3), (0, 2), (0, 1)],
+        optimize=[(0, 1), (0, 6), (0, 5), (0, 3), (1, 2), (1, 2), (0, 1)],
     )
 
 

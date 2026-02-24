@@ -9,6 +9,9 @@ from vmc.peps.common.contraction import (
     _forward_with_cache,
 )
 from vmc.peps.common.energy import (
+    RowEnvs,
+    TwoRowEnvs,
+    _eval_term,
     _compute_all_env_grads_and_energy,
     _compute_all_gradients,
     _compute_all_row_gradients,
@@ -34,6 +37,9 @@ __all__ = [
     "_compute_right_envs",
     "_contract_bottom",
     "_forward_with_cache",
+    "RowEnvs",
+    "TwoRowEnvs",
+    "_eval_term",
     "_compute_all_env_grads_and_energy",
     "_compute_all_gradients",
     "_compute_all_row_gradients",

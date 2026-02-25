@@ -70,7 +70,7 @@ def coeffs_at(schedule: TermCoefficientSchedule, t: float | jax.Array) -> jax.Ar
 
 @coeffs_at.dispatch
 def coeffs_at(schedule: AffineSchedule, t: float | jax.Array) -> jax.Array:
-    return schedule.offset + jnp.asarray(t, dtype=schedule.offset.dtype) * schedule.slope
+    return schedule.offset + jnp.asarray(t) * schedule.slope
 
 
 @dispatch

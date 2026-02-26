@@ -298,7 +298,7 @@ def _compute_single_gradient(
     Returns gradient tensor with shape (up, down, mL, mR).
     """
     return jnp.einsum(
-        "ace,aub,evf,bdf->ucvd", left_env, top_tensor, bot_tensor, right_env,
+        "ace,aub,evf,bdf->uvcd", left_env, top_tensor, bot_tensor, right_env,
         optimize=[(0, 1), (0, 1), (0, 1)],
     )
 

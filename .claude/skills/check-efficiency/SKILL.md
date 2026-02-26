@@ -49,6 +49,14 @@ These checks require understanding the PEPS VMC algorithm and cannot be automate
 - **Rebuilding what's already cached.** Are row MPOs, right environments, or boundary states recomputed when they could be carried from a previous step?
 - **Unnecessary recomputation across MC sweeps.** Does the sampler recompute quantities that are unchanged between sweeps (e.g., static operator structure, bucketed terms)?
 
+### Sparsity in linear algebra
+
+Matrices arising from the physics often have known sparsity or block structure (e.g., slicing by physical index, gauge sectors, blockade constraints). For every `@` (matmul), solve, or decomposition on such matrices, check whether the code exploits the structure or falls back to dense operations.
+
+- **Unnecessary densification.** Does a compact/sparse representation get expanded to dense form before a matmul or solve? The operation can often be done directly on the compact form (block-by-block accumulation, masked operations, etc.).
+- **Ignored block structure.** When the physics guarantees that certain blocks are zero (e.g., cross-slice blocks within a site), check that these zero blocks are never computed.
+- **Consistency across code paths.** If multiple dispatch paths exist for the same operation (e.g., different space types, different Jacobian types), check that ALL paths exploit structure — not just some.
+
 ### Memory and data flow
 
 - **Large intermediate tensors.** Flag any contraction that produces intermediates much larger than the inputs (e.g., O(Dc^3) when O(Dc^2) is achievable).

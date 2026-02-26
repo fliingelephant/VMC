@@ -10,7 +10,7 @@ import jax.numpy as jnp
 from flax import nnx
 
 from vmc.core import _sample_counts, _trim_samples, make_mc_sampler
-from vmc.operators import LocalHamiltonian, PlaquetteTerm
+from vmc.operators import LocalHamiltonian, PlaquetteOperator
 from vmc.peps import NoTruncation, PEPS, build_mc_kernels
 from vmc.peps.gi.local_terms import GILocalHamiltonian, build_electric_terms
 from vmc.peps.gi.model import GIPEPS, GIPEPSConfig
@@ -181,7 +181,7 @@ class QGTTest(unittest.TestCase):
 
         electric_terms = build_electric_terms(config.shape, coeff=0.1, N=config.N)
         plaquette_terms = tuple(
-            PlaquetteTerm(row=r, col=c, coeff=0.2)
+            PlaquetteOperator(row=r, col=c, coeff=0.2)
             for r in range(config.shape[0] - 1)
             for c in range(config.shape[1] - 1)
         )
@@ -243,7 +243,7 @@ class QGTTest(unittest.TestCase):
 
         electric_terms = build_electric_terms(config.shape, coeff=0.1, N=config.N)
         plaquette_terms = tuple(
-            PlaquetteTerm(row=r, col=c, coeff=0.2)
+            PlaquetteOperator(row=r, col=c, coeff=0.2)
             for r in range(config.shape[0] - 1)
             for c in range(config.shape[1] - 1)
         )

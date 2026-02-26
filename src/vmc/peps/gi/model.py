@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import functools
-from typing import Any
+from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -23,18 +23,28 @@ from flax import nnx
 from vmc.peps.common.contraction import (
     _apply_mpo_from_below,
     _compute_right_envs,
+    _contract_2row_1col,
+    _contract_2row_2col,
     _contract_bottom,
-    _metropolis_ratio,
 )
 from vmc.peps.common.energy import (
-    _compute_2site_horizontal_env,
+    RowEnvs,
+    TwoRowEnvs,
+    _eval_term,
     _compute_right_envs_2row,
-    _compute_row_pair_vertical_energy,
     _compute_single_gradient,
+    _update_left_env_1row,
+    _update_left_env_2row,
 )
 from vmc.peps.gi.compat import gi_apply
-from vmc.operators.local_terms import bucket_terms
-from vmc.utils.utils import random_tensor
+from vmc.operators.local_terms import (
+    BucketedOperators,
+    PlaquetteOperator,
+    VerticalTwoSiteOperator,
+    bucket_operators,
+    support_span,
+)
+from vmc.utils.utils import random_tensor, _hastings_ratio, _metropolis_hastings_accept
 
 
 @dataclass(frozen=True)
@@ -142,7 +152,7 @@ class GIPEPS(nnx.Module):
         return sites, h_links, v_links
 
     apply = staticmethod(gi_apply)
-
+    eval_span = staticmethod(support_span)
     def random_physical_configuration(
         self,
         key: jax.Array,
@@ -389,6 +399,66 @@ def _plaquette_flip(
 # =============================================================================
 
 
+class GITwoRowEnvs(NamedTuple):
+    """2-row environment context for GI dr=2 evaluation (Vertical + Plaquette)."""
+    left_env: jax.Array
+    right_envs: list
+    top_env: tuple
+    bottom_env_next: tuple
+    row_tensors: list
+    row_tensors_next: list
+    h_links: jax.Array
+    v_links: jax.Array
+    config: Any
+
+
+@_eval_term.dispatch
+def _eval_term(
+    term: VerticalTwoSiteOperator,
+    envs: GITwoRowEnvs,
+    tensors: Any,
+    row: int,
+    col: int,
+    spins: jax.Array,
+    phys_dim: int,
+) -> jax.Array:
+    amps = jnp.einsum(
+        "almg,aub,puvlr,qvwmn,gwf,brnf->pq",
+        envs.left_env,
+        envs.top_env[col],
+        envs.row_tensors[col],
+        envs.row_tensors_next[col],
+        envs.bottom_env_next[col],
+        envs.right_envs[col],
+        optimize=[(0, 1), (2, 3), (0, 2), (1, 2), (0, 1)],
+    )
+    s0, s1 = spins[row, col], spins[row + 1, col]
+    return jnp.dot(term.op[:, s0 * phys_dim + s1], amps.reshape(-1))
+
+
+@_eval_term.dispatch
+def _eval_term(
+    term: PlaquetteOperator,
+    envs: GITwoRowEnvs,
+    tensors: Any,
+    row: int,
+    col: int,
+    spins: jax.Array,
+    phys_dim: int,
+) -> jax.Array:
+    def _flip_amp(delta):
+        h_f, v_f = _plaquette_flip(envs.h_links, envs.v_links, row, col, delta=delta, N=envs.config.N)
+        mpos = []
+        for dr, dc in ((0, 0), (0, 1), (1, 0), (1, 1)):
+            eff = _assemble_site(tensors, h_f, v_f, envs.config, row + dr, col + dc)
+            mpos.append(jnp.transpose(eff[spins[row + dr, col + dc]], (2, 3, 0, 1)))
+        return _contract_2row_2col(
+            envs.left_env, envs.top_env, mpos[0], mpos[2],
+            mpos[1], mpos[3], envs.bottom_env_next, envs.right_envs[col + 1], col,
+        )
+    return term.coeff * (_flip_amp(1) + _flip_amp(-1))
+
+
 def estimate(
     tensors: list[list[jax.Array]],
     sample: jax.Array,
@@ -398,6 +468,8 @@ def estimate(
     config: GIPEPSConfig,
     strategy: Any,
     top_envs: list[tuple],
+    *,
+    terms: BucketedOperators | None = None,
 ) -> tuple[list[list[jax.Array]], jax.Array, list[tuple]]:
     """Compute environment gradients and local energy for GI-PEPS."""
     from vmc.peps.gi.local_terms import LinkDiagonalTerm
@@ -408,19 +480,18 @@ def estimate(
     phys_dim = config.phys_dim
     bottom_envs_cache = [None] * n_rows
 
-    (
-        diagonal_terms,
-        one_site_terms,
-        horizontal_terms,
-        vertical_terms,
-        plaquette_terms,
-    ) = bucket_terms(operator.terms, config.shape)
+    if terms is None:
+        terms = bucket_operators(
+            operator.terms,
+            config.shape,
+            eval_span=GIPEPS.eval_span,
+        )
 
     env_grads = [[None for _ in range(n_cols)] for _ in range(n_rows)]
 
     # Compute diagonal energy
     energy = jnp.zeros((), dtype=amp.dtype)
-    for term in diagonal_terms:
+    for _, term in terms.diagonal:
         if isinstance(term, LinkDiagonalTerm):
             energy = energy + term.energy(h_links, v_links)
             continue
@@ -431,183 +502,101 @@ def estimate(
 
     # Main row iteration
     bottom_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
+    empty_cols = tuple(() for _ in range(n_cols))
+    next_row_mpo = None
     for row in range(n_rows - 1, -1, -1):
         bottom_envs_cache[row] = bottom_env
         top_env = top_envs[row]
         row_mpo = _build_row_mpo_gi(tensors, sites, h_links, v_links, config, row, n_cols)
+        row_passes = terms.rows[row]
+        if not any(dr == 1 for dr, _ in row_passes):
+            row_passes = ((1, empty_cols),) + row_passes
 
-        # Check what terms exist for this row
-        row_has_one_site = any(one_site_terms[row][c] for c in range(n_cols))
-        row_has_horizontal = any(horizontal_terms[row][c] for c in range(n_cols - 1))
-        row_has_vertical = row < n_rows - 1 and any(
-            vertical_terms[row][c] for c in range(n_cols)
-        )
-        row_has_plaquette = row < n_rows - 1 and any(
-            plaquette_terms[row][c] for c in range(n_cols - 1)
-        )
-
-        # 1-row right envs (always needed for gradients)
-        right_envs = _compute_right_envs(top_env, row_mpo, bottom_env, dtype)
-
-        # Assemble effective tensors if needed
         eff_row = None
-        eff_row_next = None
-        if row_has_one_site or row_has_horizontal or row_has_vertical:
-            eff_row = [
-                _assemble_site(tensors, h_links, v_links, config, row, c)
-                for c in range(n_cols)
-            ]
-        if row_has_vertical:
-            eff_row_next = [
-                _assemble_site(tensors, h_links, v_links, config, row + 1, c)
-                for c in range(n_cols)
-            ]
 
-        # Column iteration for gradients + 1-row terms
-        left_env = jnp.ones((1, 1, 1), dtype=dtype)
-        for c in range(n_cols):
-            # Gradient
-            env_grad = _compute_single_gradient(
-                left_env, right_envs[c], top_env[c], bottom_env[c]
-            )
-            env_grads[row][c] = env_grad
-
-            # Single-site energy
-            site_terms = one_site_terms[row][c]
-            if site_terms:
-                amps_site = jnp.einsum("pudlr,udlr->p", eff_row[c], env_grad)
-                spin_idx = sites[row, c]
-                for term in site_terms:
-                    energy = energy + jnp.dot(term.op[:, spin_idx], amps_site) / amp
-
-            # Horizontal energy
-            if c < n_cols - 1:
-                edge_terms = horizontal_terms[row][c]
-                if edge_terms:
-                    env_2site = _compute_2site_horizontal_env(
-                        left_env,
-                        right_envs[c + 1],
-                        top_env[c],
-                        bottom_env[c],
-                        top_env[c + 1],
-                        bottom_env[c + 1],
-                    )
-                    amps_edge = jnp.einsum(
-                        "pudlr,qverx,udlvex->pq",
-                        eff_row[c],
-                        eff_row[c + 1],
-                        env_2site,
-                        optimize=[(0, 2), (0, 1)],
-                    )
-                    spin0 = sites[row, c]
-                    spin1 = sites[row, c + 1]
-                    col_idx = spin0 * phys_dim + spin1
-                    amps_flat = amps_edge.reshape(-1)
-                    for term in edge_terms:
-                        energy = energy + jnp.dot(term.op[:, col_idx], amps_flat) / amp
-
-            # Direct einsum for left_env update
-            left_env = jnp.einsum(
-                "ace,aub,cduv,evf->bdf",
-                left_env, top_env[c], row_mpo[c], bottom_env[c],
-                optimize=[(0, 1), (0, 2), (0, 1)],
-            )
-
-        # 2-row terms (vertical + plaquette)
-        if row < n_rows - 1:
-            row_mpo_next = _build_row_mpo_gi(
-                tensors, sites, h_links, v_links, config, row + 1, n_cols
-            )
-            if row_has_vertical or row_has_plaquette:
-                bottom_env_next = bottom_envs_cache[row + 1]
-                right_envs_2row = _compute_right_envs_2row(
-                    top_env, row_mpo, row_mpo_next, bottom_env_next, dtype
+        def _eval_dr1(
+            energy_acc: jax.Array,
+            eff_row_acc: list[jax.Array] | None,
+            col_terms: tuple[tuple[tuple[int, Any, tuple[int, int]], ...], ...],
+        ) -> tuple[jax.Array, list[jax.Array] | None]:
+            right_envs = _compute_right_envs(top_env, row_mpo, bottom_env, dtype)
+            has_terms = any(col_terms[c] for c in range(n_cols))
+            if has_terms:
+                eff_row_acc = [
+                    _assemble_site(tensors, h_links, v_links, config, row, c)
+                    for c in range(n_cols)
+                ]
+            left_env = jnp.ones((1, 1, 1), dtype=dtype)
+            for col in range(n_cols):
+                env_grad = _compute_single_gradient(
+                    left_env, right_envs[col], top_env[col], bottom_env[col]
                 )
+                env_grads[row][col] = env_grad
+                envs = RowEnvs(left_env, right_envs, top_env, bottom_env, env_grad, eff_row_acc)
+                for term_idx, term, span in col_terms[col]:
+                    energy_acc = energy_acc + _eval_term(
+                        term, envs, tensors, row, col, sites, phys_dim,
+                    ) / amp
+                left_env = _update_left_env_1row(left_env, top_env[col], row_mpo[col], bottom_env[col])
+            return energy_acc, eff_row_acc
 
-                # Vertical energy
-                if row_has_vertical:
-                    energy = energy + _compute_row_pair_vertical_energy(
-                        top_env,
-                        bottom_env_next,
-                        row_mpo,
-                        row_mpo_next,
-                        eff_row,
-                        eff_row_next,
-                        sites[row],
-                        sites[row + 1],
-                        vertical_terms[row],
-                        amp,
-                        phys_dim,
-                        right_envs_2row=right_envs_2row,
-                    )
+        def _eval_dr2(
+            energy_acc: jax.Array,
+            eff_row_acc: list[jax.Array] | None,
+            col_terms: tuple[tuple[tuple[int, Any, tuple[int, int]], ...], ...],
+        ) -> tuple[jax.Array, list[jax.Array] | None]:
+            if row >= n_rows - 1:
+                return energy_acc, eff_row_acc
+            if next_row_mpo is None:
+                raise NotImplementedError("Missing next-row MPO for GI dr=2 evaluation.")
+            row_mpo_next = next_row_mpo
+            bottom_env_next = bottom_envs_cache[row + 1]
+            right_envs_2row = _compute_right_envs_2row(
+                top_env, row_mpo, row_mpo_next, bottom_env_next, dtype
+            )
+            has_vertical = any(
+                isinstance(term, VerticalTwoSiteOperator)
+                for terms_at_col in col_terms
+                for _, term, _ in terms_at_col
+            )
+            eff_row_next = None
+            if has_vertical:
+                if eff_row_acc is None:
+                    eff_row_acc = [
+                        _assemble_site(tensors, h_links, v_links, config, row, c)
+                        for c in range(n_cols)
+                    ]
+                eff_row_next = [
+                    _assemble_site(tensors, h_links, v_links, config, row + 1, c)
+                    for c in range(n_cols)
+                ]
+            left_env_2row = jnp.ones((1, 1, 1, 1), dtype=dtype)
+            for col in range(n_cols):
+                envs = GITwoRowEnvs(
+                    left_env_2row, right_envs_2row, top_env, bottom_env_next,
+                    eff_row_acc, eff_row_next, h_links, v_links, config,
+                )
+                for term_idx, term, span in col_terms[col]:
+                    energy_acc = energy_acc + _eval_term(
+                        term, envs, tensors, row, col, sites, phys_dim,
+                    ) / amp
+                left_env_2row = _update_left_env_2row(left_env_2row, top_env[col], row_mpo[col], row_mpo_next[col], bottom_env_next[col])
+            return energy_acc, eff_row_acc
 
-                # Plaquette energy
-                if row_has_plaquette:
-                    left_env_2row = jnp.ones((1, 1, 1, 1), dtype=dtype)
-                    for c in range(n_cols - 1):
-                        plaquette_here = plaquette_terms[row][c]
-                        if not plaquette_here:
-                            # Direct einsum for left_env_2row update
-                            left_env_2row = jnp.einsum(
-                                "alxe,aub,lruv,xyvw,ewf->bryf",
-                                left_env_2row, top_env[c], row_mpo[c], row_mpo_next[c], bottom_env_next[c],
-                                optimize=[(0, 1), (0, 3), (0, 2), (0, 1)],
-                            )
-                            continue
-                        # Use global amp to normalize plaquette contributions (saves one contraction).
-                        # Compute amplitude for +delta flip
-                        h_plus, v_plus = _plaquette_flip(
-                            h_links, v_links, row, c, delta=1, N=config.N
-                        )
-                        eff00p = _assemble_site(tensors, h_plus, v_plus, config, row, c)
-                        eff01p = _assemble_site(tensors, h_plus, v_plus, config, row, c + 1)
-                        eff10p = _assemble_site(tensors, h_plus, v_plus, config, row + 1, c)
-                        eff11p = _assemble_site(tensors, h_plus, v_plus, config, row + 1, c + 1)
-                        mpo00p = jnp.transpose(eff00p[sites[row, c]], (2, 3, 0, 1))
-                        mpo01p = jnp.transpose(eff01p[sites[row, c + 1]], (2, 3, 0, 1))
-                        mpo10p = jnp.transpose(eff10p[sites[row + 1, c]], (2, 3, 0, 1))
-                        mpo11p = jnp.transpose(eff11p[sites[row + 1, c + 1]], (2, 3, 0, 1))
-                        amp_plus = jnp.einsum(
-                            "alxe,aub,lruv,xyvw,ewf,bgc,rsgh,ythi,fij,cstj->",
-                            left_env_2row, top_env[c], mpo00p, mpo10p, bottom_env_next[c],
-                            top_env[c + 1], mpo01p, mpo11p, bottom_env_next[c + 1],
-                            right_envs_2row[c + 1],
-                            optimize=[(1, 5), (3, 6), (1, 2), (1, 2), (0, 2), (2, 4), (1, 3), (0, 2), (0, 1)],
-                        )
-                        # Compute amplitude for -delta flip
-                        h_minus, v_minus = _plaquette_flip(
-                            h_links, v_links, row, c, delta=-1, N=config.N
-                        )
-                        eff00m = _assemble_site(tensors, h_minus, v_minus, config, row, c)
-                        eff01m = _assemble_site(tensors, h_minus, v_minus, config, row, c + 1)
-                        eff10m = _assemble_site(tensors, h_minus, v_minus, config, row + 1, c)
-                        eff11m = _assemble_site(tensors, h_minus, v_minus, config, row + 1, c + 1)
-                        mpo00m = jnp.transpose(eff00m[sites[row, c]], (2, 3, 0, 1))
-                        mpo01m = jnp.transpose(eff01m[sites[row, c + 1]], (2, 3, 0, 1))
-                        mpo10m = jnp.transpose(eff10m[sites[row + 1, c]], (2, 3, 0, 1))
-                        mpo11m = jnp.transpose(eff11m[sites[row + 1, c + 1]], (2, 3, 0, 1))
-                        amp_minus = jnp.einsum(
-                            "alxe,aub,lruv,xyvw,ewf,bgc,rsgh,ythi,fij,cstj->",
-                            left_env_2row, top_env[c], mpo00m, mpo10m, bottom_env_next[c],
-                            top_env[c + 1], mpo01m, mpo11m, bottom_env_next[c + 1],
-                            right_envs_2row[c + 1],
-                            optimize=[(1, 5), (3, 6), (1, 2), (1, 2), (0, 2), (2, 4), (1, 3), (0, 2), (0, 1)],
-                        )
-                        if len(plaquette_here) == 1:
-                            coeff = plaquette_here[0].coeff
-                        else:
-                            coeff = jnp.sum(
-                                jnp.asarray([term.coeff for term in plaquette_here])
-                            )
-                        energy = energy + coeff * (amp_plus + amp_minus) / amp
-                        # Direct einsum for left_env_2row update
-                        left_env_2row = jnp.einsum(
-                            "alxe,aub,lruv,xyvw,ewf->bryf",
-                            left_env_2row, top_env[c], row_mpo[c], row_mpo_next[c], bottom_env_next[c],
-                            optimize=[(0, 1), (0, 3), (0, 2), (0, 1)],
-                        )
+        pass_evaluators = {
+            1: _eval_dr1,
+            2: _eval_dr2,
+        }
+        for dr, col_terms in row_passes:
+            evaluator = pass_evaluators.get(dr)
+            if evaluator is None:
+                raise NotImplementedError(
+                    f"GI transition evaluation for dr={dr} is not implemented."
+                )
+            energy, eff_row = evaluator(energy, eff_row, col_terms)
 
         bottom_env = _apply_mpo_from_below(bottom_env, row_mpo, strategy)
+        next_row_mpo = row_mpo
 
     return env_grads, energy, bottom_envs_cache
 
@@ -615,15 +604,6 @@ def estimate(
 # =============================================================================
 # GIPEPS Sweep helpers
 # =============================================================================
-
-
-def _update_row_mpo_for_site(
-    row_mpo: tuple, col: int, tensor: jax.Array, phys_index: jax.Array
-) -> tuple:
-    """Update a single site in the row MPO."""
-    row_list = list(row_mpo)
-    row_list[col] = jnp.transpose(tensor[phys_index], (2, 3, 0, 1))
-    return tuple(row_list)
 
 
 def _plaquette_sweep_row_pair(
@@ -649,15 +629,9 @@ def _plaquette_sweep_row_pair(
         key, subkey = jax.random.split(key)
         delta = jax.random.randint(subkey, (), 1, config.N, dtype=jnp.int32)
 
-        # Direct einsum for 2-column amplitude
-        # Convention: left_env (a,l,x,e), top[c] (a,u,b), mpo0[c] (l,r,u,v), mpo1[c] (x,y,v,w), bot[c] (e,w,f)
-        # top[c+1] (b,g,c), mpo0[c+1] (r,s,g,h), mpo1[c+1] (y,t,h,i), bot[c+1] (f,i,j), right_env (c,s,t,j)
-        amp_cur = jnp.einsum(
-            "alxe,aub,lruv,xyvw,ewf,bgc,rsgh,ythi,fij,cstj->",
-            left_env, top_env[c], row_mpo0[c], row_mpo1[c], bottom_env[c],
-            top_env[c + 1], row_mpo0[c + 1], row_mpo1[c + 1], bottom_env[c + 1],
-            right_envs[c + 1],
-            optimize=[(1, 5), (3, 6), (1, 2), (1, 2), (0, 2), (2, 4), (1, 3), (0, 2), (0, 1)],
+        amp_cur = _contract_2row_2col(
+            left_env, top_env, row_mpo0[c], row_mpo1[c],
+            row_mpo0[c + 1], row_mpo1[c + 1], bottom_env, right_envs[c + 1], c,
         )
         # Compute proposed configuration
         h_prop, v_prop = _plaquette_flip(h_links, v_links, r, c, delta=delta, N=config.N)
@@ -669,17 +643,13 @@ def _plaquette_sweep_row_pair(
         mpo01_prop = jnp.transpose(eff01[sites[r, c + 1]], (2, 3, 0, 1))
         mpo10_prop = jnp.transpose(eff10[sites[r + 1, c]], (2, 3, 0, 1))
         mpo11_prop = jnp.transpose(eff11[sites[r + 1, c + 1]], (2, 3, 0, 1))
-        amp_prop = jnp.einsum(
-            "alxe,aub,lruv,xyvw,ewf,bgc,rsgh,ythi,fij,cstj->",
-            left_env, top_env[c], mpo00_prop, mpo10_prop, bottom_env[c],
-            top_env[c + 1], mpo01_prop, mpo11_prop, bottom_env[c + 1],
-            right_envs[c + 1],
-            optimize=[(1, 5), (3, 6), (1, 2), (1, 2), (0, 2), (2, 4), (1, 3), (0, 2), (0, 1)],
+        amp_prop = _contract_2row_2col(
+            left_env, top_env, mpo00_prop, mpo10_prop,
+            mpo01_prop, mpo11_prop, bottom_env, right_envs[c + 1], c,
         )
-        ratio = _metropolis_ratio(jnp.abs(amp_cur) ** 2, jnp.abs(amp_prop) ** 2)
-
-        key, accept_key = jax.random.split(key)
-        accept = jax.random.uniform(accept_key) < jnp.minimum(1.0, ratio)
+        key, accept = _metropolis_hastings_accept(
+            key, jnp.abs(amp_cur) ** 2, jnp.abs(amp_prop) ** 2
+        )
 
         # Update MPOs for accepted proposals
         row_mpo0_list = list(row_mpo0)
@@ -693,12 +663,7 @@ def _plaquette_sweep_row_pair(
         h_links = jnp.where(accept, h_prop, h_links)
         v_links = jnp.where(accept, v_prop, v_links)
 
-        # Direct einsum for left_env update (use current MPOs after accept/reject)
-        left_env = jnp.einsum(
-            "alxe,aub,lruv,xyvw,ewf->bryf",
-            left_env, top_env[c], row_mpo0[c], row_mpo1[c], bottom_env[c],
-            optimize=[(0, 1), (0, 3), (0, 2), (0, 1)],
-        )
+        left_env = _update_left_env_2row(left_env, top_env[c], row_mpo0[c], row_mpo1[c], bottom_env[c])
 
     return key, row_mpo0, row_mpo1, h_links, v_links
 
@@ -766,13 +731,16 @@ def _horizontal_link_sweep_row(
             top_env[c + 1], mpo1, bottom_env[c + 1], right_envs[c + 1],
             optimize=[(0, 1), (0, 6), (0, 5), (0, 3), (1, 2), (1, 2), (0, 1)],
         )
-        ratio = _metropolis_ratio(jnp.abs(amp_cur) ** 2, jnp.abs(amp_prop) ** 2)
-        prop_ratio = (charge_deg[q_left_new] * charge_deg[q_right_new]) / (
-            charge_deg[q_left] * charge_deg[q_right]
+        proposal_ratio = _hastings_ratio(
+            forward_prob=1.0 / (charge_deg[q_left_new] * charge_deg[q_right_new]),
+            backward_prob=1.0 / (charge_deg[q_left] * charge_deg[q_right]),
         )
-        ratio = ratio * prop_ratio
-        key, accept_key = jax.random.split(key)
-        accept = jax.random.uniform(accept_key) < jnp.minimum(1.0, ratio)
+        key, accept = _metropolis_hastings_accept(
+            key,
+            jnp.abs(amp_cur) ** 2,
+            jnp.abs(amp_prop) ** 2,
+            proposal_ratio=proposal_ratio,
+        )
 
         # Update row_mpo, h_links, sites based on accept
         row_mpo_list = list(row_mpo)
@@ -782,12 +750,7 @@ def _horizontal_link_sweep_row(
         h_links = jnp.where(accept, h_prop, h_links)
         sites = jnp.where(accept, sites_prop, sites)
 
-        # Direct einsum for left_env update
-        left_env = jnp.einsum(
-            "ace,aub,cduv,evf->bdf",
-            left_env, top_env[c], row_mpo[c], bottom_env[c],
-            optimize=[(0, 1), (0, 2), (0, 1)],
-        )
+        left_env = _update_left_env_1row(left_env, top_env[c], row_mpo[c], bottom_env[c])
 
     return key, row_mpo, sites, h_links
 
@@ -819,11 +782,8 @@ def _vertical_link_sweep_row_pair(
         key, subkey = jax.random.split(key)
         delta = jax.random.randint(subkey, (), 1, config.N, dtype=jnp.int32)
 
-        # Direct einsum for amplitude (single column in 2-row)
-        amp_cur = jnp.einsum(
-            "alxe,aub,lruv,xyvw,ewf,bryf->",
+        amp_cur = _contract_2row_1col(
             left_env, top_env[c], row_mpo0[c], row_mpo1[c], bottom_env[c], right_envs[c],
-            optimize=[(0, 1), (0, 4), (1, 2), (1, 2), (0, 1)],
         )
         v_prop = v_links.at[r, c].set((v_links[r, c] + delta) % n)
         q_top = charge_of_site[sites[r, c]]
@@ -844,19 +804,19 @@ def _vertical_link_sweep_row_pair(
         eff1 = _assemble_site(tensors, h_links, v_prop, config, r + 1, c)
         mpo0_prop = jnp.transpose(eff0[sites_prop[r, c]], (2, 3, 0, 1))
         mpo1_prop = jnp.transpose(eff1[sites_prop[r + 1, c]], (2, 3, 0, 1))
-        # Direct einsum for proposed amplitude
-        amp_prop = jnp.einsum(
-            "alxe,aub,lruv,xyvw,ewf,bryf->",
+        amp_prop = _contract_2row_1col(
             left_env, top_env[c], mpo0_prop, mpo1_prop, bottom_env[c], right_envs[c],
-            optimize=[(0, 1), (0, 4), (1, 2), (1, 2), (0, 1)],
         )
-        ratio = _metropolis_ratio(jnp.abs(amp_cur) ** 2, jnp.abs(amp_prop) ** 2)
-        prop_ratio = (charge_deg[q_top_new] * charge_deg[q_bottom_new]) / (
-            charge_deg[q_top] * charge_deg[q_bottom]
+        proposal_ratio = _hastings_ratio(
+            forward_prob=1.0 / (charge_deg[q_top_new] * charge_deg[q_bottom_new]),
+            backward_prob=1.0 / (charge_deg[q_top] * charge_deg[q_bottom]),
         )
-        ratio = ratio * prop_ratio
-        key, accept_key = jax.random.split(key)
-        accept = jax.random.uniform(accept_key) < jnp.minimum(1.0, ratio)
+        key, accept = _metropolis_hastings_accept(
+            key,
+            jnp.abs(amp_cur) ** 2,
+            jnp.abs(amp_prop) ** 2,
+            proposal_ratio=proposal_ratio,
+        )
 
         # Update row_mpo, v_links, sites based on accept
         row_mpo0_list = list(row_mpo0)
@@ -868,12 +828,7 @@ def _vertical_link_sweep_row_pair(
         v_links = jnp.where(accept, v_prop, v_links)
         sites = jnp.where(accept, sites_prop, sites)
 
-        # Direct einsum for left_env update
-        left_env = jnp.einsum(
-            "alxe,aub,lruv,xyvw,ewf->bryf",
-            left_env, top_env[c], row_mpo0[c], row_mpo1[c], bottom_env[c],
-            optimize=[(0, 1), (0, 3), (0, 2), (0, 1)],
-        )
+        left_env = _update_left_env_2row(left_env, top_env[c], row_mpo0[c], row_mpo1[c], bottom_env[c])
 
     return key, row_mpo0, row_mpo1, sites, v_links
 

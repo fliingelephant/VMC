@@ -3,23 +3,71 @@ from __future__ import annotations
 
 from vmc import config  # noqa: F401 - JAX config must be imported first
 
-from typing import Any
+from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
+from plum import dispatch
 
+from vmc.operators.local_terms import (
+    BucketedOperators,
+    HorizontalTwoSiteOperator,
+    OneSiteOperator,
+    VerticalTwoSiteOperator,
+)
 from vmc.peps.common.contraction import _apply_mpo_from_below, _build_row_mpo, _compute_right_envs
 from vmc.peps.common.strategy import ContractionStrategy
 
 __all__ = [
+    "RowEnvs",
+    "TwoRowEnvs",
+    "_eval_term",
+    "_update_left_env_1row",
+    "_update_left_env_2row",
     "_compute_right_envs_2row",
-    "_compute_row_pair_vertical_energy",
     "_compute_all_row_gradients",
     "_compute_all_env_grads_and_energy",
-    "_compute_2site_horizontal_env",
     "_compute_single_gradient",
     "_compute_all_gradients",
 ]
+
+
+class RowEnvs(NamedTuple):
+    """1-row environment context for dr=1 evaluation."""
+    left_env: jax.Array
+    right_envs: list
+    top_env: tuple
+    bottom_env: tuple
+    env_grad: jax.Array
+    row_tensors: list
+
+
+class TwoRowEnvs(NamedTuple):
+    """2-row environment context for dr=2 evaluation."""
+    left_env: jax.Array
+    right_envs: list
+    top_env: tuple
+    bottom_env_next: tuple
+    row_tensors: list
+    row_tensors_next: list
+
+def _update_left_env_1row(left_env, top, mpo, bottom):
+    """Advance 1-row left environment by one column."""
+    return jnp.einsum(
+        "ace,aub,cduv,evf->bdf",
+        left_env, top, mpo, bottom,
+        optimize=[(0, 1), (0, 2), (0, 1)],
+    )
+
+
+def _update_left_env_2row(left_env, top, mpo0, mpo1, bottom):
+    """Advance 2-row left environment by one column."""
+    return jnp.einsum(
+        "alxe,aub,lruv,xyvw,ewf->bryf",
+        left_env, top, mpo0, mpo1, bottom,
+        optimize=[(0, 1), (0, 3), (0, 2), (0, 1)],
+    )
+
 
 def _compute_right_envs_2row(
     top_env: tuple,
@@ -44,57 +92,6 @@ def _compute_right_envs_2row(
     return right_envs
 
 
-def _compute_row_pair_vertical_energy(
-    top_mps: tuple,
-    bottom_mps: tuple,
-    mpo_row0: tuple,
-    mpo_row1: tuple,
-    tensors_row0: list[jax.Array],
-    tensors_row1: list[jax.Array],
-    spins_row0: jax.Array,
-    spins_row1: jax.Array,
-    terms_row: list[list],
-    amp: jax.Array,
-    phys_dim: int,
-    *,
-    right_envs_2row: list[jax.Array] | None = None,
-) -> jax.Array:
-    """Compute vertical 2-site energy contributions for a row pair."""
-    if not any(terms_row):
-        return jnp.zeros((), dtype=amp.dtype)
-    n_cols = len(mpo_row0)
-    dtype = mpo_row0[0].dtype
-    if right_envs_2row is None:
-        right_envs_2row = _compute_right_envs_2row(
-            top_mps, mpo_row0, mpo_row1, bottom_mps, dtype
-        )
-    left_env = jnp.ones((1, 1, 1, 1), dtype=dtype)
-    energy = jnp.zeros((), dtype=amp.dtype)
-    for c in range(n_cols):
-        col_terms = terms_row[c]
-        if col_terms:
-            # Direct einsum: left_env @ top @ tensor0 @ tensor1 @ bot @ right_env -> (p, q)
-            # tensor0: (p, u, v, l, r), tensor1: (q, v, w, m, n)
-            amps_edge = jnp.einsum(
-                "almg,aub,puvlr,qvwmn,gwf,brnf->pq",
-                left_env, top_mps[c], tensors_row0[c], tensors_row1[c], bottom_mps[c], right_envs_2row[c],
-                optimize=[(0, 1), (2, 3), (0, 2), (1, 2), (0, 1)],
-            )
-            spin0 = spins_row0[c]
-            spin1 = spins_row1[c]
-            col_idx = spin0 * phys_dim + spin1
-            amps_flat = amps_edge.reshape(-1)
-            for term in col_terms:
-                energy = energy + jnp.dot(term.op[:, col_idx], amps_flat) / amp
-        # Direct einsum for left_env_2row update
-        left_env = jnp.einsum(
-            "alxe,aub,lruv,xyvw,ewf->bryf",
-            left_env, top_mps[c], mpo_row0[c], mpo_row1[c], bottom_mps[c],
-            optimize=[(0, 1), (0, 3), (0, 2), (0, 1)],
-        )
-    return energy
-
-
 def _compute_all_row_gradients(
     top_mps: tuple,
     bottom_mps: tuple,
@@ -111,13 +108,74 @@ def _compute_all_row_gradients(
         env_grads.append(
             _compute_single_gradient(left_env, right_envs[c], top_mps[c], bottom_mps[c])
         )
-        # Direct einsum for left_env update: left_env @ top @ mpo @ bot -> new_left_env
-        left_env = jnp.einsum(
-            "ace,aub,cduv,evf->bdf",
-            left_env, top_mps[c], mpo[c], bottom_mps[c],
-            optimize=[(0, 1), (0, 2), (0, 1)],
-        )
+        left_env = _update_left_env_1row(left_env, top_mps[c], mpo[c], bottom_mps[c])
     return env_grads
+
+
+@dispatch
+def _eval_term(
+    term: OneSiteOperator,
+    envs: RowEnvs,
+    tensors: Any,
+    row: int,
+    col: int,
+    spins: jax.Array,
+    phys_dim: int,
+) -> jax.Array:
+    amps = jnp.einsum("pudlr,udlr->p", envs.row_tensors[col], envs.env_grad)
+    return jnp.dot(term.op[:, spins[row, col]], amps)
+
+
+@_eval_term.dispatch
+def _eval_term(
+    term: HorizontalTwoSiteOperator,
+    envs: RowEnvs,
+    tensors: Any,
+    row: int,
+    col: int,
+    spins: jax.Array,
+    phys_dim: int,
+) -> jax.Array:
+    amps = jnp.einsum(
+        "ace,aub,edf,pudcr,qvwrx,bvg,fwi,gxi->pq",
+        envs.left_env,
+        envs.top_env[col],
+        envs.bottom_env[col],
+        envs.row_tensors[col],
+        envs.row_tensors[col + 1],
+        envs.top_env[col + 1],
+        envs.bottom_env[col + 1],
+        envs.right_envs[col + 1],
+        optimize=[
+            (0, 1), (1, 6), (0, 5), (1, 3), (1, 2), (1, 2), (0, 1),
+        ],
+    )
+    s0, s1 = spins[row, col], spins[row, col + 1]
+    return jnp.dot(term.op[:, s0 * phys_dim + s1], amps.reshape(-1))
+
+
+@_eval_term.dispatch
+def _eval_term(
+    term: VerticalTwoSiteOperator,
+    envs: TwoRowEnvs,
+    tensors: Any,
+    row: int,
+    col: int,
+    spins: jax.Array,
+    phys_dim: int,
+) -> jax.Array:
+    amps = jnp.einsum(
+        "almg,aub,puvlr,qvwmn,gwf,brnf->pq",
+        envs.left_env,
+        envs.top_env[col],
+        envs.row_tensors[col],
+        envs.row_tensors_next[col],
+        envs.bottom_env_next[col],
+        envs.right_envs[col],
+        optimize=[(0, 1), (2, 3), (0, 2), (1, 2), (0, 1)],
+    )
+    s0, s1 = spins[row, col], spins[row + 1, col]
+    return jnp.dot(term.op[:, s0 * phys_dim + s1], amps.reshape(-1))
 
 
 def _compute_all_env_grads_and_energy(
@@ -128,10 +186,8 @@ def _compute_all_env_grads_and_energy(
     strategy: ContractionStrategy,
     top_envs: list[tuple],
     *,
-    diagonal_terms: list,
-    one_site_terms: list[list[list]],
-    horizontal_terms: list[list[list]],
-    vertical_terms: list[list[list]],
+    terms: BucketedOperators,
+    coeffs: jax.Array | None = None,
     collect_grads: bool = True,
 ) -> tuple[list[list[jax.Array]], jax.Array, list[tuple]]:
     """Backward pass: use cached top_envs, build and cache bottom_envs."""
@@ -148,112 +204,87 @@ def _compute_all_env_grads_and_energy(
     energy = jnp.zeros((), dtype=amp.dtype)
 
     # Diagonal terms
-    for term in diagonal_terms:
+    for term_idx, term in terms.diagonal:
         idx = jnp.asarray(0, dtype=jnp.int32)
         for row, col in term.sites:
             idx = idx * phys_dim + spins[row, col]
-        energy = energy + term.diag[idx]
+        coeff = 1.0 if coeffs is None else coeffs[term_idx]
+        energy = energy + coeff * term.diag[idx]
 
     # Backward pass: bottom → top
     bottom_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
+    empty_cols = tuple(() for _ in range(n_cols))
     next_row_mpo = None
     for row in range(n_rows - 1, -1, -1):
         bottom_envs_cache[row] = bottom_env
         top_env = top_envs[row]
         mpo = _build_row_mpo(tensors, spins[row], row, n_cols)
-        right_envs = _compute_right_envs(top_env, mpo, bottom_env, dtype)
-        left_env = jnp.ones((1, 1, 1), dtype=dtype)
-        for c in range(n_cols):
-            site_terms = one_site_terms[row][c]
-            need_env_grad = collect_grads or site_terms
-            if need_env_grad:
+        row_passes = terms.rows[row]
+        if collect_grads and not any(dr == 1 for dr, _ in row_passes):
+            row_passes = ((1, empty_cols),) + row_passes
+
+        def _eval_dr1(
+            energy_acc: jax.Array,
+            col_terms: tuple[tuple[tuple[int, object, tuple[int, int]], ...], ...],
+        ) -> jax.Array:
+            right_envs = _compute_right_envs(top_env, mpo, bottom_env, dtype)
+            left_env = jnp.ones((1, 1, 1), dtype=dtype)
+            for col in range(n_cols):
                 env_grad = _compute_single_gradient(
-                    left_env, right_envs[c], top_env[c], bottom_env[c]
+                    left_env, right_envs[col], top_env[col], bottom_env[col]
                 )
                 if collect_grads:
-                    env_grads[row][c] = env_grad
-                if site_terms:
-                    amps_site = jnp.einsum("pudlr,udlr->p", tensors[row][c], env_grad)
-                    spin_idx = spins[row, c]
-                    for term in site_terms:
-                        energy = energy + jnp.dot(term.op[:, spin_idx], amps_site) / amp
-            if c < n_cols - 1:
-                edge_terms = horizontal_terms[row][c]
-                if edge_terms:
-                    amps_edge = jnp.einsum(
-                        "ace,aub,edf,pudcr,qvwrx,bvg,fwi,gxi->pq",
-                        left_env,
-                        top_env[c],
-                        bottom_env[c],
-                        tensors[row][c],
-                        tensors[row][c + 1],
-                        top_env[c + 1],
-                        bottom_env[c + 1],
-                        right_envs[c + 1],
-                        optimize=[(0, 1), (1, 6), (0, 5), (1, 3), (1, 2), (1, 2), (0, 1)],
-                    )
-                    spin0 = spins[row, c]
-                    spin1 = spins[row, c + 1]
-                    col_idx = spin0 * phys_dim + spin1
-                    amps_flat = amps_edge.reshape(-1)
-                    for term in edge_terms:
-                        energy = energy + jnp.dot(term.op[:, col_idx], amps_flat) / amp
-            left_env = jnp.einsum(
-                "ace,aub,cduv,evf->bdf",
-                left_env, top_env[c], mpo[c], bottom_env[c],
-                optimize=[(0, 1), (0, 2), (0, 1)],
+                    env_grads[row][col] = env_grad
+                envs = RowEnvs(left_env, right_envs, top_env, bottom_env, env_grad, tensors[row])
+                for term_idx, term, span in col_terms[col]:
+                    coeff = 1.0 if coeffs is None else coeffs[term_idx]
+                    energy_acc = energy_acc + coeff * _eval_term(
+                        term, envs, tensors, row, col, spins, phys_dim,
+                    ) / amp
+                left_env = _update_left_env_1row(left_env, top_env[col], mpo[col], bottom_env[col])
+            return energy_acc
+
+        def _eval_dr2(
+            energy_acc: jax.Array,
+            col_terms: tuple[tuple[tuple[int, object, tuple[int, int]], ...], ...],
+        ) -> jax.Array:
+            if row >= n_rows - 1:
+                return energy_acc
+            if next_row_mpo is None:
+                raise NotImplementedError("Missing next-row MPO for dr=2 evaluation.")
+            bottom_env_next = bottom_envs_cache[row + 1]
+            right_envs_2row = _compute_right_envs_2row(
+                top_env, mpo, next_row_mpo, bottom_env_next, dtype
             )
-        # Vertical energy between row and row+1
-        if row < n_rows - 1:
-            energy = energy + _compute_row_pair_vertical_energy(
-                top_env,
-                bottom_envs_cache[row + 1],
-                mpo,
-                next_row_mpo,
-                tensors[row],
-                tensors[row + 1],
-                spins[row],
-                spins[row + 1],
-                vertical_terms[row],
-                amp,
-                phys_dim,
-            )
+            left_env_2row = jnp.ones((1, 1, 1, 1), dtype=dtype)
+            for col in range(n_cols):
+                envs = TwoRowEnvs(
+                    left_env_2row, right_envs_2row, top_env, bottom_env_next,
+                    tensors[row], tensors[row + 1],
+                )
+                for term_idx, term, span in col_terms[col]:
+                    coeff = 1.0 if coeffs is None else coeffs[term_idx]
+                    energy_acc = energy_acc + coeff * _eval_term(
+                        term, envs, tensors, row, col, spins, phys_dim,
+                    ) / amp
+                left_env_2row = _update_left_env_2row(left_env_2row, top_env[col], mpo[col], next_row_mpo[col], bottom_env_next[col])
+            return energy_acc
+
+        pass_evaluators = {
+            1: _eval_dr1,
+            2: _eval_dr2,
+        }
+        for dr, col_terms in row_passes:
+            evaluator = pass_evaluators.get(dr)
+            if evaluator is None:
+                raise NotImplementedError(
+                    f"dr={dr} transition evaluation is not implemented."
+                )
+            energy = evaluator(energy, col_terms)
         bottom_env = _apply_mpo_from_below(bottom_env, mpo, strategy)
         next_row_mpo = mpo
 
     return env_grads, energy, bottom_envs_cache
-
-
-def _compute_2site_horizontal_env(
-    left_env: jax.Array,
-    right_env: jax.Array,
-    top0: jax.Array,
-    bot0: jax.Array,
-    top1: jax.Array,
-    bot1: jax.Array,
-) -> jax.Array:
-    """Compute 2-site environment for horizontal edge (c, c+1).
-
-    Index conventions:
-        left_env: (tL, mL, bL) - top/mpo/bottom left bonds
-        right_env: (tR, mR, bR) - top/mpo/bottom right bonds
-        top0/top1: (left, up, right) - boundary boundary state
-        bot0/bot1: (left, down, right) - boundary boundary state
-
-    Returns tensor with shape (up0, down0, mL, up1, down1, mR).
-    """
-    env = jnp.einsum(
-        "ace,aub,edf,bvg,ghi,fwi->cudvhw",
-        left_env,
-        top0,
-        bot0,
-        top1,
-        right_env,
-        bot1,
-        optimize=[(0, 1), (0, 1), (1, 2), (1, 2), (0, 1)],
-    )
-    # Transpose to (up0, down0, mL, up1, down1, mR)
-    return jnp.transpose(env, (1, 2, 0, 3, 5, 4))
 
 
 def _compute_single_gradient(
@@ -266,11 +297,10 @@ def _compute_single_gradient(
 
     Returns gradient tensor with shape (up, down, mL, mR).
     """
-    grad = jnp.einsum(
-        "ace,aub,evf,bdf->cuvd", left_env, top_tensor, bot_tensor, right_env,
+    return jnp.einsum(
+        "ace,aub,evf,bdf->ucvd", left_env, top_tensor, bot_tensor, right_env,
         optimize=[(0, 1), (0, 1), (0, 1)],
     )
-    return jnp.transpose(grad, (1, 2, 0, 3))
 
 
 def _compute_all_gradients(

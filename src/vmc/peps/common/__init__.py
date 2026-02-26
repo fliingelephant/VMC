@@ -7,15 +7,15 @@ from vmc.peps.common.contraction import (
     _compute_right_envs,
     _contract_bottom,
     _forward_with_cache,
-    _metropolis_ratio,
 )
 from vmc.peps.common.energy import (
-    _compute_2site_horizontal_env,
+    RowEnvs,
+    TwoRowEnvs,
+    _eval_term,
     _compute_all_env_grads_and_energy,
     _compute_all_gradients,
     _compute_all_row_gradients,
     _compute_right_envs_2row,
-    _compute_row_pair_vertical_energy,
     _compute_single_gradient,
 )
 from vmc.peps.common.strategy import (
@@ -37,12 +37,12 @@ __all__ = [
     "_compute_right_envs",
     "_contract_bottom",
     "_forward_with_cache",
-    "_metropolis_ratio",
-    "_compute_2site_horizontal_env",
+    "RowEnvs",
+    "TwoRowEnvs",
+    "_eval_term",
     "_compute_all_env_grads_and_energy",
     "_compute_all_gradients",
     "_compute_all_row_gradients",
     "_compute_right_envs_2row",
-    "_compute_row_pair_vertical_energy",
     "_compute_single_gradient",
 ]

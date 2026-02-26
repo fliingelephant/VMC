@@ -6,12 +6,12 @@ from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
 
-from vmc.operators.local_terms import DiagonalTerm, LocalTerm
+from vmc.operators.local_terms import DiagonalOperator, Operator
 
 
 @jax.tree_util.register_pytree_node_class
 @dataclass(frozen=True)
-class LinkDiagonalTerm(DiagonalTerm):
+class LinkDiagonalTerm(DiagonalOperator):
     """Diagonal term on link degrees of freedom."""
 
     orientation: str
@@ -40,7 +40,7 @@ class LinkDiagonalTerm(DiagonalTerm):
 
 @jax.tree_util.register_pytree_node_class
 @dataclass(frozen=True)
-class MatterMassTerm(DiagonalTerm):
+class MatterMassTerm(DiagonalOperator):
     """Matter mass term m_x n_x (diagonal on the matter site)."""
 
     def __init__(
@@ -61,7 +61,7 @@ class GILocalHamiltonian:
     """Local Hamiltonian container for GI-PEPS."""
 
     shape: tuple[int, int]
-    terms: tuple[LocalTerm, ...] = ()
+    terms: tuple[Operator, ...] = ()
 
     def tree_flatten(self):
         return (self.terms,), (self.shape,)

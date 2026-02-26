@@ -1,31 +1,46 @@
-"""Local operator terms for PEPS energy evaluation."""
+"""Local operators for PEPS energy evaluation."""
 from __future__ import annotations
 
 import abc
 from dataclasses import dataclass
+from typing import Callable, TypeAlias
 
 import jax
 import jax.numpy as jnp
+from plum import dispatch
+
+IndexedOperator: TypeAlias = tuple[int, "Operator"]
+AnchoredTransitionOperator: TypeAlias = tuple[int, "TransitionOperator", tuple[int, int]]
 
 __all__ = [
-    "LocalTerm",
-    "OneSiteTerm",
-    "DiagonalTerm",
-    "HorizontalTwoSiteTerm",
-    "VerticalTwoSiteTerm",
-    "PlaquetteTerm",
+    "Operator",
+    "TransitionOperator",
+    "OneSiteOperator",
+    "DiagonalOperator",
+    "HorizontalTwoSiteOperator",
+    "VerticalTwoSiteOperator",
+    "PlaquetteOperator",
+    "BucketedOperators",
     "LocalHamiltonian",
-    "bucket_terms",
+    "support_span",
+    "bucket_operators",
 ]
 
 
-class LocalTerm(abc.ABC):
+class Operator(abc.ABC):
     """Abstract base class for local operator terms."""
+
+
+class TransitionOperator(Operator):
+    """Operator anchored at lattice coordinate (row, col)."""
+
+    row: int
+    col: int
 
 
 @jax.tree_util.register_pytree_node_class
 @dataclass(frozen=True)
-class OneSiteTerm(LocalTerm):
+class OneSiteOperator(TransitionOperator):
     """Single-site operator term acting at (row, col)."""
 
     row: int
@@ -51,7 +66,7 @@ class OneSiteTerm(LocalTerm):
 
 @jax.tree_util.register_pytree_node_class
 @dataclass(frozen=True)
-class DiagonalTerm(LocalTerm):
+class DiagonalOperator(Operator):
     """Diagonal operator term on one or two sites."""
 
     sites: tuple[tuple[int, int], ...]
@@ -72,7 +87,7 @@ class DiagonalTerm(LocalTerm):
 
 @jax.tree_util.register_pytree_node_class
 @dataclass(frozen=True)
-class HorizontalTwoSiteTerm(LocalTerm):
+class HorizontalTwoSiteOperator(TransitionOperator):
     """Two-site operator on horizontal neighbor (row, col) -> (row, col+1)."""
 
     row: int
@@ -98,7 +113,7 @@ class HorizontalTwoSiteTerm(LocalTerm):
 
 @jax.tree_util.register_pytree_node_class
 @dataclass(frozen=True)
-class VerticalTwoSiteTerm(LocalTerm):
+class VerticalTwoSiteOperator(TransitionOperator):
     """Two-site operator on vertical neighbor (row, col) -> (row+1, col)."""
 
     row: int
@@ -124,7 +139,7 @@ class VerticalTwoSiteTerm(LocalTerm):
 
 @jax.tree_util.register_pytree_node_class
 @dataclass(frozen=True)
-class PlaquetteTerm(LocalTerm):
+class PlaquetteOperator(TransitionOperator):
     """Plaquette term on the square with top-left corner at (row, col)."""
 
     row: int
@@ -150,7 +165,7 @@ class LocalHamiltonian:
     """Container for local PEPS operator terms."""
 
     shape: tuple[int, int]
-    terms: tuple[LocalTerm, ...] = ()
+    terms: tuple[Operator, ...] = ()
 
     def tree_flatten(self):
         return (self.terms,), (self.shape,)
@@ -162,39 +177,92 @@ class LocalHamiltonian:
         return cls(shape=shape, terms=terms)
 
 
-def bucket_terms(
-    terms: tuple[LocalTerm, ...],
-    shape: tuple[int, int],
-) -> tuple[
-    list[DiagonalTerm],
-    list[list[list[OneSiteTerm]]],
-    list[list[list[HorizontalTwoSiteTerm]]],
-    list[list[list[VerticalTwoSiteTerm]]],
-    list[list[list[PlaquetteTerm]]],
-]:
-    """Group terms by type and lattice location."""
-    n_rows, n_cols = shape
-    one_site_terms = [[[] for _ in range(n_cols)] for _ in range(n_rows)]
-    horizontal_terms = [[[] for _ in range(max(n_cols - 1, 0))] for _ in range(n_rows)]
-    vertical_terms = [[[] for _ in range(n_cols)] for _ in range(max(n_rows - 1, 0))]
-    plaquette_terms = [
-        [[] for _ in range(max(n_cols - 1, 0))]
-        for _ in range(max(n_rows - 1, 0))
+@dataclass(frozen=True)
+class BucketedOperators:
+    """Indexed local terms grouped by row and effective row span."""
+
+    diagonal: tuple[IndexedOperator, ...]
+    rows: tuple[
+        tuple[
+            tuple[int, tuple[tuple[AnchoredTransitionOperator, ...], ...]],
+            ...,
+        ],
+        ...,
     ]
-    diagonal_terms: list[DiagonalTerm] = []
 
-    for term in terms:
-        if isinstance(term, OneSiteTerm):
-            one_site_terms[term.row][term.col].append(term)
-        elif isinstance(term, HorizontalTwoSiteTerm):
-            horizontal_terms[term.row][term.col].append(term)
-        elif isinstance(term, VerticalTwoSiteTerm):
-            vertical_terms[term.row][term.col].append(term)
-        elif isinstance(term, DiagonalTerm):
-            diagonal_terms.append(term)
-        elif isinstance(term, PlaquetteTerm):
-            plaquette_terms[term.row][term.col].append(term)
-        else:
+
+@dispatch
+def support_span(term: TransitionOperator) -> tuple[int, int]:
+    raise TypeError(f"Unsupported term type: {type(term)!r}")
+
+
+@support_span.dispatch
+def support_span(_: OneSiteOperator) -> tuple[int, int]:
+    return 1, 1
+
+
+@support_span.dispatch
+def support_span(_: HorizontalTwoSiteOperator) -> tuple[int, int]:
+    return 1, 2
+
+
+@support_span.dispatch
+def support_span(_: VerticalTwoSiteOperator) -> tuple[int, int]:
+    return 2, 1
+
+
+@support_span.dispatch
+def support_span(_: PlaquetteOperator) -> tuple[int, int]:
+    return 2, 2
+
+
+def bucket_operators(
+    terms: tuple[Operator, ...],
+    shape: tuple[int, int],
+    *,
+    eval_span: Callable[[TransitionOperator], tuple[int, int]] | None = None,
+) -> BucketedOperators:
+    """Group terms by row and effective row span."""
+    n_rows, n_cols = shape
+    span_of = support_span if eval_span is None else eval_span
+    rows: list[dict[int, list[list[AnchoredTransitionOperator]]]] = [
+        {} for _ in range(n_rows)
+    ]
+    diagonal_operators: list[IndexedOperator] = []
+
+    for term_idx, term in enumerate(terms):
+        if isinstance(term, DiagonalOperator):
+            diagonal_operators.append((term_idx, term))
+            continue
+        if not isinstance(term, TransitionOperator):
             raise TypeError(f"Unsupported term type: {type(term)!r}")
+        support_dr, support_dc = support_span(term)
+        if not (
+            0 <= term.row < n_rows
+            and 0 <= term.col < n_cols
+            and term.row + support_dr <= n_rows
+            and term.col + support_dc <= n_cols
+        ):
+            raise ValueError(f"Operator {term!r} is outside shape {shape}.")
+        dr_eval, dc_eval = span_of(term)
+        if dr_eval <= 0 or dc_eval <= 0:
+            raise ValueError(
+                f"Unsupported eval span {(dr_eval, dc_eval)} for {term!r}."
+            )
+        dr_eff = min(dr_eval, n_rows - term.row)
+        dc_eff = min(dc_eval, n_cols - term.col)
+        row_passes = rows[term.row]
+        if dr_eff not in row_passes:
+            row_passes[dr_eff] = [[] for _ in range(n_cols)]
+        row_passes[dr_eff][term.col].append((term_idx, term, (dr_eff, dc_eff)))
 
-    return diagonal_terms, one_site_terms, horizontal_terms, vertical_terms, plaquette_terms
+    return BucketedOperators(
+        diagonal=tuple(diagonal_operators),
+        rows=tuple(
+            tuple(
+                (dr, tuple(tuple(cell) for cell in cols))
+                for dr, cols in sorted(row_passes.items())
+            )
+            for row_passes in rows
+        ),
+    )

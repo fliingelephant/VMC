@@ -13,6 +13,7 @@ from vmc.utils.independent_set_sampling import (
     independent_set_violations,
 )
 from vmc.utils.utils import (
+    _metropolis_hastings_accept,
     occupancy_to_spin,
     spin_to_occupancy,
     _tree_add_scaled,
@@ -35,6 +36,7 @@ __all__ = [
     "enumerate_independent_sets_grid",
     "grid_edges",
     "independent_set_violations",
+    "_metropolis_hastings_accept",
     "occupancy_to_spin",
     "spin_to_occupancy",
     "_tree_add_scaled",

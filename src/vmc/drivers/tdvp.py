@@ -26,6 +26,7 @@ from vmc.drivers.integrators import (
     TimeUnit,
 )
 from vmc.operators.local_terms import LocalHamiltonian
+from vmc.operators.time_dependent import TimeDependentHamiltonian
 from vmc.peps import build_mc_kernels
 import vmc.peps.blockade.kernels  # noqa: F401  # register blockade build_mc_kernels dispatch
 import vmc.peps.gi.kernels  # noqa: F401  # register GI build_mc_kernels dispatch
@@ -57,7 +58,7 @@ class TDVPDriver:
     def __init__(
         self,
         model,
-        operator: LocalHamiltonian | GILocalHamiltonian,
+        operator: LocalHamiltonian | GILocalHamiltonian | TimeDependentHamiltonian,
         *,
         preconditioner: SRPreconditioner,
         dt: float,
@@ -116,7 +117,6 @@ class TDVPDriver:
         t: float,
         carry: tuple[jax.Array, jax.Array],
     ) -> tuple[Any, tuple[jax.Array, jax.Array], tuple[jax.Array, dict[str, Any]]]:
-        del t
         key, config_states = carry
         _, num_chains, chain_length, total_samples = _sample_counts(
             self.n_samples,
@@ -124,7 +124,7 @@ class TDVPDriver:
         )
         key, chain_key = jax.random.split(key)
         chain_keys = jax.random.split(chain_key, num_chains)
-        cache = self._init_cache(tensors, config_states)
+        cache = self._init_cache(tensors, config_states, t)
         (config_states, _, _), (samples_hist, estimates) = self._mc_sampler(
             tensors,
             config_states,
@@ -162,7 +162,7 @@ class TDVPDriver:
         )
         return updates, (key, config_states), (local_energies, metrics)
 
-    @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(3, 4))
+    @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(1, 3, 4))
     def _run_n_steps(
         self,
         tensors: Any,
@@ -178,7 +178,6 @@ class TDVPDriver:
             self.dt,
             (key, config_states),
         )
-        jax.debug.print("E_mean={e}", e=local_energies.real.mean())
 
         def body(
             _: int,
@@ -192,7 +191,6 @@ class TDVPDriver:
                 self.dt,
                 (key_cur, configs_cur),
             )
-            jax.debug.print("E_mean={e}", e=energies_next.real.mean())
             return state, t_next, key_next, configs_next, energies_next, metrics_next
 
         return jax.lax.fori_loop(

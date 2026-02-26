@@ -10,7 +10,7 @@ import jax
 import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
 
-from vmc.operators.local_terms import LocalHamiltonian, bucket_terms
+from vmc.operators.local_terms import LocalHamiltonian, bucket_operators
 from vmc.peps.common.contraction import _forward_with_cache
 from vmc.peps.common.energy import (
     _compute_all_env_grads_and_energy,
@@ -143,14 +143,18 @@ def local_estimate(
     samples = jnp.asarray(samples)
     amps = jnp.asarray(amps)
     shape = model.shape
-    diagonal_terms, one_site_terms, horizontal_terms, vertical_terms, _ = bucket_terms(
-        operator.terms, shape
+    bucketed_terms = bucket_operators(
+        operator.terms,
+        shape,
+        eval_span=type(model).eval_span,
     )
-    has_diag = bool(diagonal_terms)
-    has_one_site = any(term_list for row in one_site_terms for term_list in row)
-    has_horizontal = any(term_list for row in horizontal_terms for term_list in row)
-    has_vertical = any(term_list for row in vertical_terms for term_list in row)
-    has_offdiag = has_one_site or has_horizontal or has_vertical
+    has_diag = bool(bucketed_terms.diagonal)
+    has_offdiag = any(
+        cell
+        for row_passes in bucketed_terms.rows
+        for _, cols in row_passes
+        for cell in cols
+    )
 
     if not has_diag and not has_offdiag:
         return jnp.zeros((samples.shape[0],), dtype=amps.dtype)
@@ -161,7 +165,7 @@ def local_estimate(
         def diag_only(sample):
             spins = spin_to_occupancy(sample).reshape(shape)
             total = jnp.zeros((), dtype=amps.dtype)
-            for term in diagonal_terms:
+            for _, term in bucketed_terms.diagonal:
                 idx = jnp.asarray(0, dtype=jnp.int32)
                 for row, col in term.sites:
                     idx = idx * phys_dim + spins[row, col]
@@ -183,10 +187,7 @@ def local_estimate(
             shape,
             model.strategy,
             top_envs,
-            diagonal_terms=diagonal_terms,
-            one_site_terms=one_site_terms,
-            horizontal_terms=horizontal_terms,
-            vertical_terms=vertical_terms,
+            terms=bucketed_terms,
             collect_grads=False,
         )
         return energy

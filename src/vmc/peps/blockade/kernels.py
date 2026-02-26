@@ -6,9 +6,11 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 
-from vmc.operators.local_terms import LocalHamiltonian
+from vmc.operators.local_terms import LocalHamiltonian, bucket_operators
+from vmc.operators.time_dependent import TimeDependentHamiltonian
 from vmc.peps.blockade import model as blockade_model
 from vmc.peps.blockade.model import BlockadePEPS
+from vmc.peps.common.contraction import _apply_mpo_from_below
 from vmc.peps.standard.kernels import Cache, Context, LocalEstimates, build_mc_kernels
 
 __all__ = ["build_mc_kernels"]
@@ -26,8 +28,18 @@ def build_mc_kernels(
     n_rows, n_cols = shape
     config = model.config
     strategy = model.strategy
+    bucketed_terms = bucket_operators(
+        operator.terms,
+        shape,
+        eval_span=type(model).eval_span,
+    )
 
-    def init_cache(tensors: Any, config_states: jax.Array) -> Cache:
+    def init_cache(
+        tensors: Any,
+        config_states: jax.Array,
+        coeffs: jax.Array | None = None,
+    ) -> Cache:
+        del coeffs
         config_states_flat = config_states.reshape(config_states.shape[0], n_rows * n_cols)
 
         def build_one(config_state: jax.Array):
@@ -38,7 +50,7 @@ def build_mc_kernels(
             for row in range(n_rows - 1, -1, -1):
                 envs[row] = env
                 row_mpo = blockade_model._build_row_mpo(tensors, indices, config, row)
-                env = blockade_model._apply_mpo_from_below(env, row_mpo, strategy)
+                env = _apply_mpo_from_below(env, row_mpo, strategy)
             return tuple(envs)
 
         return Cache(bottom_envs=jax.vmap(build_one)(config_states_flat))
@@ -74,39 +86,31 @@ def build_mc_kernels(
             config,
             strategy,
             context.top_envs,
+            terms=bucketed_terms,
         )
         indices = config_state_next.reshape(shape)
-        if full_gradient:
-            grad_parts = []
-            for row in range(n_rows):
-                for col in range(n_cols):
-                    k_l = indices[row, col - 1] if col > 0 else 0
-                    k_u = indices[row - 1, col] if row > 0 else 0
-                    cfg_idx_n0 = k_l * (2 if row > 0 else 1) + k_u
-                    cfg_idx = jnp.where(indices[row, col] == 0, cfg_idx_n0, 0)
+        grad_parts = []
+        p_parts = []
+        for row in range(n_rows):
+            for col in range(n_cols):
+                k_l = indices[row, col - 1] if col > 0 else 0
+                k_u = indices[row - 1, col] if row > 0 else 0
+                cfg_idx_n0 = k_l * (2 if row > 0 else 1) + k_u
+                cfg_idx = jnp.where(indices[row, col] == 0, cfg_idx_n0, 0)
+                env_grad = env_grads[row][col]
+                if full_gradient:
                     grad_full = jnp.zeros_like(jnp.asarray(tensors[row][col]))
-                    grad_full = grad_full.at[indices[row, col], cfg_idx].set(
-                        env_grads[row][col]
+                    grad_parts.append(
+                        grad_full.at[indices[row, col], cfg_idx].set(env_grad).reshape(-1)
                     )
-                    grad_parts.append(grad_full.reshape(-1))
-            local_log_derivatives = jnp.concatenate(grad_parts) / context.amp
-            active_slice_indices = None
-        else:
-            grad_parts = []
-            p_parts = []
-            for row in range(n_rows):
-                for col in range(n_cols):
-                    grad_parts.append(env_grads[row][col].reshape(-1))
-                    combined_idx = (
-                        indices[row, col] * jnp.asarray(tensors[row][col]).shape[1]
-                        + (indices[row, col - 1] if col > 0 else 0) * (2 if row > 0 else 1)
-                        + (indices[row - 1, col] if row > 0 else 0)
-                    )
+                else:
+                    grad_parts.append(env_grad.reshape(-1))
+                    combined_idx = indices[row, col] * jnp.asarray(tensors[row][col]).shape[1] + cfg_idx
                     p_parts.append(
-                        jnp.full((env_grads[row][col].size,), combined_idx, dtype=jnp.int16)
+                        jnp.full((env_grad.size,), combined_idx, dtype=jnp.int16)
                     )
-            local_log_derivatives = jnp.concatenate(grad_parts) / context.amp
-            active_slice_indices = jnp.concatenate(p_parts)
+        local_log_derivatives = jnp.concatenate(grad_parts) / context.amp
+        active_slice_indices = None if full_gradient else jnp.concatenate(p_parts)
         return Cache(bottom_envs=tuple(envs_next)), LocalEstimates(
             local_log_derivatives=local_log_derivatives,
             local_estimate=local_energy,
@@ -115,3 +119,16 @@ def build_mc_kernels(
         )
 
     return init_cache, transition, estimate
+
+
+@build_mc_kernels.dispatch
+def build_mc_kernels(
+    model: BlockadePEPS,
+    operator: TimeDependentHamiltonian,
+    *,
+    full_gradient: bool = False,
+) -> tuple[Any, Any, Any]:
+    del model, operator, full_gradient
+    raise NotImplementedError(
+        "TimeDependentHamiltonian is not implemented for BlockadePEPS."
+    )

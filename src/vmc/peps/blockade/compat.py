@@ -10,7 +10,28 @@ import jax.numpy as jnp
 
 from vmc.peps.common.contraction import _contract_bottom
 
-__all__ = ["blockade_apply"]
+__all__ = ["assemble_tensors", "blockade_apply"]
+
+
+def assemble_tensors(
+    tensors: list[list[jax.Array]],
+    config: jax.Array,
+    peps_config: Any,
+) -> list[list[jax.Array]]:
+    """Assemble effective tensors for all sites given configuration."""
+    from vmc.peps.blockade.model import _assemble_site
+
+    n_rows, n_cols = peps_config.shape
+    eff = []
+    for r in range(n_rows):
+        row = []
+        for c in range(n_cols):
+            n = config[r, c]
+            k_l = config[r, c - 1] if c > 0 else 0
+            k_u = config[r - 1, c] if r > 0 else 0
+            row.append(_assemble_site(tensors, peps_config, r, c, n, k_l, k_u))
+        eff.append(row)
+    return eff
 
 
 def _peps_apply_occupancy(
@@ -49,8 +70,6 @@ def blockade_apply(
     dtype = jnp.asarray(tensors[0][0]).dtype
 
     def _compute_amp(_):
-        from vmc.peps.blockade.model import assemble_tensors
-
         eff_tensors = assemble_tensors(tensors, n_config, config)
         return _peps_apply_occupancy(eff_tensors, n_config, shape, strategy)
 

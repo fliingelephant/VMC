@@ -5,7 +5,7 @@ import jax.numpy as jnp
 from flax import nnx
 
 from vmc.core import _sample_counts, _trim_samples, make_mc_sampler
-from vmc.operators import PlaquetteTerm
+from vmc.operators import PlaquetteOperator
 from vmc.peps import DensityMatrix, NoTruncation, ZipUp, build_mc_kernels
 from vmc.peps.gi import GILocalHamiltonian, GIPEPS, GIPEPSConfig
 from vmc.peps.gi.local_terms import build_electric_terms
@@ -55,7 +55,7 @@ class GIPEPSTest(unittest.TestCase):
     def _plaquette_terms(self, shape, coeff):
         n_rows, n_cols = shape
         return tuple(
-            PlaquetteTerm(row=r, col=c, coeff=coeff)
+            PlaquetteOperator(row=r, col=c, coeff=coeff)
             for r in range(n_rows - 1)
             for c in range(n_cols - 1)
         )

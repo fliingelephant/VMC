@@ -10,9 +10,9 @@ import netket as nk
 from flax import nnx
 
 from vmc.operators.local_terms import (
-    HorizontalTwoSiteTerm,
+    HorizontalTwoSiteOperator,
     LocalHamiltonian,
-    VerticalTwoSiteTerm,
+    VerticalTwoSiteOperator,
 )
 from vmc.peps import NoTruncation, PEPS
 from vmc.peps.standard.compat import _value
@@ -53,9 +53,9 @@ class LocalEstimateExactTest(unittest.TestCase):
         for r in range(shape[0]):
             for c in range(shape[1]):
                 if c + 1 < shape[1]:
-                    horizontal_terms.append(HorizontalTwoSiteTerm(r, c, bond_op))
+                    horizontal_terms.append(HorizontalTwoSiteOperator(r, c, bond_op))
                 if r + 1 < shape[0]:
-                    vertical_terms.append(VerticalTwoSiteTerm(r, c, bond_op))
+                    vertical_terms.append(VerticalTwoSiteOperator(r, c, bond_op))
         local_operator = LocalHamiltonian(
             shape=shape,
             terms=tuple(horizontal_terms + vertical_terms),
@@ -101,9 +101,9 @@ class LocalEstimateExactTest(unittest.TestCase):
         for r in range(shape[0]):
             for c in range(shape[1]):
                 if c + 1 < shape[1]:
-                    terms.append(HorizontalTwoSiteTerm(r, c, bond_op))
+                    terms.append(HorizontalTwoSiteOperator(r, c, bond_op))
                 if r + 1 < shape[0]:
-                    terms.append(VerticalTwoSiteTerm(r, c, bond_op))
+                    terms.append(VerticalTwoSiteOperator(r, c, bond_op))
         local_hamiltonian = LocalHamiltonian(shape=shape, terms=tuple(terms))
 
         model = PEPS(

@@ -14,7 +14,7 @@ __all__ = [
     "AffineSchedule",
     "TimeDependentHamiltonian",
     "coeffs_at",
-    "operator_coeffs_at",
+    "operator_schedule",
 ]
 
 
@@ -74,14 +74,14 @@ def coeffs_at(schedule: AffineSchedule, t: float | jax.Array) -> jax.Array:
 
 
 @dispatch
-def operator_coeffs_at(operator: object, t: float | jax.Array) -> jax.Array | None:
-    del operator, t
+def operator_schedule(operator: object) -> TermCoefficientSchedule | None:
+    """Return the coefficient schedule for an operator, or None if static."""
+    del operator
     return None
 
 
-@operator_coeffs_at.dispatch
-def operator_coeffs_at(
+@operator_schedule.dispatch
+def operator_schedule(
     operator: TimeDependentHamiltonian,
-    t: float | jax.Array,
-) -> jax.Array:
-    return coeffs_at(operator.schedule, t)
+) -> TermCoefficientSchedule:
+    return operator.schedule

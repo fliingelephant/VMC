@@ -22,7 +22,7 @@ from vmc.operators.local_terms import (
     LocalHamiltonian,
     bucket_operators,
 )
-from vmc.operators.time_dependent import TimeDependentHamiltonian
+from vmc.operators.time_dependent import TimeDependentHamiltonian, coeffs_at, operator_schedule
 from vmc.utils.smallo import params_per_site as params_per_site_fn
 from vmc.utils.utils import _metropolis_hastings_accept
 
@@ -144,11 +144,12 @@ def build_mc_kernels(
     params_per_site_repeats = jnp.asarray(params_per_site, dtype=jnp.int32)
     total_active_params = int(sum(params_per_site))
     terms = _bucketed_terms_for_standard_operator(model, operator)
+    schedule = operator_schedule(operator)
 
     def init_cache(
         tensors: Any,
         samples: jax.Array,
-        coeffs: jax.Array | None = None,
+        t: float | jax.Array | None = None,
     ) -> Cache:
         samples_flat = samples.reshape(-1, n_sites)
 
@@ -164,7 +165,8 @@ def build_mc_kernels(
             return tuple(envs)
 
         coeffs_batch = None
-        if coeffs is not None:
+        if schedule is not None:
+            coeffs = coeffs_at(schedule, t)
             coeffs_batch = jnp.broadcast_to(
                 coeffs,
                 (samples_flat.shape[0], coeffs.shape[0]),

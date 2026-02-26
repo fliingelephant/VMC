@@ -19,7 +19,7 @@ from vmc.operators.time_dependent import (
     TermCoefficientSchedule,
     TimeDependentHamiltonian,
     coeffs_at,
-    operator_coeffs_at,
+    operator_schedule,
 )
 
 __all__ = [
@@ -38,5 +38,5 @@ __all__ = [
     "AffineSchedule",
     "TimeDependentHamiltonian",
     "coeffs_at",
-    "operator_coeffs_at",
+    "operator_schedule",
 ]

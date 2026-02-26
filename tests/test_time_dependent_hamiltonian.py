@@ -15,7 +15,6 @@ from vmc.operators.local_terms import DiagonalOperator, LocalHamiltonian
 from vmc.operators.time_dependent import (
     AffineSchedule,
     TimeDependentHamiltonian,
-    coeffs_at,
 )
 from vmc.peps import (
     GIPEPS,
@@ -80,8 +79,7 @@ class TimeDependentHamiltonianTest(unittest.TestCase):
         )
         tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
         config_states = jnp.zeros((1, 1), dtype=jnp.int32)
-        coeffs = coeffs_at(operator.schedule, 0.0)
-        cache = init_cache(tensors, config_states, coeffs)
+        cache = init_cache(tensors, config_states, t=0.0)
         chain_keys = jax.random.split(jax.random.key(1), 1)
         mc_sampler = make_mc_sampler(transition, estimate)
         (_, _, _), (_, estimates) = mc_sampler(
@@ -152,8 +150,7 @@ class TimeDependentHamiltonianTest(unittest.TestCase):
         )
         tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
         config_states = jnp.zeros((1, 1), dtype=jnp.int32)
-        coeffs = coeffs_at(operator.schedule, 0.0)
-        cache = init_cache(tensors, config_states, coeffs)
+        cache = init_cache(tensors, config_states, t=0.0)
         chain_keys = jax.random.split(jax.random.key(1), 1)
         mc_sampler = make_mc_sampler(transition, estimate)
         (_, _, _), (_, estimates) = mc_sampler(

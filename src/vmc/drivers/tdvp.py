@@ -26,7 +26,7 @@ from vmc.drivers.integrators import (
     TimeUnit,
 )
 from vmc.operators.local_terms import LocalHamiltonian
-from vmc.operators.time_dependent import TimeDependentHamiltonian, operator_coeffs_at
+from vmc.operators.time_dependent import TimeDependentHamiltonian
 from vmc.peps import build_mc_kernels
 import vmc.peps.blockade.kernels  # noqa: F401  # register blockade build_mc_kernels dispatch
 import vmc.peps.gi.kernels  # noqa: F401  # register GI build_mc_kernels dispatch
@@ -124,11 +124,7 @@ class TDVPDriver:
         )
         key, chain_key = jax.random.split(key)
         chain_keys = jax.random.split(chain_key, num_chains)
-        cache = self._init_cache(
-            tensors,
-            config_states,
-            operator_coeffs_at(self.operator, t),
-        )
+        cache = self._init_cache(tensors, config_states, t)
         (config_states, _, _), (samples_hist, estimates) = self._mc_sampler(
             tensors,
             config_states,

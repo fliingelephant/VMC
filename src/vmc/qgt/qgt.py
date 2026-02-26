@@ -196,9 +196,24 @@ def _to_dense(jac: Jacobian, space: SampleSpace):
 
 @dispatch
 def _to_dense(jac: SlicedJacobian, space: ParameterSpace):
-    O = _sliced_dense_blocks(jac)
-    scale = 1.0 / jac.o.shape[0]
-    S = (O.conj().T @ O) * scale
+    o, p = jac.o, jac.p
+    scale = 1.0 / o.shape[0]
+    blocks = list(_iter_sliced_blocks(o, p, jac.sliced_dims, jac.ordering))
+    n = len(blocks)
+    # O†O is Hermitian — compute only upper-triangle blocks o_i† @ o_j (j >= i)
+    ut = [[None] * n for _ in range(n)]
+    for i in range(n):
+        oi = blocks[i][0]
+        for j in range(i, n):
+            ut[i][j] = oi.conj().T @ blocks[j][0]
+    # Assemble full Hermitian matrix (fill lower from upper)
+    rows = []
+    for i in range(n):
+        rows.append(jnp.concatenate(
+            [ut[i][j] if j >= i else ut[j][i].conj().T for j in range(n)],
+            axis=1,
+        ))
+    S = jnp.concatenate(rows, axis=0) * scale
     mean = jacobian_mean(jac)
     S = S - mean.conj()[:, None] * mean[None, :]
     return S

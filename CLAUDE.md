@@ -72,19 +72,48 @@ def build_mc_kernels(model: BlockadePEPS, operator: LocalHamiltonian, ...): ...
 
 ABCs for single-type hierarchies; `plum @dispatch` for multi-type functions. Import dispatched functions directly (no aliases).
 
-## Conventions (from AGENTS.md)
+## Conventions
 
-- **Occupancy (0/1) internally**, spin (±1) only at NetKet API boundaries
-- **Einsum with `optimize=True`** over sequential tensordot
+Follow [Google Python Style Guide](https://google.github.io/styleguide/pyguide.html), with JAX-native patterns below taking precedence.
+
+### Dispatching
+
+- **Extending library functions** → `@library.func.dispatch`.
+- **Adding overloads** → Define base with `@dispatch`, add overloads with `@base_func.dispatch`.
+- **NO strings for dispatching.** Use typed objects.
+- **NO aliased imports for dispatch.** Import the dispatched function directly (`from module import func`), never alias. Dispatch handles routing by type.
+- **Minimize helper functions.** Inline short logic; only extract when reused 3+ times or significantly improves readability.
+
+### Design
+
+- **Einsum with `optimize=True`** over sequential tensordot. Use einsum with `optimize=True` or manually define contraction orders, instead of sequentially doing tensor/matrix operations.
+- **Composition over inheritance**, no factory functions. Combine small strategy objects rather than deep class trees.
+- **DRY (Don't Repeat Yourself).** Consolidate duplicated implementations into a single source of truth.
+- **Least redundancy is top priority.** Reuse environments/transfers within a row or row-pair; evaluate gradients and energy together in the same pass; avoid rebuilding row/2-row transfers or per-site assembled tensors multiple times; only materialize extra boundaries when they reduce total compute.
+- **Match theory first.** Verify Gauss-law conventions, term geometry (one-site/horizontal/vertical/plaquette), and sampling/energy formulas against the papers in `notes/`; if ambiguous, consult the notes and ask rather than guessing.
+- **Think twice.** For complicated or important algorithms, think twice before implementing.
+- **Uncertain correctness.** Implementation might be totally incorrect; for uncertain behavior, refer to notes or ask the user.
+- **Unified eval API (core).** `_value`, `_grad`, and `_value_and_grad` are the only evaluation entrypoints; every other evaluation is a variant of these (plum-dispatched for MPS/PEPS). Avoid manual-dispatch name variants, `log_*` helpers, or `*_fn` wrappers.
+- **Sampling gradients.** When a sampler records gradients, compute value+Jacobian for each proposal together and keep gradients only for accepted proposals.
+- **Let it crash**: no defensive parameter checks; assume correct wiring and let errors surface.
+- **Occupancy (0/1) internally**, spin (±1) only at NetKet API boundaries.
+
+### Style
+
 - **Julia-style defaults**: `def foo(x, y=10):` not `def foo(x, y=None): y = y or 10`
-- **No intermediate variables**: return directly
-- **Let it crash**: no defensive parameter checks
-- **Composition over inheritance**, no factory functions
-- **Least redundancy priority**: reuse environments/transfers; evaluate gradients+energy in one pass
-- **`jax.lax.scan`** for shape-uniform sequences; explicit loops for edge contractions
-- **Single `jax.vmap`** over entire pipeline for XLA fusion
-- **No `jax.block_until_ready`** in hot paths
-- **Logging**: Python `logging` module, guard expensive debug with `logger.isEnabledFor(logging.DEBUG)`, control via `VMC_LOG_LEVEL`
-- **Match theory first**: verify against papers in `notes/` before implementing
-- All models are Flax NNX Modules with `list[list[nnx.Param]]` tensor storage
+- **No intermediate variables**: return directly: `return expr` not `result = expr; return result`
+- **No unused imports/variables.** Remove any defined but unreferenced code.
+
+### JAX patterns
+
+- **`jax.lax.scan`** for shape-uniform sequences; explicit loops for edge contractions where shapes differ.
+- **Single `jax.vmap`** over entire pipeline for XLA fusion. Fuse multiple operations into one function and vmap that, rather than separate vmaps for each step.
+- **No `jax.block_until_ready`** in hot paths — it breaks XLA fusion.
 - Default dtype: `jnp.complex128` (64-bit enabled in `config.py`)
+- All models are Flax NNX Modules with `list[list[nnx.Param]]` tensor storage
+
+### Logging
+
+- Use Python `logging` module, not `print()`.
+- **Guard expensive debug computations** with `logger.isEnabledFor(logging.DEBUG)`.
+- Control via `VMC_LOG_LEVEL` environment variable.

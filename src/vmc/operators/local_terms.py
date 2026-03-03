@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import abc
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from typing import Any, Callable, TypeAlias
 
 import jax
 import jax.numpy as jnp
 from plum import dispatch
+
+from vmc.operators.time_dependent import coeffs_at, operator_schedule, operator_terms
 
 Contribution: TypeAlias = tuple[int, int]  # (op_idx, coeff_idx)
 Contributions: TypeAlias = tuple["Contribution", ...]
@@ -199,7 +201,14 @@ class BucketedOperators:
         ],
         ...,
     ]
-    n_ops: int = 1
+    n_ops: InitVar[int] = 1
+
+    def __post_init__(self, n_ops: int) -> None:
+        object.__setattr__(self, 'n_ops', n_ops)
+
+    def __len__(self) -> int:
+        """Number of source operators before bucketing."""
+        return self.n_ops
 
 
 @dispatch
@@ -241,8 +250,6 @@ class CoefficientStructure:
 
     def build_coeffs(self, t: float | jax.Array | None = None) -> jax.Array:
         """Build flat coefficient array at time *t*."""
-        from vmc.operators.time_dependent import coeffs_at
-
         parts: list[jax.Array] = []
         for op_idx, n_terms in enumerate(self.n_terms_per_op):
             sched = self.schedules[op_idx]
@@ -254,7 +261,7 @@ class CoefficientStructure:
 
 
 def merge_operators(
-    operators: tuple,
+    operators: tuple[LocalHamiltonian, ...],
     shape: tuple[int, int],
     eval_span: Callable[[TransitionOperator], tuple[int, int]] | None = None,
 ) -> tuple[BucketedOperators, CoefficientStructure]:
@@ -267,11 +274,6 @@ def merge_operators(
     Returns both the bucketed terms and a :class:`CoefficientStructure`
     for building the flat coefficient array.
     """
-    from vmc.operators.time_dependent import (
-        TimeDependentHamiltonian,
-        operator_schedule,
-    )
-
     n_rows, n_cols = shape
     span_of = support_span if eval_span is None else eval_span
 
@@ -280,11 +282,10 @@ def merge_operators(
     schedules: list = []
     n_terms_per_op: list[int] = []
     for op_idx, op in enumerate(operators):
-        sched = operator_schedule(op)
-        schedules.append(sched)
-        base = op.base if isinstance(op, TimeDependentHamiltonian) else op
-        n_terms_per_op.append(len(base.terms))
-        for local_idx, term in enumerate(base.terms):
+        schedules.append(operator_schedule(op))
+        terms = operator_terms(op)
+        n_terms_per_op.append(len(terms))
+        for local_idx, term in enumerate(terms):
             flat_terms.append((term, op_idx, local_idx))
 
     # Build coefficient offset per operator
@@ -300,10 +301,10 @@ def merge_operators(
     )
 
     # Bucket terms, deduplicating identical operators across sources.
-    # Key: (type, pytree aux_data, array ids) → (entry_list, index)
+    # Key: (type, pytree aux_data, array values) → (entry_list, index)
     def _dedup_key(term: Operator) -> tuple:
         arrays, aux = term.tree_flatten()
-        return (type(term), aux, tuple(id(a) for a in arrays))
+        return (type(term), aux, tuple(tuple(a.flatten().tolist()) for a in arrays))
 
     rows: list[dict[int, list[list]]] = [{} for _ in range(n_rows)]
     diagonal_operators: list[TaggedDiagonal] = []
@@ -347,7 +348,6 @@ def merge_operators(
         dedup[key] = (cell, len(cell))
         cell.append((term, (contribution,)))
 
-    n_ops = len(operators)
     return BucketedOperators(
         diagonal=tuple(diagonal_operators),
         rows=tuple(
@@ -357,5 +357,5 @@ def merge_operators(
             )
             for row_passes in rows
         ),
-        n_ops=n_ops,
+        n_ops=len(operators),
     ), coeff_struct

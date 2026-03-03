@@ -374,6 +374,7 @@ def estimate(
     top_envs: list[tuple],
     *,
     terms: BucketedOperators | None = None,
+    coeffs: jax.Array | None = None,
 ) -> tuple[list[list[jax.Array]], jax.Array, list[tuple]]:
     """Compute environment gradients and local energy for BlockadePEPS.
 
@@ -395,14 +396,14 @@ def estimate(
     env_grads = [[None for _ in range(n_cols)] for _ in range(n_rows)]
 
     # 1. Diagonal energy - NO tensor operations!
-    n_ops = terms.n_ops
-    energies = jnp.zeros(n_ops, dtype=amp.dtype)
+    energies = jnp.zeros(len(terms), dtype=amp.dtype)
     for term, contributions in terms.diagonal:
         idx = jnp.asarray(0, dtype=jnp.int32)
         for row, col in term.sites:
             idx = idx * phys_dim + config[row, col]
         for op_idx, coeff_idx in contributions:
-            energies = energies.at[op_idx].add(term.diag[idx])
+            coeff = 1.0 if coeffs is None else coeffs[coeff_idx]
+            energies = energies.at[op_idx].add(coeff * term.diag[idx])
 
     # 2. Gradients and X term energy with incremental bottom-env construction
     bottom_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
@@ -449,8 +450,9 @@ def estimate(
                     )
                     for term, contributions in col_terms[c]:
                         val = term.op[n_flip, n_cur] * amp_flip / amp
-                        for op_idx, _coeff_idx in contributions:
-                            energies_acc = energies_acc.at[op_idx].add(val)
+                        for op_idx, coeff_idx in contributions:
+                            coeff = 1.0 if coeffs is None else coeffs[coeff_idx]
+                            energies_acc = energies_acc.at[op_idx].add(coeff * val)
                 left_env = _update_left_env_1row(left_env, top_env[c], mpo[c], bottom_env[c])
             return energies_acc
 
@@ -483,8 +485,9 @@ def estimate(
                     )
                     for term, contributions in col_terms[c]:
                         val = term.op[n_flip, n_cur] * amp_flip / amp
-                        for op_idx, _coeff_idx in contributions:
-                            energies_acc = energies_acc.at[op_idx].add(val)
+                        for op_idx, coeff_idx in contributions:
+                            coeff = 1.0 if coeffs is None else coeffs[coeff_idx]
+                            energies_acc = energies_acc.at[op_idx].add(coeff * val)
                 left_env_2row = _update_left_env_2row(left_env_2row, top_env[c], mpo[c], mpo_next[c], bottom_env_pair[c])
             return energies_acc
 
@@ -503,8 +506,7 @@ def estimate(
         bottom_env = _apply_mpo_from_below(bottom_env, mpo, strategy)
         next_row_mpo = mpo
 
-    energy = energies[0] if n_ops == 1 else energies
-    return env_grads, energy, bottom_envs_cache
+    return env_grads, energies, bottom_envs_cache
 
 def transition(
     tensors: list[list[jax.Array]],

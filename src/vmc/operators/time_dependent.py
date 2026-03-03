@@ -15,6 +15,7 @@ __all__ = [
     "TimeDependentHamiltonian",
     "coeffs_at",
     "operator_schedule",
+    "operator_terms",
 ]
 
 
@@ -85,3 +86,14 @@ def operator_schedule(
     operator: TimeDependentHamiltonian,
 ) -> TermCoefficientSchedule:
     return operator.schedule
+
+
+@dispatch
+def operator_terms(operator: object) -> tuple:
+    """Return the local terms of an operator."""
+    return operator.terms
+
+
+@operator_terms.dispatch
+def operator_terms(operator: TimeDependentHamiltonian) -> tuple:
+    return operator.base.terms

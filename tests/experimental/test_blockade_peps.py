@@ -59,7 +59,7 @@ def _sample_with_kernels(
         else _trim_samples(estimates.active_slice_indices, total_samples, n_samples)
     )
     amps = _trim_samples(estimates.amp, total_samples, n_samples)
-    energies = _trim_samples(estimates.local_estimate, total_samples, n_samples)
+    energies = _trim_samples(estimates.local_estimate, total_samples, n_samples)[..., 0]
     return samples, grads, p, final_keys, final_configurations, amps, energies
 
 
@@ -387,7 +387,7 @@ class GradsAndEnergyTest(unittest.TestCase):
 
         self.assertEqual(len(env_grads), config.shape[0])
         self.assertEqual(len(env_grads[0]), config.shape[1])
-        self.assertEqual(energy.shape, ())
+        self.assertEqual(energy.shape, (1,))
 
 
 class SamplerTest(unittest.TestCase):
@@ -590,7 +590,7 @@ class DiagonalEnergyTest(unittest.TestCase):
 
         # With Omega=0, energy should just be diagonal
         self.assertAlmostEqual(
-            float(jnp.real(energy)),
+            float(jnp.real(energy[0])),
             float(expected_energy),
             places=5,
         )

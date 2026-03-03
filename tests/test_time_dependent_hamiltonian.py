@@ -90,7 +90,7 @@ class TimeDependentHamiltonianTest(unittest.TestCase):
             n_steps=1,
         )
         self.assertAlmostEqual(
-            float(estimates.local_estimate[0, 0].real),
+            float(estimates.local_estimate[0, 0, 0].real),
             2.5,
             places=12,
         )
@@ -130,8 +130,8 @@ class TimeDependentHamiltonianTest(unittest.TestCase):
             2.0,
             carry_next,
         )
-        self.assertAlmostEqual(float(jnp.mean(local_0).real), 1.0, places=12)
-        self.assertAlmostEqual(float(jnp.mean(local_2).real), 7.0, places=12)
+        self.assertAlmostEqual(float(jnp.mean(local_0[..., 0]).real), 1.0, places=12)
+        self.assertAlmostEqual(float(jnp.mean(local_2[..., 0]).real), 7.0, places=12)
 
     def test_scalar_schedule_works(self) -> None:
         """AffineSchedule with scalar offset/slope should work for a 1-term Hamiltonian."""
@@ -157,7 +157,7 @@ class TimeDependentHamiltonianTest(unittest.TestCase):
             tensors, config_states, chain_keys, cache, n_steps=1,
         )
         self.assertAlmostEqual(
-            float(estimates.local_estimate[0, 0].real), 2.5, places=12,
+            float(estimates.local_estimate[0, 0, 0].real), 2.5, places=12,
         )
 
     def test_gi_time_dependent_not_implemented(self) -> None:

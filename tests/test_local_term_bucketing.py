@@ -75,7 +75,7 @@ class MergeOperatorsTest(unittest.TestCase):
         )
         merged, coeff_struct = merge_operators((ham,), shape)
 
-        self.assertEqual(merged.n_ops, 1)
+        self.assertEqual(len(merged), 1)
         self.assertEqual(len(merged.diagonal), 1)
         self.assertEqual(coeff_struct.n_terms_per_op, (4,))
         self.assertTrue(all(s is None for s in coeff_struct.schedules))
@@ -100,7 +100,7 @@ class MergeOperatorsTest(unittest.TestCase):
         )
         merged, coeff_struct = merge_operators((op_a, op_b), shape)
 
-        self.assertEqual(merged.n_ops, 2)
+        self.assertEqual(len(merged), 2)
         self.assertEqual(coeff_struct.n_terms_per_op, (2, 1))
 
         for row_passes in merged.rows:
@@ -121,18 +121,18 @@ class MergeOperatorsTest(unittest.TestCase):
             for _ in range(3)
         )
         merged, coeff_struct = merge_operators(ops, shape)
-        self.assertEqual(merged.n_ops, 3)
+        self.assertEqual(len(merged), 3)
         self.assertEqual(len(coeff_struct.schedules), 3)
 
-    def test_dedup_shared_terms(self) -> None:
-        """Identical terms across operators are deduplicated with merged contributions."""
+    def test_dedup_value_equal_terms(self) -> None:
+        """Value-equal terms (distinct objects) are deduplicated."""
         shape = (2, 2)
-        bond_op = jnp.eye(4)
-        shared_term = HorizontalTwoSiteOperator(row=0, col=0, op=bond_op)
-        op_a = LocalHamiltonian(shape=shape, terms=(shared_term,))
-        op_b = LocalHamiltonian(shape=shape, terms=(shared_term,))
+        term_a = HorizontalTwoSiteOperator(row=0, col=0, op=jnp.eye(4))
+        term_b = HorizontalTwoSiteOperator(row=0, col=0, op=jnp.eye(4))
+        self.assertIsNot(term_a, term_b)
+        op_a = LocalHamiltonian(shape=shape, terms=(term_a,))
+        op_b = LocalHamiltonian(shape=shape, terms=(term_b,))
         merged, _ = merge_operators((op_a, op_b), shape)
-        # Same term object → deduplicated into one entry with two contributions
         cell = merged.rows[0][0][1][0]  # row=0, first dr pass, col=0
         self.assertEqual(len(cell), 1)
         _, contributions = cell[0]
@@ -140,13 +140,14 @@ class MergeOperatorsTest(unittest.TestCase):
         self.assertEqual(contributions[0][0], 0)  # op_a
         self.assertEqual(contributions[1][0], 1)  # op_b
 
-    def test_diagonal_dedup_shared(self) -> None:
-        """Identical diagonal terms are deduplicated."""
+    def test_diagonal_dedup_value_equal(self) -> None:
+        """Value-equal diagonal terms (distinct objects) are deduplicated."""
         shape = (2, 2)
-        diag = jnp.array([1.0, -1.0])
-        diag_term = DiagonalOperator(sites=((0, 0),), diag=diag)
-        op_a = LocalHamiltonian(shape=shape, terms=(diag_term,))
-        op_b = LocalHamiltonian(shape=shape, terms=(diag_term,))
+        term_a = DiagonalOperator(sites=((0, 0),), diag=jnp.array([1.0, -1.0]))
+        term_b = DiagonalOperator(sites=((0, 0),), diag=jnp.array([1.0, -1.0]))
+        self.assertIsNot(term_a, term_b)
+        op_a = LocalHamiltonian(shape=shape, terms=(term_a,))
+        op_b = LocalHamiltonian(shape=shape, terms=(term_b,))
         merged, _ = merge_operators((op_a, op_b), shape)
         self.assertEqual(len(merged.diagonal), 1)
         _, contribs = merged.diagonal[0]

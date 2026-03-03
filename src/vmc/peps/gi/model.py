@@ -470,6 +470,7 @@ def estimate(
     top_envs: list[tuple],
     *,
     terms: BucketedOperators | None = None,
+    coeffs: jax.Array | None = None,
 ) -> tuple[list[list[jax.Array]], jax.Array, list[tuple]]:
     """Compute environment gradients and local energy for GI-PEPS."""
     from vmc.peps.gi.local_terms import LinkDiagonalTerm
@@ -489,8 +490,7 @@ def estimate(
     env_grads = [[None for _ in range(n_cols)] for _ in range(n_rows)]
 
     # Compute diagonal energy
-    n_ops = terms.n_ops
-    energies = jnp.zeros(n_ops, dtype=amp.dtype)
+    energies = jnp.zeros(len(terms), dtype=amp.dtype)
     for term, contributions in terms.diagonal:
         if isinstance(term, LinkDiagonalTerm):
             diag_val = term.energy(h_links, v_links)
@@ -499,8 +499,9 @@ def estimate(
             for row, col in term.sites:
                 idx = idx * phys_dim + sites[row, col]
             diag_val = term.diag[idx]
-        for op_idx, _coeff_idx in contributions:
-            energies = energies.at[op_idx].add(diag_val)
+        for op_idx, coeff_idx in contributions:
+            coeff = 1.0 if coeffs is None else coeffs[coeff_idx]
+            energies = energies.at[op_idx].add(coeff * diag_val)
 
     # Main row iteration
     bottom_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
@@ -539,8 +540,9 @@ def estimate(
                     val = _eval_term(
                         term, envs, tensors, row, col, sites, phys_dim,
                     ) / amp
-                    for op_idx, _coeff_idx in contributions:
-                        energies_acc = energies_acc.at[op_idx].add(val)
+                    for op_idx, coeff_idx in contributions:
+                        coeff = 1.0 if coeffs is None else coeffs[coeff_idx]
+                        energies_acc = energies_acc.at[op_idx].add(coeff * val)
                 left_env = _update_left_env_1row(left_env, top_env[col], row_mpo[col], bottom_env[col])
             return energies_acc, eff_row_acc
 
@@ -584,8 +586,9 @@ def estimate(
                     val = _eval_term(
                         term, envs, tensors, row, col, sites, phys_dim,
                     ) / amp
-                    for op_idx, _coeff_idx in contributions:
-                        energies_acc = energies_acc.at[op_idx].add(val)
+                    for op_idx, coeff_idx in contributions:
+                        coeff = 1.0 if coeffs is None else coeffs[coeff_idx]
+                        energies_acc = energies_acc.at[op_idx].add(coeff * val)
                 left_env_2row = _update_left_env_2row(left_env_2row, top_env[col], row_mpo[col], row_mpo_next[col], bottom_env_next[col])
             return energies_acc, eff_row_acc
 
@@ -604,8 +607,7 @@ def estimate(
         bottom_env = _apply_mpo_from_below(bottom_env, row_mpo, strategy)
         next_row_mpo = row_mpo
 
-    energy = energies[0] if n_ops == 1 else energies
-    return env_grads, energy, bottom_envs_cache
+    return env_grads, energies, bottom_envs_cache
 
 
 # =============================================================================

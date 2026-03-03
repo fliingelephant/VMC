@@ -138,6 +138,8 @@ def local_estimate(
     samples: jax.Array,
     operator: LocalHamiltonian,
     amps: jax.Array,
+    *,
+    coeffs: jax.Array | None = None,
 ) -> jax.Array:
     """Compute local energy estimates for PEPS from local operator terms."""
     samples = jnp.asarray(samples)
@@ -167,7 +169,9 @@ def local_estimate(
                 idx = jnp.asarray(0, dtype=jnp.int32)
                 for row, col in term.sites:
                     idx = idx * phys_dim + spins[row, col]
-                total = total + term.diag[idx]
+                for _op_idx, coeff_idx in contributions:
+                    coeff = 1.0 if coeffs is None else coeffs[coeff_idx]
+                    total = total + coeff * term.diag[idx]
             return total
 
         return jax.vmap(diag_only)(samples)
@@ -178,7 +182,7 @@ def local_estimate(
         occupancy = spin_to_occupancy(sample)
         spins = occupancy.reshape(shape)
         _, top_envs = _forward_with_cache(tensors, spins, shape, model.strategy)
-        _, energy, _ = _compute_all_env_grads_and_energy(
+        _, energies, _ = _compute_all_env_grads_and_energy(
             tensors,
             spins,
             amp,
@@ -186,8 +190,9 @@ def local_estimate(
             model.strategy,
             top_envs,
             terms=bucketed_terms,
+            coeffs=coeffs,
             collect_grads=False,
         )
-        return energy
+        return energies[0]
 
     return jax.vmap(per_sample, in_axes=(0, 0))(samples, amps)

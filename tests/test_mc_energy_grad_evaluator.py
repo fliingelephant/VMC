@@ -106,7 +106,7 @@ def _mc_energy_and_grad(
         n_steps=chain_length,
     )
 
-    local = _trim_samples(estimates.local_estimate, total_samples, n_samples)
+    local = _trim_samples(estimates.local_estimate, total_samples, n_samples)[..., 0]
     o = _trim_samples(estimates.local_log_derivatives, total_samples, n_samples)
     energy = jnp.mean(local)
     contrib = (local - energy)[:, None] * o.conj()

@@ -278,7 +278,8 @@ class SRPreconditioner:
     ) -> tuple[Any, dict]:
         from vmc.gauge import compute_gauge_projection
 
-        dv = (local_energies.reshape(-1) - jnp.mean(local_energies)) / samples.shape[0]
+        ham = local_energies[..., 0]
+        dv = (ham - jnp.mean(ham)) / samples.shape[0]
         dv = grad_factor * dv
 
         params = jax.tree_util.tree_map(jnp.asarray, params)

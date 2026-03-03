@@ -192,13 +192,11 @@ def _compute_all_env_grads_and_energy(
 ) -> tuple[list[list[jax.Array]], jax.Array, list[tuple]]:
     """Backward pass: use cached top_envs, build and cache bottom_envs.
 
-    Returns a vector ``energies`` of shape ``(n_ops,)`` when ``terms.n_ops > 1``,
-    or a scalar when ``n_ops == 1`` (backward compatible).
+    Returns ``energies`` of shape ``(len(terms),)``.
     """
     n_rows, n_cols = shape
     dtype = jnp.asarray(tensors[0][0]).dtype
     phys_dim = int(jnp.asarray(tensors[0][0]).shape[0])
-    n_ops = terms.n_ops
 
     env_grads = (
         [[None for _ in range(n_cols)] for _ in range(n_rows)]
@@ -206,7 +204,7 @@ def _compute_all_env_grads_and_energy(
         else []
     )
     bottom_envs_cache = [None] * n_rows
-    energies = jnp.zeros(n_ops, dtype=amp.dtype)
+    energies = jnp.zeros(len(terms), dtype=amp.dtype)
 
     # Diagonal terms
     for term, contributions in terms.diagonal:
@@ -294,8 +292,7 @@ def _compute_all_env_grads_and_energy(
         bottom_env = _apply_mpo_from_below(bottom_env, mpo, strategy)
         next_row_mpo = mpo
 
-    energy = energies[0] if n_ops == 1 else energies
-    return env_grads, energy, bottom_envs_cache
+    return env_grads, energies, bottom_envs_cache
 
 
 def _compute_single_gradient(

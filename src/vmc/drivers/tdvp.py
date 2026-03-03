@@ -221,7 +221,7 @@ class TDVPDriver:
                 n_steps,
             )
         )
-        self._loss_stats = nkstats.statistics(local_energies)
+        self._loss_stats = nkstats.statistics(local_energies[..., 0])
         self._sync_preconditioner_metrics(metrics)
         self.step_count += n_steps
         if logger.isEnabledFor(logging.INFO):

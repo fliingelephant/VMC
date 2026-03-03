@@ -5,6 +5,7 @@ import unittest
 
 from vmc import config  # noqa: F401 - JAX config must be imported first
 
+import jax
 import jax.numpy as jnp
 import netket as nk
 from flax import nnx
@@ -13,11 +14,8 @@ from vmc.operators.local_terms import (
     HorizontalTwoSiteOperator,
     LocalHamiltonian,
     VerticalTwoSiteOperator,
-    merge_operators,
 )
-from vmc.peps import NoTruncation, PEPS
-from vmc.peps.common.contraction import _forward_with_cache
-from vmc.peps.common.energy import _compute_all_env_grads_and_energy
+from vmc.peps import NoTruncation, PEPS, build_mc_kernels
 from vmc.peps.standard.compat import _value
 from vmc.utils.utils import spin_to_occupancy
 from vmc.utils.vmc_utils import local_estimate
@@ -127,10 +125,9 @@ class LocalEstimateExactTest(unittest.TestCase):
         self.assertLess(float(max_diff), 1e-10)
 
     def test_multi_operator_evaluation(self) -> None:
-        """Multiple operators evaluated in one backward pass match individual evaluations."""
-        shape = (2, 2)
+        """Multiple operators evaluated via build_mc_kernels match individual evaluations."""
+        shape = (3, 3)
         n_sites = shape[0] * shape[1]
-        hi = nk.hilbert.Spin(s=0.5, N=n_sites)
 
         sz_sz = jnp.array(
             [[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]],
@@ -140,75 +137,79 @@ class LocalEstimateExactTest(unittest.TestCase):
             [[0, 0, 0, 0], [0, 0, 2, 0], [0, 2, 0, 0], [0, 0, 0, 0]],
             dtype=jnp.complex128,
         )
-        bond_op = sz_sz - exchange
 
-        # Full Hamiltonian: all bonds
-        h_terms = []
-        v_terms = []
+        # Hamiltonian: full Heisenberg on all bonds
+        heisenberg = sz_sz - exchange
+        ham_terms = []
         for r in range(shape[0]):
             for c in range(shape[1]):
                 if c + 1 < shape[1]:
-                    h_terms.append(HorizontalTwoSiteOperator(r, c, bond_op))
+                    ham_terms.append(HorizontalTwoSiteOperator(r, c, heisenberg))
                 if r + 1 < shape[0]:
-                    v_terms.append(VerticalTwoSiteOperator(r, c, bond_op))
-        full_ham = LocalHamiltonian(shape=shape, terms=tuple(h_terms + v_terms))
+                    ham_terms.append(VerticalTwoSiteOperator(r, c, heisenberg))
+        hamiltonian = LocalHamiltonian(shape=shape, terms=tuple(ham_terms))
 
-        # Subregion: just horizontal bonds
-        h_only = LocalHamiltonian(shape=shape, terms=tuple(h_terms))
-        # Subregion: just vertical bonds
-        v_only = LocalHamiltonian(shape=shape, terms=tuple(v_terms))
+        # Observable 1: Sz⊗Sz correlator on horizontal bonds only
+        sz_obs = LocalHamiltonian(shape=shape, terms=tuple(
+            HorizontalTwoSiteOperator(r, c, sz_sz)
+            for r in range(shape[0]) for c in range(shape[1] - 1)
+        ))
+
+        # Observable 2: exchange on vertical bonds only
+        ex_obs = LocalHamiltonian(shape=shape, terms=tuple(
+            VerticalTwoSiteOperator(r, c, exchange)
+            for r in range(shape[0] - 1) for c in range(shape[1])
+        ))
 
         model = PEPS(
             rngs=nnx.Rngs(42),
             shape=shape,
-            bond_dim=2,
+            bond_dim=4,
             contraction_strategy=NoTruncation(),
         )
         tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
 
-        # Merge all three operators
-        merged_terms, coeff_struct = merge_operators(
-            (full_ham, h_only, v_only), shape, eval_span=type(model).eval_span,
+        # Merged kernels: Hamiltonian + two observables
+        init_cache, transition, estimate_merged = build_mc_kernels(
+            model, hamiltonian, observables=(sz_obs, ex_obs),
         )
+        # Individual kernels for reference
+        _, _, estimate_ham = build_mc_kernels(model, hamiltonian)
+        _, _, estimate_sz = build_mc_kernels(model, sz_obs)
+        _, _, estimate_ex = build_mc_kernels(model, ex_obs)
 
-        samples_spin = jnp.asarray(hi.all_states(), dtype=jnp.int32)
-        samples = spin_to_occupancy(samples_spin)
-        amps = _value(model, samples)
+        n_test = 16
+        key = jax.random.PRNGKey(0)
+        key, init_key = jax.random.split(key)
+        samples = model.random_physical_configuration(init_key, n_samples=n_test)
+        cache = init_cache(tensors, samples)
 
-        # Compute individual local energies
-        e_full = local_estimate(model, samples, full_ham, amps)
-        e_h = local_estimate(model, samples, h_only, amps)
-        e_v = local_estimate(model, samples, v_only, amps)
+        tested = 0
+        for i in range(n_test):
+            cache_i = jax.tree.map(lambda x: x[i], cache)
+            key, subkey = jax.random.split(key)
+            sample_next, _, ctx = transition(tensors, samples[i], subkey, cache_i)
 
-        # Compute multi-operator local energies using merged backward pass
-        for i in range(samples.shape[0]):
-            sample = samples[i]
-            amp = amps[i]
-            if jnp.abs(amp) < 1e-12:
-                continue
-            spins = sample.reshape(shape)
-            _, top_envs = _forward_with_cache(tensors, spins, shape, model.strategy)
-            _, energies_vec, _ = _compute_all_env_grads_and_energy(
-                tensors,
-                spins,
-                amp,
-                shape,
-                model.strategy,
-                top_envs,
-                terms=merged_terms,
-                collect_grads=False,
-            )
-            self.assertEqual(energies_vec.shape, (3,))
+            _, merged = estimate_merged(tensors, sample_next, ctx)
+            _, ref_ham = estimate_ham(tensors, sample_next, ctx)
+            _, ref_sz = estimate_sz(tensors, sample_next, ctx)
+            _, ref_ex = estimate_ex(tensors, sample_next, ctx)
+
+            self.assertEqual(merged.local_estimate.shape, (3,))
             self.assertAlmostEqual(
-                float(jnp.abs(energies_vec[0] - e_full[i])), 0.0, places=9
+                float(jnp.abs(merged.local_estimate[0] - ref_ham.local_estimate[0])),
+                0.0, places=9,
             )
             self.assertAlmostEqual(
-                float(jnp.abs(energies_vec[1] - e_h[i])), 0.0, places=9
+                float(jnp.abs(merged.local_estimate[1] - ref_sz.local_estimate[0])),
+                0.0, places=9,
             )
             self.assertAlmostEqual(
-                float(jnp.abs(energies_vec[2] - e_v[i])), 0.0, places=9
+                float(jnp.abs(merged.local_estimate[2] - ref_ex.local_estimate[0])),
+                0.0, places=9,
             )
-            break  # One sample is enough to verify
+            tested += 1
+        self.assertGreater(tested, 1)
 
 
 if __name__ == "__main__":

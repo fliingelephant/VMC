@@ -47,7 +47,7 @@ def _sample_with_kernels(
         else _trim_samples(estimates.active_slice_indices, total_samples, n_samples)
     )
     amps = _trim_samples(estimates.amp, total_samples, n_samples)
-    energies = _trim_samples(estimates.local_estimate, total_samples, n_samples)
+    energies = _trim_samples(estimates.local_estimate, total_samples, n_samples)[..., 0]
     return samples, grads, p, final_keys, final_configurations, amps, energies
 
 

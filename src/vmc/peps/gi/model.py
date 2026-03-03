@@ -41,7 +41,7 @@ from vmc.operators.local_terms import (
     BucketedOperators,
     PlaquetteOperator,
     VerticalTwoSiteOperator,
-    bucket_operators,
+    merge_operators,
     support_span,
 )
 from vmc.utils.utils import random_tensor, _hastings_ratio, _metropolis_hastings_accept
@@ -481,9 +481,8 @@ def estimate(
     bottom_envs_cache = [None] * n_rows
 
     if terms is None:
-        terms = bucket_operators(
-            operator.terms,
-            config.shape,
+        terms, _ = merge_operators(
+            (operator,), config.shape,
             eval_span=GIPEPS.eval_span,
         )
 
@@ -536,7 +535,7 @@ def estimate(
                 )
                 env_grads[row][col] = env_grad
                 envs = RowEnvs(left_env, right_envs, top_env, bottom_env, env_grad, eff_row_acc)
-                for term, span, contributions in col_terms[col]:
+                for term, contributions in col_terms[col]:
                     val = _eval_term(
                         term, envs, tensors, row, col, sites, phys_dim,
                     ) / amp
@@ -562,7 +561,7 @@ def estimate(
             has_vertical = any(
                 isinstance(term, VerticalTwoSiteOperator)
                 for terms_at_col in col_terms
-                for term, _span, _contribs in terms_at_col
+                for term, _contribs in terms_at_col
             )
             eff_row_next = None
             if has_vertical:
@@ -581,7 +580,7 @@ def estimate(
                     left_env_2row, right_envs_2row, top_env, bottom_env_next,
                     eff_row_acc, eff_row_next, h_links, v_links, config,
                 )
-                for term, span, contributions in col_terms[col]:
+                for term, contributions in col_terms[col]:
                     val = _eval_term(
                         term, envs, tensors, row, col, sites, phys_dim,
                     ) / amp

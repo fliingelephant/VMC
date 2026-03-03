@@ -242,7 +242,7 @@ def _compute_all_env_grads_and_energy(
                 if collect_grads:
                     env_grads[row][col] = env_grad
                 envs = RowEnvs(left_env, right_envs, top_env, bottom_env, env_grad, tensors[row])
-                for term, span, contributions in col_terms[col]:
+                for term, contributions in col_terms[col]:
                     val = _eval_term(
                         term, envs, tensors, row, col, spins, phys_dim,
                     ) / amp
@@ -270,7 +270,7 @@ def _compute_all_env_grads_and_energy(
                     left_env_2row, right_envs_2row, top_env, bottom_env_next,
                     tensors[row], tensors[row + 1],
                 )
-                for term, span, contributions in col_terms[col]:
+                for term, contributions in col_terms[col]:
                     val = _eval_term(
                         term, envs, tensors, row, col, spins, phys_dim,
                     ) / amp

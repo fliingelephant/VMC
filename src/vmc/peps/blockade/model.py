@@ -46,7 +46,7 @@ from vmc.operators.local_terms import (
     BucketedOperators,
     OneSiteOperator,
     TransitionOperator,
-    bucket_operators,
+    merge_operators,
     support_span,
 )
 from vmc.utils.utils import _metropolis_hastings_accept, random_tensor
@@ -387,9 +387,8 @@ def estimate(
     bottom_envs_cache = [None] * n_rows
 
     if terms is None:
-        terms = bucket_operators(
-            operator.terms,
-            peps_config.shape,
+        terms, _ = merge_operators(
+            (operator,), peps_config.shape,
             eval_span=BlockadePEPS.eval_span,
         )
 
@@ -448,7 +447,7 @@ def estimate(
                         lambda _: jnp.zeros((), dtype=amp.dtype),
                         operand=None,
                     )
-                    for term, _, contributions in col_terms[c]:
+                    for term, contributions in col_terms[c]:
                         val = term.op[n_flip, n_cur] * amp_flip / amp
                         for op_idx, _coeff_idx in contributions:
                             energies_acc = energies_acc.at[op_idx].add(val)
@@ -482,7 +481,7 @@ def estimate(
                         lambda _: jnp.zeros((), dtype=amp.dtype),
                         operand=None,
                     )
-                    for term, _, contributions in col_terms[c]:
+                    for term, contributions in col_terms[c]:
                         val = term.op[n_flip, n_cur] * amp_flip / amp
                         for op_idx, _coeff_idx in contributions:
                             energies_acc = energies_acc.at[op_idx].add(val)

@@ -490,15 +490,18 @@ def estimate(
     env_grads = [[None for _ in range(n_cols)] for _ in range(n_rows)]
 
     # Compute diagonal energy
-    energy = jnp.zeros((), dtype=amp.dtype)
-    for _, term in terms.diagonal:
+    n_ops = terms.n_ops
+    energies = jnp.zeros(n_ops, dtype=amp.dtype)
+    for term, contributions in terms.diagonal:
         if isinstance(term, LinkDiagonalTerm):
-            energy = energy + term.energy(h_links, v_links)
-            continue
-        idx = jnp.asarray(0, dtype=jnp.int32)
-        for row, col in term.sites:
-            idx = idx * phys_dim + sites[row, col]
-        energy = energy + term.diag[idx]
+            diag_val = term.energy(h_links, v_links)
+        else:
+            idx = jnp.asarray(0, dtype=jnp.int32)
+            for row, col in term.sites:
+                idx = idx * phys_dim + sites[row, col]
+            diag_val = term.diag[idx]
+        for op_idx, _coeff_idx in contributions:
+            energies = energies.at[op_idx].add(diag_val)
 
     # Main row iteration
     bottom_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
@@ -515,9 +518,9 @@ def estimate(
         eff_row = None
 
         def _eval_dr1(
-            energy_acc: jax.Array,
+            energies_acc: jax.Array,
             eff_row_acc: list[jax.Array] | None,
-            col_terms: tuple[tuple[tuple[int, Any, tuple[int, int]], ...], ...],
+            col_terms: tuple,
         ) -> tuple[jax.Array, list[jax.Array] | None]:
             right_envs = _compute_right_envs(top_env, row_mpo, bottom_env, dtype)
             has_terms = any(col_terms[c] for c in range(n_cols))
@@ -533,20 +536,22 @@ def estimate(
                 )
                 env_grads[row][col] = env_grad
                 envs = RowEnvs(left_env, right_envs, top_env, bottom_env, env_grad, eff_row_acc)
-                for term_idx, term, span in col_terms[col]:
-                    energy_acc = energy_acc + _eval_term(
+                for term, span, contributions in col_terms[col]:
+                    val = _eval_term(
                         term, envs, tensors, row, col, sites, phys_dim,
                     ) / amp
+                    for op_idx, _coeff_idx in contributions:
+                        energies_acc = energies_acc.at[op_idx].add(val)
                 left_env = _update_left_env_1row(left_env, top_env[col], row_mpo[col], bottom_env[col])
-            return energy_acc, eff_row_acc
+            return energies_acc, eff_row_acc
 
         def _eval_dr2(
-            energy_acc: jax.Array,
+            energies_acc: jax.Array,
             eff_row_acc: list[jax.Array] | None,
-            col_terms: tuple[tuple[tuple[int, Any, tuple[int, int]], ...], ...],
+            col_terms: tuple,
         ) -> tuple[jax.Array, list[jax.Array] | None]:
             if row >= n_rows - 1:
-                return energy_acc, eff_row_acc
+                return energies_acc, eff_row_acc
             if next_row_mpo is None:
                 raise NotImplementedError("Missing next-row MPO for GI dr=2 evaluation.")
             row_mpo_next = next_row_mpo
@@ -557,7 +562,7 @@ def estimate(
             has_vertical = any(
                 isinstance(term, VerticalTwoSiteOperator)
                 for terms_at_col in col_terms
-                for _, term, _ in terms_at_col
+                for term, _span, _contribs in terms_at_col
             )
             eff_row_next = None
             if has_vertical:
@@ -576,12 +581,14 @@ def estimate(
                     left_env_2row, right_envs_2row, top_env, bottom_env_next,
                     eff_row_acc, eff_row_next, h_links, v_links, config,
                 )
-                for term_idx, term, span in col_terms[col]:
-                    energy_acc = energy_acc + _eval_term(
+                for term, span, contributions in col_terms[col]:
+                    val = _eval_term(
                         term, envs, tensors, row, col, sites, phys_dim,
                     ) / amp
+                    for op_idx, _coeff_idx in contributions:
+                        energies_acc = energies_acc.at[op_idx].add(val)
                 left_env_2row = _update_left_env_2row(left_env_2row, top_env[col], row_mpo[col], row_mpo_next[col], bottom_env_next[col])
-            return energy_acc, eff_row_acc
+            return energies_acc, eff_row_acc
 
         pass_evaluators = {
             1: _eval_dr1,
@@ -593,11 +600,12 @@ def estimate(
                 raise NotImplementedError(
                     f"GI transition evaluation for dr={dr} is not implemented."
                 )
-            energy, eff_row = evaluator(energy, eff_row, col_terms)
+            energies, eff_row = evaluator(energies, eff_row, col_terms)
 
         bottom_env = _apply_mpo_from_below(bottom_env, row_mpo, strategy)
         next_row_mpo = row_mpo
 
+    energy = energies[0] if n_ops == 1 else energies
     return env_grads, energy, bottom_envs_cache
 
 

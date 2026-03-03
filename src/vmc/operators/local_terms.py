@@ -3,14 +3,16 @@ from __future__ import annotations
 
 import abc
 from dataclasses import dataclass
-from typing import Callable, TypeAlias
+from typing import Any, Callable, TypeAlias
 
 import jax
 import jax.numpy as jnp
 from plum import dispatch
 
-IndexedOperator: TypeAlias = tuple[int, "Operator"]
-AnchoredTransitionOperator: TypeAlias = tuple[int, "TransitionOperator", tuple[int, int]]
+Contribution: TypeAlias = tuple[int, int]  # (op_idx, coeff_idx)
+Contributions: TypeAlias = tuple["Contribution", ...]
+TaggedDiagonal: TypeAlias = tuple["Operator", "Contributions"]
+TaggedTransition: TypeAlias = tuple["TransitionOperator", tuple[int, int], "Contributions"]
 
 __all__ = [
     "Operator",
@@ -21,9 +23,11 @@ __all__ = [
     "VerticalTwoSiteOperator",
     "PlaquetteOperator",
     "BucketedOperators",
+    "CoefficientStructure",
     "LocalHamiltonian",
     "support_span",
     "bucket_operators",
+    "merge_operators",
 ]
 
 
@@ -179,16 +183,24 @@ class LocalHamiltonian:
 
 @dataclass(frozen=True)
 class BucketedOperators:
-    """Indexed local terms grouped by row and effective row span."""
+    """Local terms grouped by row and effective row span.
 
-    diagonal: tuple[IndexedOperator, ...]
+    Each transition term is ``(term, span, contributions)`` where
+    ``contributions = tuple[(op_idx, coeff_idx), ...]`` maps the term
+    to one or more output operator slots with associated coefficient indices.
+
+    Each diagonal term is ``(term, contributions)``.
+    """
+
+    diagonal: tuple[TaggedDiagonal, ...]
     rows: tuple[
         tuple[
-            tuple[int, tuple[tuple[AnchoredTransitionOperator, ...], ...]],
+            tuple[int, tuple[tuple[TaggedTransition, ...], ...]],
             ...,
         ],
         ...,
     ]
+    n_ops: int = 1
 
 
 @dispatch
@@ -216,23 +228,56 @@ def support_span(_: PlaquetteOperator) -> tuple[int, int]:
     return 2, 2
 
 
+@dataclass(frozen=True)
+class CoefficientStructure:
+    """Maps flat coefficient indices back to source operators.
+
+    ``sources[i]`` is ``(op_idx, term_idx_within_op)`` for the *i*-th
+    coefficient slot. ``schedules`` holds the (optional) time-dependent
+    schedule for each source operator, and ``n_terms_per_op`` counts how
+    many terms each source operator contributes.
+    """
+
+    sources: tuple[tuple[int, int], ...]
+    schedules: tuple[Any, ...]  # TermCoefficientSchedule | None per op
+    n_terms_per_op: tuple[int, ...]
+
+    def build_coeffs(self, t: float | jax.Array | None = None) -> jax.Array:
+        """Build flat coefficient array at time *t*."""
+        from vmc.operators.time_dependent import coeffs_at
+
+        parts: list[jax.Array] = []
+        for op_idx, n_terms in enumerate(self.n_terms_per_op):
+            sched = self.schedules[op_idx]
+            if sched is None:
+                parts.append(jnp.ones(n_terms, dtype=jnp.float64))
+            else:
+                parts.append(coeffs_at(sched, t))
+        return jnp.concatenate(parts) if len(parts) > 1 else parts[0]
+
+
 def bucket_operators(
     terms: tuple[Operator, ...],
     shape: tuple[int, int],
     *,
     eval_span: Callable[[TransitionOperator], tuple[int, int]] | None = None,
 ) -> BucketedOperators:
-    """Group terms by row and effective row span."""
+    """Group terms by row and effective row span.
+
+    Each transition cell is ``(term, span, contributions)`` where
+    ``contributions = ((op_idx, coeff_idx), ...)``.
+    Each diagonal cell is ``(term, contributions)``.
+    For a single operator, ``op_idx`` is always 0 and ``coeff_idx`` equals
+    the term's index in *terms*.
+    """
     n_rows, n_cols = shape
     span_of = support_span if eval_span is None else eval_span
-    rows: list[dict[int, list[list[AnchoredTransitionOperator]]]] = [
-        {} for _ in range(n_rows)
-    ]
-    diagonal_operators: list[IndexedOperator] = []
+    rows: list[dict[int, list[list]]] = [{} for _ in range(n_rows)]
+    diagonal_operators: list[TaggedDiagonal] = []
 
     for term_idx, term in enumerate(terms):
         if isinstance(term, DiagonalOperator):
-            diagonal_operators.append((term_idx, term))
+            diagonal_operators.append((term, ((0, term_idx),)))
             continue
         if not isinstance(term, TransitionOperator):
             raise TypeError(f"Unsupported term type: {type(term)!r}")
@@ -254,7 +299,9 @@ def bucket_operators(
         row_passes = rows[term.row]
         if dr_eff not in row_passes:
             row_passes[dr_eff] = [[] for _ in range(n_cols)]
-        row_passes[dr_eff][term.col].append((term_idx, term, (dr_eff, dc_eff)))
+        row_passes[dr_eff][term.col].append(
+            (term, (dr_eff, dc_eff), ((0, term_idx),))
+        )
 
     return BucketedOperators(
         diagonal=tuple(diagonal_operators),
@@ -266,3 +313,100 @@ def bucket_operators(
             for row_passes in rows
         ),
     )
+
+
+def merge_operators(
+    operators: tuple,
+    shape: tuple[int, int],
+    eval_span: Callable[[TransitionOperator], tuple[int, int]] | None = None,
+) -> tuple[BucketedOperators, CoefficientStructure]:
+    """Merge multiple operators into a single :class:`BucketedOperators`.
+
+    Transition terms sharing the same identity (type, anchor, matrix) are
+    deduplicated and their contributions merged. Returns both the bucketed
+    terms and a :class:`CoefficientStructure` for building the flat
+    coefficient array.
+    """
+    from vmc.operators.time_dependent import (
+        TimeDependentHamiltonian,
+        operator_schedule,
+    )
+
+    n_rows, n_cols = shape
+    span_of = support_span if eval_span is None else eval_span
+
+    # Flatten all terms with source tracking
+    flat_terms: list[tuple[Operator, int, int]] = []  # (term, op_idx, term_within_op_idx)
+    schedules: list = []
+    n_terms_per_op: list[int] = []
+    for op_idx, op in enumerate(operators):
+        sched = operator_schedule(op)
+        schedules.append(sched)
+        base = op.base if isinstance(op, TimeDependentHamiltonian) else op
+        n_terms_per_op.append(len(base.terms))
+        for local_idx, term in enumerate(base.terms):
+            flat_terms.append((term, op_idx, local_idx))
+
+    # Build coefficient index mapping: (op_idx, local_idx) -> global coeff_idx
+    sources: list[tuple[int, int]] = []
+    coeff_offset: list[int] = []
+    offset = 0
+    for op_idx, n in enumerate(n_terms_per_op):
+        coeff_offset.append(offset)
+        for local_idx in range(n):
+            sources.append((op_idx, local_idx))
+        offset += n
+
+    coeff_struct = CoefficientStructure(
+        sources=tuple(sources),
+        schedules=tuple(schedules),
+        n_terms_per_op=tuple(n_terms_per_op),
+    )
+
+    # Bucket terms, merging contributions for identical transitions
+    rows: list[dict[int, list[list]]] = [{} for _ in range(n_rows)]
+    diagonal_operators: list[TaggedDiagonal] = []
+
+    for term, op_idx, local_idx in flat_terms:
+        global_coeff_idx = coeff_offset[op_idx] + local_idx
+        contribution = (op_idx, global_coeff_idx)
+
+        if isinstance(term, DiagonalOperator):
+            diagonal_operators.append((term, ((contribution,))))
+            continue
+        if not isinstance(term, TransitionOperator):
+            raise TypeError(f"Unsupported term type: {type(term)!r}")
+        support_dr, support_dc = support_span(term)
+        if not (
+            0 <= term.row < n_rows
+            and 0 <= term.col < n_cols
+            and term.row + support_dr <= n_rows
+            and term.col + support_dc <= n_cols
+        ):
+            raise ValueError(f"Operator {term!r} is outside shape {shape}.")
+        dr_eval, dc_eval = span_of(term)
+        if dr_eval <= 0 or dc_eval <= 0:
+            raise ValueError(
+                f"Unsupported eval span {(dr_eval, dc_eval)} for {term!r}."
+            )
+        dr_eff = min(dr_eval, n_rows - term.row)
+        dc_eff = min(dc_eval, n_cols - term.col)
+        row_passes = rows[term.row]
+        if dr_eff not in row_passes:
+            row_passes[dr_eff] = [[] for _ in range(n_cols)]
+        row_passes[dr_eff][term.col].append(
+            (term, (dr_eff, dc_eff), (contribution,))
+        )
+
+    n_ops = len(operators)
+    return BucketedOperators(
+        diagonal=tuple(diagonal_operators),
+        rows=tuple(
+            tuple(
+                (dr, tuple(tuple(cell) for cell in cols))
+                for dr, cols in sorted(row_passes.items())
+            )
+            for row_passes in rows
+        ),
+        n_ops=n_ops,
+    ), coeff_struct

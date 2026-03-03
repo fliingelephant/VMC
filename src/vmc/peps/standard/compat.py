@@ -165,7 +165,7 @@ def local_estimate(
         def diag_only(sample):
             spins = spin_to_occupancy(sample).reshape(shape)
             total = jnp.zeros((), dtype=amps.dtype)
-            for _, term in bucketed_terms.diagonal:
+            for term, contributions in bucketed_terms.diagonal:
                 idx = jnp.asarray(0, dtype=jnp.int32)
                 for row, col in term.sites:
                     idx = idx * phys_dim + spins[row, col]

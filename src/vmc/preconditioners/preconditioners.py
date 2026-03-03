@@ -278,7 +278,7 @@ class SRPreconditioner:
     ) -> tuple[Any, dict]:
         from vmc.gauge import compute_gauge_projection
 
-        ham = local_energies[..., 0]
+        ham = local_energies[:, 0]
         dv = (ham - jnp.mean(ham)) / samples.shape[0]
         dv = grad_factor * dv
 

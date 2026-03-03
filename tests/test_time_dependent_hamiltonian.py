@@ -130,8 +130,8 @@ class TimeDependentHamiltonianTest(unittest.TestCase):
             2.0,
             carry_next,
         )
-        self.assertAlmostEqual(float(jnp.mean(local_0[..., 0]).real), 1.0, places=12)
-        self.assertAlmostEqual(float(jnp.mean(local_2[..., 0]).real), 7.0, places=12)
+        self.assertAlmostEqual(float(jnp.mean(local_0[:, 0]).real), 1.0, places=12)
+        self.assertAlmostEqual(float(jnp.mean(local_2[:, 0]).real), 7.0, places=12)
 
     def test_scalar_schedule_works(self) -> None:
         """AffineSchedule with scalar offset/slope should work for a 1-term Hamiltonian."""

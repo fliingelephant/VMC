@@ -304,7 +304,7 @@ def merge_operators(
     # Key: (type, pytree aux_data, array values) → (entry_list, index)
     def _dedup_key(term: Operator) -> tuple:
         arrays, aux = term.tree_flatten()
-        return (type(term), aux, tuple(tuple(a.flatten().tolist()) for a in arrays))
+        return (type(term), aux, tuple(a.tobytes() for a in arrays))
 
     rows: list[dict[int, list[list]]] = [{} for _ in range(n_rows)]
     diagonal_operators: list[TaggedDiagonal] = []

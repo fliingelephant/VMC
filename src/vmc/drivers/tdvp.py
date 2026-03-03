@@ -157,7 +157,7 @@ class TDVPDriver:
             samples,
             o,
             p,
-            local_energies,
+            local_energies[:, 0],
             grad_factor=self.time_unit.grad_factor,
         )
         return updates, (key, config_states), (local_energies, metrics)

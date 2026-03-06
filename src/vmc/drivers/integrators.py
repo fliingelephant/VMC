@@ -75,7 +75,7 @@ class RK4(Integrator):
         dt: float,
         carry: Any,
     ) -> tuple[Any, float, Any, Any]:
-        k1, carry1, _ = derivative_fn(state, t, carry)
+        k1, carry1, aux1 = derivative_fn(state, t, carry)
         k2, carry2, _ = derivative_fn(
             _tree_add_scaled(state, k1, 0.5 * dt),
             t + 0.5 * dt,
@@ -88,7 +88,7 @@ class RK4(Integrator):
             carry2,
         )
 
-        k4, carry4, aux = derivative_fn(
+        k4, carry4, _ = derivative_fn(
             _tree_add_scaled(state, k3, dt),
             t + dt,
             carry3,
@@ -105,7 +105,7 @@ class RK4(Integrator):
             _tree_add_scaled(state, incr, dt),
             t + dt,
             carry4,
-            aux,
+            aux1,
         )
 
 

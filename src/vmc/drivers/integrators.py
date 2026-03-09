@@ -46,7 +46,9 @@ class Euler(Integrator):
     """1st-order Euler integrator."""
 
     @staticmethod
-    @functools.partial(jax.jit, static_argnames=("derivative_fn",))
+    @functools.partial(
+        jax.jit, static_argnames=("derivative_fn",), inline=True
+    )
     def step(
         derivative_fn: Callable[..., tuple[Any, Any, Any]],
         state: Any,
@@ -67,7 +69,9 @@ class RK4(Integrator):
     """4th-order Runge-Kutta integrator."""
 
     @staticmethod
-    @functools.partial(jax.jit, static_argnames=("derivative_fn",))
+    @functools.partial(
+        jax.jit, static_argnames=("derivative_fn",), inline=True
+    )
     def step(
         derivative_fn: Callable[..., tuple[Any, Any, Any]],
         state: Any,

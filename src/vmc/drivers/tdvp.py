@@ -60,6 +60,7 @@ class TDVPDriver:
         model,
         operator: LocalHamiltonian | GILocalHamiltonian | TimeDependentHamiltonian,
         *,
+        observables: tuple[Any, ...] = (),
         preconditioner: SRPreconditioner,
         dt: float,
         t0: float = 0.0,
@@ -72,6 +73,7 @@ class TDVPDriver:
     ):
         self._model = model
         self.operator = operator
+        self.observables = tuple(observables)
         self.preconditioner = preconditioner
         self.dt = float(dt)
         self.t = float(t0)
@@ -93,10 +95,13 @@ class TDVPDriver:
         self._sampler_configuration = self._model.random_physical_configuration(
             init_key, n_samples=n_chains
         )
+        build_kwargs = {"full_gradient": self.full_gradient}
+        if self.observables:
+            build_kwargs["observables"] = self.observables
         init_cache, transition, estimate = build_mc_kernels(
             self._model,
             self.operator,
-            full_gradient=self.full_gradient,
+            **build_kwargs,
         )
         self._init_cache = init_cache
         self._mc_sampler = make_mc_sampler(transition, estimate)
@@ -104,6 +109,7 @@ class TDVPDriver:
         self.diag_shift_error: float | None = None
         self.residual_error: float | None = None
         self.solve_time: float | None = None
+        self.observable_stats: tuple[Any, ...] = ()
 
     def _sync_preconditioner_metrics(self, metrics: dict[str, Any]) -> None:
         self.diag_shift_error = metrics.get("diag_shift_error")
@@ -138,7 +144,7 @@ class TDVPDriver:
             total_samples,
             self.n_samples,
         )
-        local_energies = _trim_samples(
+        local_estimates = _trim_samples(
             estimates.local_estimate,
             total_samples,
             self.n_samples,
@@ -157,10 +163,10 @@ class TDVPDriver:
             samples,
             o,
             p,
-            local_energies,
+            local_estimates[:, 0],
             grad_factor=self.time_unit.grad_factor,
         )
-        return updates, (key, config_states), (local_energies, metrics)
+        return updates, (key, config_states), (local_estimates, metrics)
 
     @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(1, 3, 4))
     def _run_n_steps(
@@ -171,7 +177,7 @@ class TDVPDriver:
         config_states: jax.Array,
         n_steps: int,
     ) -> tuple[Any, float, jax.Array, jax.Array, jax.Array, dict[str, Any]]:
-        tensors, t, (key, config_states), (local_energies, metrics) = self.integrator.step(
+        tensors, t, (key, config_states), (local_estimates, metrics) = self.integrator.step(
             self._time_derivative,
             tensors,
             t,
@@ -184,20 +190,20 @@ class TDVPDriver:
             carry: tuple[Any, float, jax.Array, jax.Array, jax.Array, dict[str, Any]],
         ) -> tuple[Any, float, jax.Array, jax.Array, jax.Array, dict[str, Any]]:
             state, t_cur, key_cur, configs_cur, _, _ = carry
-            state, t_next, (key_next, configs_next), (energies_next, metrics_next) = self.integrator.step(
+            state, t_next, (key_next, configs_next), (estimates_next, metrics_next) = self.integrator.step(
                 self._time_derivative,
                 state,
                 t_cur,
                 self.dt,
                 (key_cur, configs_cur),
             )
-            return state, t_next, key_next, configs_next, energies_next, metrics_next
+            return state, t_next, key_next, configs_next, estimates_next, metrics_next
 
         return jax.lax.fori_loop(
             1,
             n_steps,
             body,
-            (tensors, t, key, config_states, local_energies, metrics),
+            (tensors, t, key, config_states, local_estimates, metrics),
         )
 
     def run(self, T: float) -> None:
@@ -212,7 +218,7 @@ class TDVPDriver:
             f"T={duration} with dt={self.dt} yields zero integration steps."
         )
 
-        self._tensors, self.t, self._sampler_key, self._sampler_configuration, local_energies, metrics = (
+        self._tensors, self.t, self._sampler_key, self._sampler_configuration, local_estimates, metrics = (
             self._run_n_steps(
                 self._tensors,
                 self.t,
@@ -221,7 +227,11 @@ class TDVPDriver:
                 n_steps,
             )
         )
-        self._loss_stats = nkstats.statistics(local_energies)
+        self._loss_stats = nkstats.statistics(local_estimates[:, 0])
+        self.observable_stats = tuple(
+            nkstats.statistics(local_estimates[:, idx])
+            for idx in range(1, local_estimates.shape[1])
+        )
         self._sync_preconditioner_metrics(metrics)
         self.step_count += n_steps
         if logger.isEnabledFor(logging.INFO):

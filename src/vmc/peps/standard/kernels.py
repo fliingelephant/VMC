@@ -18,11 +18,9 @@ from vmc.peps.common.contraction import (
 from vmc.peps.common.energy import _compute_all_env_grads_and_energy
 from vmc.peps.standard.model import PEPS
 from vmc.operators.local_terms import (
-    BucketedOperators,
-    LocalHamiltonian,
-    bucket_operators,
+    CoefficientStructure,
+    merge_operators,
 )
-from vmc.operators.time_dependent import TimeDependentHamiltonian, coeffs_at, operator_schedule
 from vmc.utils.smallo import params_per_site as params_per_site_fn
 from vmc.utils.utils import _metropolis_hastings_accept
 
@@ -96,42 +94,22 @@ def _assemble_log_derivatives(
 
 
 @dispatch
-def _bucketed_terms_for_standard_operator(
-    model: PEPS,
-    operator: LocalHamiltonian,
-) -> BucketedOperators:
-    return bucket_operators(
-        operator.terms,
-        model.shape,
-        eval_span=type(model).eval_span,
-    )
-
-
-@_bucketed_terms_for_standard_operator.dispatch
-def _bucketed_terms_for_standard_operator(
-    model: PEPS,
-    operator: TimeDependentHamiltonian,
-) -> BucketedOperators:
-    base = operator.base
-    if not isinstance(base, LocalHamiltonian):
-        raise NotImplementedError(
-            "TimeDependentHamiltonian for standard PEPS requires a LocalHamiltonian base."
-        )
-    return bucket_operators(
-        base.terms,
-        model.shape,
-        eval_span=type(model).eval_span,
-    )
-
-
-@dispatch
 def build_mc_kernels(
     model: PEPS,
     operator: object,
     *,
     full_gradient: bool = False,
+    observables: tuple = (),
 ) -> tuple[Callable, Callable, Callable]:
     """Build PEPS init_cache/transition/estimate kernels.
+
+    Parameters
+    ----------
+    observables
+        Additional operators to evaluate alongside the Hamiltonian.
+        When non-empty, ``local_estimate`` becomes a vector of shape
+        ``(1 + len(observables),)`` per sample, with the Hamiltonian
+        at index 0.
 
     The returned kernels are intentionally not jitted. For tVMC, jit the outer
     entrypoint that calls the sampler and donate chain state buffers there, e.g.
@@ -143,8 +121,12 @@ def build_mc_kernels(
     params_per_site = tuple(int(p) for p in params_per_site_fn(model))
     params_per_site_repeats = jnp.asarray(params_per_site, dtype=jnp.int32)
     total_active_params = int(sum(params_per_site))
-    terms = _bucketed_terms_for_standard_operator(model, operator)
-    schedule = operator_schedule(operator)
+
+    all_operators = (operator,) + observables
+    terms, coeff_structure = merge_operators(
+        all_operators, shape, eval_span=type(model).eval_span,
+    )
+    has_time_dep = any(s is not None for s in coeff_structure.schedules)
 
     def init_cache(
         tensors: Any,
@@ -165,8 +147,8 @@ def build_mc_kernels(
             return tuple(envs)
 
         coeffs_batch = None
-        if schedule is not None:
-            coeffs = coeffs_at(schedule, t)
+        if has_time_dep:
+            coeffs = coeff_structure.build_coeffs(t)
             coeffs_batch = jnp.broadcast_to(
                 coeffs,
                 (samples_flat.shape[0], coeffs.shape[0]),

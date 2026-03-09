@@ -190,7 +190,10 @@ def _compute_all_env_grads_and_energy(
     coeffs: jax.Array | None = None,
     collect_grads: bool = True,
 ) -> tuple[list[list[jax.Array]], jax.Array, list[tuple]]:
-    """Backward pass: use cached top_envs, build and cache bottom_envs."""
+    """Backward pass: use cached top_envs, build and cache bottom_envs.
+
+    Returns ``energies`` of shape ``(len(terms),)``.
+    """
     n_rows, n_cols = shape
     dtype = jnp.asarray(tensors[0][0]).dtype
     phys_dim = int(jnp.asarray(tensors[0][0]).shape[0])
@@ -201,15 +204,16 @@ def _compute_all_env_grads_and_energy(
         else []
     )
     bottom_envs_cache = [None] * n_rows
-    energy = jnp.zeros((), dtype=amp.dtype)
+    energies = jnp.zeros(len(terms), dtype=amp.dtype)
 
     # Diagonal terms
-    for term_idx, term in terms.diagonal:
+    for term, contributions in terms.diagonal:
         idx = jnp.asarray(0, dtype=jnp.int32)
         for row, col in term.sites:
             idx = idx * phys_dim + spins[row, col]
-        coeff = 1.0 if coeffs is None else coeffs[term_idx]
-        energy = energy + coeff * term.diag[idx]
+        for op_idx, coeff_idx in contributions:
+            coeff = 1.0 if coeffs is None else coeffs[coeff_idx]
+            energies = energies.at[op_idx].add(coeff * term.diag[idx])
 
     # Backward pass: bottom → top
     bottom_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
@@ -224,8 +228,8 @@ def _compute_all_env_grads_and_energy(
             row_passes = ((1, empty_cols),) + row_passes
 
         def _eval_dr1(
-            energy_acc: jax.Array,
-            col_terms: tuple[tuple[tuple[int, object, tuple[int, int]], ...], ...],
+            energies_acc: jax.Array,
+            col_terms: tuple[tuple[TaggedTransition, ...], ...],
         ) -> jax.Array:
             right_envs = _compute_right_envs(top_env, mpo, bottom_env, dtype)
             left_env = jnp.ones((1, 1, 1), dtype=dtype)
@@ -236,20 +240,22 @@ def _compute_all_env_grads_and_energy(
                 if collect_grads:
                     env_grads[row][col] = env_grad
                 envs = RowEnvs(left_env, right_envs, top_env, bottom_env, env_grad, tensors[row])
-                for term_idx, term, span in col_terms[col]:
-                    coeff = 1.0 if coeffs is None else coeffs[term_idx]
-                    energy_acc = energy_acc + coeff * _eval_term(
+                for term, contributions in col_terms[col]:
+                    val = _eval_term(
                         term, envs, tensors, row, col, spins, phys_dim,
                     ) / amp
+                    for op_idx, coeff_idx in contributions:
+                        coeff = 1.0 if coeffs is None else coeffs[coeff_idx]
+                        energies_acc = energies_acc.at[op_idx].add(coeff * val)
                 left_env = _update_left_env_1row(left_env, top_env[col], mpo[col], bottom_env[col])
-            return energy_acc
+            return energies_acc
 
         def _eval_dr2(
-            energy_acc: jax.Array,
-            col_terms: tuple[tuple[tuple[int, object, tuple[int, int]], ...], ...],
+            energies_acc: jax.Array,
+            col_terms: tuple[tuple[TaggedTransition, ...], ...],
         ) -> jax.Array:
             if row >= n_rows - 1:
-                return energy_acc
+                return energies_acc
             if next_row_mpo is None:
                 raise NotImplementedError("Missing next-row MPO for dr=2 evaluation.")
             bottom_env_next = bottom_envs_cache[row + 1]
@@ -262,13 +268,15 @@ def _compute_all_env_grads_and_energy(
                     left_env_2row, right_envs_2row, top_env, bottom_env_next,
                     tensors[row], tensors[row + 1],
                 )
-                for term_idx, term, span in col_terms[col]:
-                    coeff = 1.0 if coeffs is None else coeffs[term_idx]
-                    energy_acc = energy_acc + coeff * _eval_term(
+                for term, contributions in col_terms[col]:
+                    val = _eval_term(
                         term, envs, tensors, row, col, spins, phys_dim,
                     ) / amp
+                    for op_idx, coeff_idx in contributions:
+                        coeff = 1.0 if coeffs is None else coeffs[coeff_idx]
+                        energies_acc = energies_acc.at[op_idx].add(coeff * val)
                 left_env_2row = _update_left_env_2row(left_env_2row, top_env[col], mpo[col], next_row_mpo[col], bottom_env_next[col])
-            return energy_acc
+            return energies_acc
 
         pass_evaluators = {
             1: _eval_dr1,
@@ -280,11 +288,11 @@ def _compute_all_env_grads_and_energy(
                 raise NotImplementedError(
                     f"dr={dr} transition evaluation is not implemented."
                 )
-            energy = evaluator(energy, col_terms)
+            energies = evaluator(energies, col_terms)
         bottom_env = _apply_mpo_from_below(bottom_env, mpo, strategy)
         next_row_mpo = mpo
 
-    return env_grads, energy, bottom_envs_cache
+    return env_grads, energies, bottom_envs_cache
 
 
 def _compute_single_gradient(

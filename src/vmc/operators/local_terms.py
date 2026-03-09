@@ -2,15 +2,19 @@
 from __future__ import annotations
 
 import abc
-from dataclasses import dataclass
-from typing import Callable, TypeAlias
+from dataclasses import InitVar, dataclass
+from typing import Any, Callable, TypeAlias
 
 import jax
 import jax.numpy as jnp
 from plum import dispatch
 
-IndexedOperator: TypeAlias = tuple[int, "Operator"]
-AnchoredTransitionOperator: TypeAlias = tuple[int, "TransitionOperator", tuple[int, int]]
+from vmc.operators.time_dependent import coeffs_at, operator_schedule, operator_terms
+
+Contribution: TypeAlias = tuple[int, int]  # (op_idx, coeff_idx)
+Contributions: TypeAlias = tuple["Contribution", ...]
+TaggedDiagonal: TypeAlias = tuple["Operator", "Contributions"]
+TaggedTransition: TypeAlias = tuple["TransitionOperator", "Contributions"]
 
 __all__ = [
     "Operator",
@@ -21,9 +25,10 @@ __all__ = [
     "VerticalTwoSiteOperator",
     "PlaquetteOperator",
     "BucketedOperators",
+    "CoefficientStructure",
     "LocalHamiltonian",
     "support_span",
-    "bucket_operators",
+    "merge_operators",
 ]
 
 
@@ -179,16 +184,31 @@ class LocalHamiltonian:
 
 @dataclass(frozen=True)
 class BucketedOperators:
-    """Indexed local terms grouped by row and effective row span."""
+    """Local terms grouped by row and effective row span.
 
-    diagonal: tuple[IndexedOperator, ...]
+    Each transition term is ``(term, contributions)`` where
+    ``contributions = tuple[(op_idx, coeff_idx), ...]`` maps the term
+    to one or more output operator slots with associated coefficient indices.
+
+    Each diagonal term is ``(term, contributions)``.
+    """
+
+    diagonal: tuple[TaggedDiagonal, ...]
     rows: tuple[
         tuple[
-            tuple[int, tuple[tuple[AnchoredTransitionOperator, ...], ...]],
+            tuple[int, tuple[tuple[TaggedTransition, ...], ...]],
             ...,
         ],
         ...,
     ]
+    n_ops: InitVar[int] = 1
+
+    def __post_init__(self, n_ops: int) -> None:
+        object.__setattr__(self, 'n_ops', n_ops)
+
+    def __len__(self) -> int:
+        """Number of source operators before bucketing."""
+        return self.n_ops
 
 
 @dispatch
@@ -216,23 +236,94 @@ def support_span(_: PlaquetteOperator) -> tuple[int, int]:
     return 2, 2
 
 
-def bucket_operators(
-    terms: tuple[Operator, ...],
+@dataclass(frozen=True)
+class CoefficientStructure:
+    """Maps flat coefficient indices back to source operators.
+
+    ``schedules`` holds the (optional) time-dependent schedule for each
+    source operator, and ``n_terms_per_op`` counts how many terms each
+    source operator contributes.
+    """
+
+    schedules: tuple[Any, ...]  # TermCoefficientSchedule | None per op
+    n_terms_per_op: tuple[int, ...]
+
+    def build_coeffs(self, t: float | jax.Array | None = None) -> jax.Array:
+        """Build flat coefficient array at time *t*."""
+        parts: list[jax.Array] = []
+        for op_idx, n_terms in enumerate(self.n_terms_per_op):
+            sched = self.schedules[op_idx]
+            if sched is None:
+                parts.append(jnp.ones(n_terms, dtype=jnp.float64))
+            else:
+                parts.append(coeffs_at(sched, t))
+        return jnp.concatenate(parts) if len(parts) > 1 else parts[0]
+
+
+def merge_operators(
+    operators: tuple[LocalHamiltonian, ...],
     shape: tuple[int, int],
-    *,
     eval_span: Callable[[TransitionOperator], tuple[int, int]] | None = None,
-) -> BucketedOperators:
-    """Group terms by row and effective row span."""
+) -> tuple[BucketedOperators, CoefficientStructure]:
+    """Bucket and merge operators into a single :class:`BucketedOperators`.
+
+    Accepts one or more ``LocalHamiltonian`` / ``TimeDependentHamiltonian``
+    operators and groups their terms by row and effective span. Identical
+    transition terms (same type, anchor, and array object) across operators
+    are deduplicated, sharing a single ``_eval_term`` call at runtime.
+    Returns both the bucketed terms and a :class:`CoefficientStructure`
+    for building the flat coefficient array.
+    """
     n_rows, n_cols = shape
     span_of = support_span if eval_span is None else eval_span
-    rows: list[dict[int, list[list[AnchoredTransitionOperator]]]] = [
-        {} for _ in range(n_rows)
-    ]
-    diagonal_operators: list[IndexedOperator] = []
 
-    for term_idx, term in enumerate(terms):
+    # Flatten all terms with source tracking
+    flat_terms: list[tuple[Operator, int, int]] = []  # (term, op_idx, term_within_op_idx)
+    schedules: list = []
+    n_terms_per_op: list[int] = []
+    for op_idx, op in enumerate(operators):
+        schedules.append(operator_schedule(op))
+        terms = operator_terms(op)
+        n_terms_per_op.append(len(terms))
+        for local_idx, term in enumerate(terms):
+            flat_terms.append((term, op_idx, local_idx))
+
+    # Build coefficient offset per operator
+    coeff_offset: list[int] = []
+    offset = 0
+    for n in n_terms_per_op:
+        coeff_offset.append(offset)
+        offset += n
+
+    coeff_struct = CoefficientStructure(
+        schedules=tuple(schedules),
+        n_terms_per_op=tuple(n_terms_per_op),
+    )
+
+    # Bucket terms, deduplicating identical operators across sources.
+    # Key: (type, pytree aux_data, array values) → (entry_list, index)
+    def _dedup_key(term: Operator) -> tuple:
+        arrays, aux = term.tree_flatten()
+        return (type(term), aux, tuple(a.tobytes() for a in arrays))
+
+    rows: list[dict[int, list[list]]] = [{} for _ in range(n_rows)]
+    diagonal_operators: list[TaggedDiagonal] = []
+    dedup: dict[tuple, tuple[list, int]] = {}
+
+    for term, op_idx, local_idx in flat_terms:
+        global_coeff_idx = coeff_offset[op_idx] + local_idx
+        contribution = (op_idx, global_coeff_idx)
+        key = _dedup_key(term)
+
+        if key in dedup:
+            entries, idx = dedup[key]
+            existing_term, existing_contribs = entries[idx]
+            entries[idx] = (existing_term, existing_contribs + (contribution,))
+            continue
+
         if isinstance(term, DiagonalOperator):
-            diagonal_operators.append((term_idx, term))
+            dedup[key] = (diagonal_operators, len(diagonal_operators))
+            diagonal_operators.append((term, (contribution,)))
             continue
         if not isinstance(term, TransitionOperator):
             raise TypeError(f"Unsupported term type: {type(term)!r}")
@@ -250,11 +341,12 @@ def bucket_operators(
                 f"Unsupported eval span {(dr_eval, dc_eval)} for {term!r}."
             )
         dr_eff = min(dr_eval, n_rows - term.row)
-        dc_eff = min(dc_eval, n_cols - term.col)
         row_passes = rows[term.row]
         if dr_eff not in row_passes:
             row_passes[dr_eff] = [[] for _ in range(n_cols)]
-        row_passes[dr_eff][term.col].append((term_idx, term, (dr_eff, dc_eff)))
+        cell = row_passes[dr_eff][term.col]
+        dedup[key] = (cell, len(cell))
+        cell.append((term, (contribution,)))
 
     return BucketedOperators(
         diagonal=tuple(diagonal_operators),
@@ -265,4 +357,5 @@ def bucket_operators(
             )
             for row_passes in rows
         ),
-    )
+        n_ops=len(operators),
+    ), coeff_struct

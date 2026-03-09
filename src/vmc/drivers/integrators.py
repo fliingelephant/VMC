@@ -46,7 +46,9 @@ class Euler(Integrator):
     """1st-order Euler integrator."""
 
     @staticmethod
-    @functools.partial(jax.jit, static_argnames=("derivative_fn",))
+    @functools.partial(
+        jax.jit, static_argnames=("derivative_fn",), inline=True
+    )
     def step(
         derivative_fn: Callable[..., tuple[Any, Any, Any]],
         state: Any,
@@ -67,7 +69,9 @@ class RK4(Integrator):
     """4th-order Runge-Kutta integrator."""
 
     @staticmethod
-    @functools.partial(jax.jit, static_argnames=("derivative_fn",))
+    @functools.partial(
+        jax.jit, static_argnames=("derivative_fn",), inline=True
+    )
     def step(
         derivative_fn: Callable[..., tuple[Any, Any, Any]],
         state: Any,
@@ -75,7 +79,7 @@ class RK4(Integrator):
         dt: float,
         carry: Any,
     ) -> tuple[Any, float, Any, Any]:
-        k1, carry1, _ = derivative_fn(state, t, carry)
+        k1, carry1, aux1 = derivative_fn(state, t, carry)
         k2, carry2, _ = derivative_fn(
             _tree_add_scaled(state, k1, 0.5 * dt),
             t + 0.5 * dt,
@@ -88,7 +92,7 @@ class RK4(Integrator):
             carry2,
         )
 
-        k4, carry4, aux = derivative_fn(
+        k4, carry4, _ = derivative_fn(
             _tree_add_scaled(state, k3, dt),
             t + dt,
             carry3,
@@ -105,7 +109,7 @@ class RK4(Integrator):
             _tree_add_scaled(state, incr, dt),
             t + dt,
             carry4,
-            aux,
+            aux1,
         )
 
 

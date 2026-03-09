@@ -12,7 +12,12 @@ from flax import nnx
 
 from vmc.drivers import TDVPDriver
 import vmc.drivers.tdvp as tdvp_module
-from vmc.operators import LocalHamiltonian
+from vmc.operators import (
+    AffineSchedule,
+    DiagonalOperator,
+    LocalHamiltonian,
+    TimeDependentHamiltonian,
+)
 from vmc.peps import NoTruncation, PEPS
 
 
@@ -32,6 +37,18 @@ class _ZeroPreconditioner:
     ):
         _ = (model, samples, o, p, local_energies, grad_factor)
         return jax.tree_util.tree_map(jnp.zeros_like, params), {}
+
+
+def _diag_hamiltonian(shape: tuple[int, int], value: float) -> LocalHamiltonian:
+    return LocalHamiltonian(
+        shape=shape,
+        terms=(
+            DiagonalOperator(
+                sites=((0, 0),),
+                diag=jnp.asarray([value, value], dtype=jnp.complex128),
+            ),
+        ),
+    )
 
 
 class TDVPKernelCacheTest(unittest.TestCase):
@@ -89,6 +106,52 @@ class TDVPKernelCacheTest(unittest.TestCase):
             driver.run(k * driver.dt)
         self.assertEqual(driver.step_count, 10)
         self.assertAlmostEqual(driver.t, 1.0, places=12)
+
+    def test_run_records_observable_stats_per_chunk(self) -> None:
+        model = PEPS(
+            rngs=nnx.Rngs(0),
+            shape=(1, 1),
+            bond_dim=1,
+            contraction_strategy=NoTruncation(),
+        )
+        driver = TDVPDriver(
+            model,
+            _diag_hamiltonian((1, 1), 2.0),
+            observables=(_diag_hamiltonian((1, 1), 5.0),),
+            preconditioner=_ZeroPreconditioner(),
+            dt=0.1,
+            n_samples=1,
+            n_chains=1,
+        )
+        driver.run(driver.dt)
+        self.assertIsNotNone(driver.energy)
+        self.assertEqual(len(driver.observable_stats), 1)
+        self.assertAlmostEqual(float(driver.energy.mean.real), 2.0, places=12)
+        self.assertAlmostEqual(
+            float(driver.observable_stats[0].mean.real), 5.0, places=12,
+        )
+
+    def test_rk4_run_logs_first_stage_time_dependent_energy(self) -> None:
+        model = PEPS(
+            rngs=nnx.Rngs(0),
+            shape=(1, 1),
+            bond_dim=1,
+            contraction_strategy=NoTruncation(),
+        )
+        driver = TDVPDriver(
+            model,
+            TimeDependentHamiltonian(
+                base=_diag_hamiltonian((1, 1), 1.0),
+                schedule=AffineSchedule(offset=1.0, slope=3.0),
+            ),
+            preconditioner=_ZeroPreconditioner(),
+            dt=0.1,
+            n_samples=1,
+            n_chains=1,
+        )
+        driver.run(driver.dt)
+        self.assertIsNotNone(driver.energy)
+        self.assertAlmostEqual(float(driver.energy.mean.real), 1.0, places=12)
 
 if __name__ == "__main__":
     unittest.main()

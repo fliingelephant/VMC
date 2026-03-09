@@ -46,7 +46,7 @@ from vmc.operators.local_terms import (
     BucketedOperators,
     OneSiteOperator,
     TransitionOperator,
-    bucket_operators,
+    merge_operators,
     support_span,
 )
 from vmc.utils.utils import _metropolis_hastings_accept, random_tensor
@@ -374,6 +374,7 @@ def estimate(
     top_envs: list[tuple],
     *,
     terms: BucketedOperators | None = None,
+    coeffs: jax.Array | None = None,
 ) -> tuple[list[list[jax.Array]], jax.Array, list[tuple]]:
     """Compute environment gradients and local energy for BlockadePEPS.
 
@@ -387,21 +388,22 @@ def estimate(
     bottom_envs_cache = [None] * n_rows
 
     if terms is None:
-        terms = bucket_operators(
-            operator.terms,
-            peps_config.shape,
+        terms, _ = merge_operators(
+            (operator,), peps_config.shape,
             eval_span=BlockadePEPS.eval_span,
         )
 
     env_grads = [[None for _ in range(n_cols)] for _ in range(n_rows)]
 
     # 1. Diagonal energy - NO tensor operations!
-    energy = jnp.zeros((), dtype=amp.dtype)
-    for _, term in terms.diagonal:
+    energies = jnp.zeros(len(terms), dtype=amp.dtype)
+    for term, contributions in terms.diagonal:
         idx = jnp.asarray(0, dtype=jnp.int32)
         for row, col in term.sites:
             idx = idx * phys_dim + config[row, col]
-        energy = energy + term.diag[idx]
+        for op_idx, coeff_idx in contributions:
+            coeff = 1.0 if coeffs is None else coeffs[coeff_idx]
+            energies = energies.at[op_idx].add(coeff * term.diag[idx])
 
     # 2. Gradients and X term energy with incremental bottom-env construction
     bottom_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
@@ -425,8 +427,8 @@ def estimate(
             row_passes = ((1, empty_cols),) + row_passes
 
         def _eval_dr1(
-            energy_acc: jax.Array,
-            col_terms: tuple[tuple[tuple[int, Any, tuple[int, int]], ...], ...],
+            energies_acc: jax.Array,
+            col_terms: tuple,
         ) -> jax.Array:
             right_envs = _compute_right_envs(top_env, mpo, bottom_env, dtype)
             left_env = jnp.ones((1, 1, 1), dtype=dtype)
@@ -446,17 +448,20 @@ def estimate(
                         lambda _: jnp.zeros((), dtype=amp.dtype),
                         operand=None,
                     )
-                    for _, term, _ in col_terms[c]:
-                        energy_acc = energy_acc + term.op[n_flip, n_cur] * amp_flip / amp
+                    for term, contributions in col_terms[c]:
+                        val = term.op[n_flip, n_cur] * amp_flip / amp
+                        for op_idx, coeff_idx in contributions:
+                            coeff = 1.0 if coeffs is None else coeffs[coeff_idx]
+                            energies_acc = energies_acc.at[op_idx].add(coeff * val)
                 left_env = _update_left_env_1row(left_env, top_env[c], mpo[c], bottom_env[c])
-            return energy_acc
+            return energies_acc
 
         def _eval_dr2(
-            energy_acc: jax.Array,
-            col_terms: tuple[tuple[tuple[int, Any, tuple[int, int]], ...], ...],
+            energies_acc: jax.Array,
+            col_terms: tuple,
         ) -> jax.Array:
             if row >= n_rows - 1:
-                return energy_acc
+                return energies_acc
             if next_row_mpo is None:
                 raise NotImplementedError("Missing next-row MPO for blockade dr=2 evaluation.")
             mpo_next = next_row_mpo
@@ -478,10 +483,13 @@ def estimate(
                         lambda _: jnp.zeros((), dtype=amp.dtype),
                         operand=None,
                     )
-                    for _, term, _ in col_terms[c]:
-                        energy_acc = energy_acc + term.op[n_flip, n_cur] * amp_flip / amp
+                    for term, contributions in col_terms[c]:
+                        val = term.op[n_flip, n_cur] * amp_flip / amp
+                        for op_idx, coeff_idx in contributions:
+                            coeff = 1.0 if coeffs is None else coeffs[coeff_idx]
+                            energies_acc = energies_acc.at[op_idx].add(coeff * val)
                 left_env_2row = _update_left_env_2row(left_env_2row, top_env[c], mpo[c], mpo_next[c], bottom_env_pair[c])
-            return energy_acc
+            return energies_acc
 
         pass_evaluators = {
             1: _eval_dr1,
@@ -493,12 +501,12 @@ def estimate(
                 raise NotImplementedError(
                     f"Blockade transition evaluation for dr={dr} is not implemented."
                 )
-            energy = evaluator(energy, col_terms)
+            energies = evaluator(energies, col_terms)
 
         bottom_env = _apply_mpo_from_below(bottom_env, mpo, strategy)
         next_row_mpo = mpo
 
-    return env_grads, energy, bottom_envs_cache
+    return env_grads, energies, bottom_envs_cache
 
 def transition(
     tensors: list[list[jax.Array]],

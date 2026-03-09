@@ -10,7 +10,7 @@ import jax
 import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
 
-from vmc.operators.local_terms import LocalHamiltonian, bucket_operators
+from vmc.operators.local_terms import LocalHamiltonian, merge_operators
 from vmc.peps.common.contraction import _forward_with_cache
 from vmc.peps.common.energy import (
     _compute_all_env_grads_and_energy,
@@ -138,15 +138,15 @@ def local_estimate(
     samples: jax.Array,
     operator: LocalHamiltonian,
     amps: jax.Array,
+    *,
+    coeffs: jax.Array | None = None,
 ) -> jax.Array:
     """Compute local energy estimates for PEPS from local operator terms."""
     samples = jnp.asarray(samples)
     amps = jnp.asarray(amps)
     shape = model.shape
-    bucketed_terms = bucket_operators(
-        operator.terms,
-        shape,
-        eval_span=type(model).eval_span,
+    bucketed_terms, _ = merge_operators(
+        (operator,), shape, eval_span=type(model).eval_span,
     )
     has_diag = bool(bucketed_terms.diagonal)
     has_offdiag = any(
@@ -165,11 +165,13 @@ def local_estimate(
         def diag_only(sample):
             spins = spin_to_occupancy(sample).reshape(shape)
             total = jnp.zeros((), dtype=amps.dtype)
-            for _, term in bucketed_terms.diagonal:
+            for term, contributions in bucketed_terms.diagonal:
                 idx = jnp.asarray(0, dtype=jnp.int32)
                 for row, col in term.sites:
                     idx = idx * phys_dim + spins[row, col]
-                total = total + term.diag[idx]
+                for _op_idx, coeff_idx in contributions:
+                    coeff = 1.0 if coeffs is None else coeffs[coeff_idx]
+                    total = total + coeff * term.diag[idx]
             return total
 
         return jax.vmap(diag_only)(samples)
@@ -180,7 +182,7 @@ def local_estimate(
         occupancy = spin_to_occupancy(sample)
         spins = occupancy.reshape(shape)
         _, top_envs = _forward_with_cache(tensors, spins, shape, model.strategy)
-        _, energy, _ = _compute_all_env_grads_and_energy(
+        _, energies, _ = _compute_all_env_grads_and_energy(
             tensors,
             spins,
             amp,
@@ -188,8 +190,9 @@ def local_estimate(
             model.strategy,
             top_envs,
             terms=bucketed_terms,
+            coeffs=coeffs,
             collect_grads=False,
         )
-        return energy
+        return energies[0]
 
     return jax.vmap(per_sample, in_axes=(0, 0))(samples, amps)

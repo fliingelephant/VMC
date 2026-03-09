@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from vmc.operators.local_terms import (
     BucketedOperators,
+    CoefficientStructure,
     LocalHamiltonian,
     DiagonalOperator,
     HorizontalTwoSiteOperator,
@@ -11,7 +12,7 @@ from vmc.operators.local_terms import (
     PlaquetteOperator,
     TransitionOperator,
     VerticalTwoSiteOperator,
-    bucket_operators,
+    merge_operators,
     support_span,
 )
 from vmc.operators.time_dependent import (
@@ -24,6 +25,7 @@ from vmc.operators.time_dependent import (
 
 __all__ = [
     "BucketedOperators",
+    "CoefficientStructure",
     "LocalHamiltonian",
     "DiagonalOperator",
     "HorizontalTwoSiteOperator",
@@ -32,7 +34,7 @@ __all__ = [
     "PlaquetteOperator",
     "TransitionOperator",
     "VerticalTwoSiteOperator",
-    "bucket_operators",
+    "merge_operators",
     "support_span",
     "TermCoefficientSchedule",
     "AffineSchedule",

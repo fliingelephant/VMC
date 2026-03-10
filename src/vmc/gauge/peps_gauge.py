@@ -84,7 +84,7 @@ def _plaquette_constraints(n_rows, n_cols, D, h_bond_idx, v_bond_idx):
 def compute_gauge_projection(
     cfg: GaugeConfig,
     model: PEPS,
-    params,
+    params: object,
     *,
     return_info: bool = False,
 ):

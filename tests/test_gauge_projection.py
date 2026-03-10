@@ -9,9 +9,19 @@ import pytest
 from flax import nnx
 from jax.flatten_util import ravel_pytree
 
+from vmc.drivers import RK4, RealTimeUnit, TDVPDriver
 from vmc.gauge import GaugeConfig, compute_gauge_projection
 from vmc.gauge.peps_gauge import _gauge_vectors_horizontal, _gauge_vectors_vertical
-from vmc.peps import PEPS
+from vmc.operators import (
+    AffineSchedule,
+    DiagonalOperator,
+    LocalHamiltonian,
+    OneSiteOperator,
+    TimeDependentHamiltonian,
+)
+from vmc.peps import PEPS, Variational
+from vmc.peps.standard.compat import _value
+from vmc.preconditioners import DirectSolve, SRPreconditioner, solve_svd
 from vmc.qgt.jacobian import SiteOrdering, SliceOrdering
 from vmc.qgt.qgt import _iter_sliced_blocks
 from vmc.utils.smallo import params_per_site, sliced_dims
@@ -79,6 +89,82 @@ def _expected_n_gv(n_rows, n_cols, D):
     M = (n_h + n_v) * D * D
     n_plaq = (n_rows - 1) * (n_cols - 1)
     return M - n_plaq
+
+
+def _all_occupancy_states(n_sites: int) -> jax.Array:
+    basis = jnp.arange(1 << n_sites, dtype=jnp.uint32)
+    bit_positions = jnp.arange(n_sites, dtype=jnp.uint32)
+    return ((basis[:, None] >> bit_positions[None, :]) & 1).astype(jnp.int32)
+
+
+def _build_time_dependent_hamiltonian(
+    shape: tuple[int, int], *, jzz: float = -1.0, hx0: float = 0.4, hx_slope: float = -0.15
+) -> TimeDependentHamiltonian:
+    sigmax = jnp.array([[0.0, 1.0], [1.0, 0.0]], dtype=jnp.complex128)
+    sigmaz_sigmaz_diag = jnp.array([1.0, -1.0, -1.0, 1.0], dtype=jnp.complex128)
+    terms = []
+    offsets = []
+    slopes = []
+    n_rows, n_cols = shape
+    for row in range(n_rows):
+        for col in range(n_cols):
+            terms.append(OneSiteOperator(row=row, col=col, op=-sigmax))
+            offsets.append(hx0)
+            slopes.append(hx_slope)
+            if col + 1 < n_cols:
+                terms.append(
+                    DiagonalOperator(
+                        sites=((row, col), (row, col + 1)),
+                        diag=jzz * sigmaz_sigmaz_diag,
+                    )
+                )
+                offsets.append(1.0)
+                slopes.append(0.0)
+            if row + 1 < n_rows:
+                terms.append(
+                    DiagonalOperator(
+                        sites=((row, col), (row + 1, col)),
+                        diag=jzz * sigmaz_sigmaz_diag,
+                    )
+                )
+                offsets.append(1.0)
+                slopes.append(0.0)
+    return TimeDependentHamiltonian(
+        base=LocalHamiltonian(shape=shape, terms=tuple(terms)),
+        schedule=AffineSchedule(
+            offset=jnp.asarray(offsets, dtype=jnp.float64),
+            slope=jnp.asarray(slopes, dtype=jnp.float64),
+        ),
+    )
+
+
+def _clone_model(
+    shape: tuple[int, int],
+    bond_dim: int,
+    tensors: list[list[jax.Array]],
+    truncate_bond_dimension: int,
+) -> PEPS:
+    model = PEPS(
+        rngs=nnx.Rngs(123),
+        shape=shape,
+        bond_dim=bond_dim,
+        contraction_strategy=Variational(truncate_bond_dimension, n_sweeps=2),
+    )
+    for row in range(shape[0]):
+        for col in range(shape[1]):
+            model.tensors[row][col][...] = jnp.array(tensors[row][col])
+    return model
+
+
+def _normalized_state(model: PEPS, states: jax.Array) -> jax.Array:
+    amplitudes = _value(model, states)
+    return amplitudes / jnp.linalg.norm(amplitudes)
+
+
+def _phase_aligned_state_error(state_ref: jax.Array, state_test: jax.Array) -> float:
+    overlap = jnp.vdot(state_ref, state_test)
+    phase = overlap / jnp.where(jnp.abs(overlap) > 0, jnp.abs(overlap), 1.0)
+    return float(jnp.linalg.norm(state_ref - phase * state_test))
 
 
 # --------------------------------------------------------------------------- #
@@ -326,3 +412,100 @@ class TestSlicedJacobianGaugeProjection:
         # Same content but different column ordering
         assert O_site.shape == O_slice.shape
         assert not jnp.allclose(O_site, O_slice, atol=1e-10)
+
+
+class TestGaugeRemovalTDVPAlignment:
+    SHAPE = (3, 3)
+    BOND_DIM = 4
+    TRUNC_BOND_DIM = 16
+    N_SAMPLES = 8192
+    N_CHAINS = 64
+    DT = 0.01
+    N_STEPS = 10
+    DIAG_SHIFT = 1e-8
+    STATE_TOL = 1e-7
+    ENERGY_TOL = 1e-8
+
+    @pytest.mark.slow
+    @pytest.mark.parametrize(
+        "full_gradient",
+        [False, True],
+        ids=["sliced_jacobian", "full_jacobian"],
+    )
+    def test_real_time_gauge_removal_matches_baseline(self, full_gradient: bool):
+        """Gauge-removed TDVP should match baseline real-time dynamics."""
+        n_sites = self.SHAPE[0] * self.SHAPE[1]
+        states = _all_occupancy_states(n_sites)
+        operator = _build_time_dependent_hamiltonian(self.SHAPE)
+
+        base_model = PEPS(
+            rngs=nnx.Rngs(0),
+            shape=self.SHAPE,
+            bond_dim=self.BOND_DIM,
+            contraction_strategy=Variational(self.TRUNC_BOND_DIM, n_sweeps=2),
+        )
+        tensors = [
+            [jnp.array(base_model.tensors[row][col]) for col in range(self.SHAPE[1])]
+            for row in range(self.SHAPE[0])
+        ]
+
+        common = dict(
+            dt=self.DT,
+            t0=0.0,
+            time_unit=RealTimeUnit(),
+            integrator=RK4(),
+            sampler_key=jax.random.key(11),
+            n_samples=self.N_SAMPLES,
+            n_chains=self.N_CHAINS,
+            full_gradient=full_gradient,
+        )
+        baseline = TDVPDriver(
+            _clone_model(
+                self.SHAPE,
+                self.BOND_DIM,
+                tensors,
+                self.TRUNC_BOND_DIM,
+            ),
+            operator,
+            preconditioner=SRPreconditioner(
+                strategy=DirectSolve(solver=solve_svd),
+                diag_shift=self.DIAG_SHIFT,
+            ),
+            **common,
+        )
+        projected = TDVPDriver(
+            _clone_model(
+                self.SHAPE,
+                self.BOND_DIM,
+                tensors,
+                self.TRUNC_BOND_DIM,
+            ),
+            operator,
+            preconditioner=SRPreconditioner(
+                strategy=DirectSolve(solver=solve_svd),
+                diag_shift=self.DIAG_SHIFT,
+                gauge_config=GaugeConfig(),
+            ),
+            **common,
+        )
+
+        state_base = _normalized_state(baseline.model, states)
+        state_proj = _normalized_state(projected.model, states)
+        assert _phase_aligned_state_error(state_base, state_proj) < 1e-14
+
+        max_state_error = 0.0
+        for _ in range(self.N_STEPS):
+            baseline.run(self.DT)
+            projected.run(self.DT)
+            state_base = _normalized_state(baseline.model, states)
+            state_proj = _normalized_state(projected.model, states)
+            max_state_error = max(
+                max_state_error,
+                _phase_aligned_state_error(state_base, state_proj),
+            )
+            assert (
+                abs(float(baseline.energy.mean.real - projected.energy.mean.real))
+                < self.ENERGY_TOL
+            )
+
+        assert max_state_error < self.STATE_TOL

@@ -26,7 +26,7 @@ class GaugeConfig:
 def compute_gauge_projection(
     cfg: GaugeConfig,
     model: object,
-    params: dict,
+    params: object,
     *,
     return_info: bool = False,
 ) -> jax.Array | tuple[jax.Array, dict]:

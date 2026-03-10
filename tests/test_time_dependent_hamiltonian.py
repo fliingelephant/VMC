@@ -183,21 +183,33 @@ class TimeDependentHamiltonianTest(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             build_mc_kernels(model, operator, full_gradient=False)
 
-    def test_blockade_time_dependent_not_implemented(self) -> None:
+    def test_blockade_time_dependent_scales_local_energy(self) -> None:
         model = BlockadePEPS(
             rngs=nnx.Rngs(0),
             config=BlockadePEPSConfig(shape=(1, 1), D0=1, D1=1),
             contraction_strategy=NoTruncation(),
         )
         operator = TimeDependentHamiltonian(
-            base=LocalHamiltonian(shape=(1, 1), terms=()),
+            base=_diag_one_hamiltonian((1, 1)),
             schedule=AffineSchedule(
-                offset=jnp.asarray([], dtype=jnp.float64),
-                slope=jnp.asarray([], dtype=jnp.float64),
+                offset=jnp.asarray([2.5], dtype=jnp.float64),
+                slope=jnp.asarray([0.0], dtype=jnp.float64),
             ),
         )
-        with self.assertRaises(NotImplementedError):
-            build_mc_kernels(model, operator, full_gradient=False)
+        init_cache, transition, estimate = build_mc_kernels(
+            model, operator, full_gradient=True,
+        )
+        tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
+        config_states = jnp.zeros((1, 1), dtype=jnp.int32)
+        cache = init_cache(tensors, config_states, t=0.0)
+        chain_keys = jax.random.split(jax.random.key(1), 1)
+        mc_sampler = make_mc_sampler(transition, estimate)
+        (_, _, _), (_, estimates) = mc_sampler(
+            tensors, config_states, chain_keys, cache, n_steps=1,
+        )
+        self.assertAlmostEqual(
+            float(estimates.local_estimate[0, 0, 0].real), 2.5, places=12,
+        )
 
 
 if __name__ == "__main__":

@@ -748,5 +748,111 @@ class SamplingBalanceTest(unittest.TestCase):
         )
 
 
+class MultiOperatorAndTimeDependentTest(unittest.TestCase):
+    """Tests for multi-operator observables and time-dependent Hamiltonians."""
+
+    def _make_model_and_configs(self, shape=(2, 2)):
+        config = BlockadePEPSConfig(shape=shape, D0=2, D1=2)
+        model = BlockadePEPS(
+            rngs=nnx.Rngs(42),
+            config=config,
+            contraction_strategy=NoTruncation(),
+        )
+        key = jax.random.key(0)
+        init_configs = jax.vmap(lambda k: random_independent_set(k, shape))(
+            jax.random.split(key, 2)
+        )
+        return model, config, init_configs.reshape(2, -1)
+
+    def test_multi_operator_matches_individual(self):
+        """Merged observables match individually evaluated operators."""
+        from vmc.operators.local_terms import DiagonalOperator
+
+        shape = (2, 2)
+        model, config, config_states = self._make_model_and_configs(shape)
+        tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
+
+        h = rydberg_hamiltonian(shape, Omega=1.0, Delta=0.5)
+        # Observable: number operator on each site
+        n_obs = LocalHamiltonian(shape=shape, terms=tuple(
+            DiagonalOperator(
+                sites=((r, c),),
+                diag=jnp.asarray([0.0, 1.0], dtype=jnp.complex128),
+            )
+            for r in range(shape[0]) for c in range(shape[1])
+        ))
+
+        # Merged
+        init_cache, transition, estimate_merged = build_mc_kernels(
+            model, h, observables=(n_obs,),
+        )
+        # Individual
+        _, _, estimate_h = build_mc_kernels(model, h)
+        _, _, estimate_n = build_mc_kernels(model, n_obs)
+
+        cache = init_cache(tensors, config_states)
+        key = jax.random.key(1)
+        tested = 0
+        for i in range(config_states.shape[0]):
+            cache_i = jax.tree.map(lambda x: x[i], cache)
+            key, subkey = jax.random.split(key)
+            sample_next, _, ctx = transition(tensors, config_states[i], subkey, cache_i)
+            _, merged = estimate_merged(tensors, sample_next, ctx)
+            _, ref_h = estimate_h(tensors, sample_next, ctx)
+            _, ref_n = estimate_n(tensors, sample_next, ctx)
+
+            self.assertEqual(merged.local_estimate.shape, (2,))
+            self.assertAlmostEqual(
+                float(jnp.abs(merged.local_estimate[0] - ref_h.local_estimate[0])),
+                0.0, places=9,
+            )
+            self.assertAlmostEqual(
+                float(jnp.abs(merged.local_estimate[1] - ref_n.local_estimate[0])),
+                0.0, places=9,
+            )
+            tested += 1
+        self.assertGreater(tested, 1)
+
+    def test_time_dependent_coeffs_scale_energy(self):
+        """Time-dependent coefficients correctly scale blockade energy."""
+        from vmc.operators.time_dependent import AffineSchedule, TimeDependentHamiltonian
+
+        shape = (2, 2)
+        model, config, config_states = self._make_model_and_configs(shape)
+        tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
+
+        base_h = rydberg_hamiltonian(shape, Omega=1.0, Delta=0.5)
+        td_h = TimeDependentHamiltonian(
+            base=base_h,
+            schedule=AffineSchedule(
+                offset=jnp.ones(len(base_h.terms), dtype=jnp.float64) * 2.0,
+                slope=jnp.zeros(len(base_h.terms), dtype=jnp.float64),
+            ),
+        )
+
+        init_cache_td, transition, estimate_td = build_mc_kernels(model, td_h)
+        init_cache_static, _, estimate_static = build_mc_kernels(model, base_h)
+
+        cache_td = init_cache_td(tensors, config_states, t=0.0)
+        cache_static = init_cache_static(tensors, config_states)
+
+        key = jax.random.key(1)
+        for i in range(config_states.shape[0]):
+            cache_td_i = jax.tree.map(lambda x: x[i], cache_td)
+            cache_static_i = jax.tree.map(lambda x: x[i], cache_static)
+            key, subkey = jax.random.split(key)
+            sample_next, _, ctx_td = transition(tensors, config_states[i], subkey, cache_td_i)
+            ctx_static = ctx_td._replace(coeffs=cache_static_i.coeffs)
+
+            _, est_td = estimate_td(tensors, sample_next, ctx_td)
+            _, est_static = estimate_static(tensors, sample_next, ctx_static)
+
+            # With constant coefficient 2.0, energy should be 2x the static energy
+            self.assertAlmostEqual(
+                float(jnp.abs(est_td.local_estimate[0] - 2.0 * est_static.local_estimate[0])),
+                0.0, places=9,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

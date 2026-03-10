@@ -42,7 +42,7 @@ def _gauge_vectors_vertical(A1, A2, D):
     return V1.reshape(-1, D * D), V2.reshape(-1, D * D)
 
 
-def _plaquette_constraints(n_rows, n_cols, D, n_h, h_bond_idx, v_bond_idx):
+def _plaquette_constraints(n_rows, n_cols, D, h_bond_idx, v_bond_idx):
     """Build constraint vectors W in gauge-index space.
 
     For each elementary plaquette, the oriented sum Σ_k v_b(E^{kk}) around the
@@ -76,8 +76,7 @@ def _plaquette_constraints(n_rows, n_cols, D, n_h, h_bond_idx, v_bond_idx):
             plaq += 1
 
     W = jnp.zeros((M, n_plaq), dtype=jnp.float64)
-    for row, col, val in zip(rows, cols, vals):
-        W = W.at[row, col].set(val)
+    W = W.at[jnp.array(rows), jnp.array(cols)].set(jnp.array(vals))
     return W
 
 
@@ -129,7 +128,6 @@ def compute_gauge_projection(
         for c in range(n_cols - 1):
             h_bond_idx[(r, c)] = idx
             idx += 1
-    n_h = idx
     v_bond_idx = {}
     for r in range(n_rows - 1):
         for c in range(n_cols):
@@ -139,7 +137,7 @@ def compute_gauge_projection(
     M = n_bonds * D * D
 
     # Plaquette constraints in gauge-index space
-    W = _plaquette_constraints(n_rows, n_cols, D, n_h, h_bond_idx, v_bond_idx)
+    W = _plaquette_constraints(n_rows, n_cols, D, h_bond_idx, v_bond_idx)
     n_plaq = W.shape[1]
     N_gv = M - n_plaq
 
@@ -154,21 +152,18 @@ def compute_gauge_projection(
     # Accumulate bond-by-bond: each bond contributes to 2 sites.
     G_indep = jnp.zeros((N_p, N_gv), dtype=dtype)
 
-    for (r, c), b_idx in h_bond_idx.items():
-        V1, V2 = _gauge_vectors_horizontal(get_tensor(r, c), get_tensor(r, c + 1), D)
-        qwp = Q_w_perp[b_idx * D * D:(b_idx + 1) * D * D, :]  # (D², N_gv)
-        i1, s1 = site_idx(r, c), site_sizes[site_idx(r, c)]
-        i2, s2 = site_idx(r, c + 1), site_sizes[site_idx(r, c + 1)]
-        G_indep = G_indep.at[offsets[i1]:offsets[i1] + s1, :].add(V1 @ qwp)
-        G_indep = G_indep.at[offsets[i2]:offsets[i2] + s2, :].add(V2 @ qwp)
-
-    for (r, c), b_idx in v_bond_idx.items():
-        V1, V2 = _gauge_vectors_vertical(get_tensor(r, c), get_tensor(r + 1, c), D)
-        qwp = Q_w_perp[b_idx * D * D:(b_idx + 1) * D * D, :]
-        i1, s1 = site_idx(r, c), site_sizes[site_idx(r, c)]
-        i2, s2 = site_idx(r + 1, c), site_sizes[site_idx(r + 1, c)]
-        G_indep = G_indep.at[offsets[i1]:offsets[i1] + s1, :].add(V1 @ qwp)
-        G_indep = G_indep.at[offsets[i2]:offsets[i2] + s2, :].add(V2 @ qwp)
+    bonds = [
+        (h_bond_idx, _gauge_vectors_horizontal, lambda r, c: (r, c + 1)),
+        (v_bond_idx, _gauge_vectors_vertical, lambda r, c: (r + 1, c)),
+    ]
+    for bond_idx, gauge_fn, neighbor in bonds:
+        for (r, c), b_idx in bond_idx.items():
+            r2, c2 = neighbor(r, c)
+            V1, V2 = gauge_fn(get_tensor(r, c), get_tensor(r2, c2), D)
+            qwp = Q_w_perp[b_idx * D * D:(b_idx + 1) * D * D, :]
+            i1, i2 = site_idx(r, c), site_idx(r2, c2)
+            G_indep = G_indep.at[offsets[i1]:offsets[i1] + site_sizes[i1], :].add(V1 @ qwp)
+            G_indep = G_indep.at[offsets[i2]:offsets[i2] + site_sizes[i2], :].add(V2 @ qwp)
 
     # T = [G_indep | u₁]  (u₁ = global rescaling direction)
     if cfg.include_global_scale:

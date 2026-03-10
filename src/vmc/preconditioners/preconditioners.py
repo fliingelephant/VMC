@@ -286,6 +286,11 @@ class SRPreconditioner:
         sd = sliced_dims(model)
         Q = None
         if self.gauge_config is not None:
+            if isinstance(self.space, SampleSpace):
+                raise NotImplementedError(
+                    "Gauge removal is not supported for SampleSpace. "
+                    "Use ParameterSpace or set gauge_config=None."
+                )
             Q, _ = compute_gauge_projection(
                 self.gauge_config, model, params, return_info=True
             )
@@ -294,7 +299,8 @@ class SRPreconditioner:
             else:
                 from vmc.qgt.qgt import _iter_sliced_blocks
 
-                blocks = [ok for ok, _ in _iter_sliced_blocks(o, p, sd, self.ordering)]
+                site_order = SiteOrdering(pps)
+                blocks = [ok for ok, _ in _iter_sliced_blocks(o, p, sd, site_order)]
                 o_eff = jnp.concatenate(blocks, axis=1) @ Q
             jac = Jacobian(o_eff)
         elif p is None:

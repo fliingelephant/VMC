@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from vmc.gauge.gauge import GaugeConfig, compute_gauge_projection
+from vmc.gauge.peps_gauge import compute_gauge_projection as _  # noqa: F401 - register dispatch
 from vmc.gauge.weight import WeightConfig, compute_weight_projection
 
 __all__ = [

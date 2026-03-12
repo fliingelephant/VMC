@@ -12,6 +12,7 @@ from flax import nnx
 
 from vmc.drivers import TDVPDriver
 import vmc.drivers.tdvp as tdvp_module
+from vmc.gauge import GaugeConfig
 from vmc.operators import (
     AffineSchedule,
     DiagonalOperator,
@@ -19,6 +20,7 @@ from vmc.operators import (
     TimeDependentHamiltonian,
 )
 from vmc.peps import NoTruncation, PEPS
+from vmc.preconditioners import DirectSolve, SRPreconditioner, solve_svd
 
 
 class _ZeroPreconditioner:
@@ -52,6 +54,32 @@ def _diag_hamiltonian(shape: tuple[int, int], value: float) -> LocalHamiltonian:
 
 
 class TDVPKernelCacheTest(unittest.TestCase):
+    def test_gauge_removal_accepts_driver_tensor_dict(self) -> None:
+        for full_gradient in (False, True):
+            with self.subTest(full_gradient=full_gradient):
+                model = PEPS(
+                    rngs=nnx.Rngs(0),
+                    shape=(1, 1),
+                    bond_dim=1,
+                    contraction_strategy=NoTruncation(),
+                )
+                driver = TDVPDriver(
+                    model,
+                    _diag_hamiltonian((1, 1), 1.0),
+                    preconditioner=SRPreconditioner(
+                        strategy=DirectSolve(solver=solve_svd),
+                        diag_shift=1e-8,
+                        gauge_config=GaugeConfig(),
+                    ),
+                    dt=0.1,
+                    n_samples=2,
+                    n_chains=2,
+                    full_gradient=full_gradient,
+                )
+                driver.run(driver.dt)
+                self.assertEqual(driver.step_count, 1)
+                self.assertAlmostEqual(driver.t, 0.1, places=12)
+
     def test_static_operator_reuses_kernels(self) -> None:
         model = PEPS(
             rngs=nnx.Rngs(0),

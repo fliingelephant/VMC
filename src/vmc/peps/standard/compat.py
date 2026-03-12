@@ -11,9 +11,9 @@ import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
 
 from vmc.operators.local_terms import LocalHamiltonian, merge_operators
-from vmc.peps.common.contraction import _forward_with_cache
+from vmc.peps.common.contraction import _build_row_mpo, _forward_with_cache
 from vmc.peps.common.energy import (
-    _compute_all_env_grads_and_energy,
+    _estimate_sweep,
     _compute_all_gradients,
 )
 from vmc.peps.common.strategy import ContractionStrategy
@@ -177,18 +177,27 @@ def local_estimate(
         return jax.vmap(diag_only)(samples)
 
     tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
+
     def per_sample(sample, amp):
         occupancy = spin_to_occupancy(sample)
         spins = occupancy.reshape(shape)
         _, top_envs = _forward_with_cache(tensors, spins, shape, model.strategy)
-        _, energies, _ = _compute_all_env_grads_and_energy(
+
+        def build_row_mpo(
+            tensors: Any,
+            sample: jax.Array,
+            row: int,
+        ) -> tuple:
+            return _build_row_mpo(tensors, sample[row], row, shape[1])
+
+        _, energies, _ = _estimate_sweep(
             tensors,
             spins,
             amp,
-            shape,
-            model.strategy,
             top_envs,
+            strategy=model.strategy,
             terms=bucketed_terms,
+            build_row_mpo=build_row_mpo,
             coeffs=coeffs,
             collect_grads=False,
         )

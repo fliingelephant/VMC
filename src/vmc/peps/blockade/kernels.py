@@ -10,6 +10,7 @@ from vmc.operators.local_terms import merge_operators
 from vmc.peps.blockade import model as blockade_model
 from vmc.peps.blockade.model import BlockadePEPS
 from vmc.peps.common.contraction import _apply_mpo_from_below
+from vmc.peps.common.energy import _estimate_sweep
 from vmc.peps.standard.kernels import Cache, Context, LocalEstimates, build_mc_kernels
 
 __all__ = ["build_mc_kernels"]
@@ -24,9 +25,9 @@ def build_mc_kernels(
     observables: tuple = (),
 ) -> tuple[Any, Any, Any]:
     """Build blockade-PEPS init_cache/transition/estimate kernels."""
-    shape = model.shape
-    n_rows, n_cols = shape
     peps_config = model.config
+    shape = peps_config.shape
+    n_rows, n_cols = shape
     strategy = model.strategy
 
     all_operators = (operator,) + observables
@@ -76,7 +77,6 @@ def build_mc_kernels(
             config_state,
             key,
             cache.bottom_envs,
-            shape,
             peps_config,
             strategy,
         )
@@ -87,17 +87,27 @@ def build_mc_kernels(
         config_state_next: jax.Array,
         context: Context,
     ) -> tuple[Cache, LocalEstimates]:
-        env_grads, local_energy, envs_next = blockade_model.estimate(
+        config_state = BlockadePEPS.unflatten_sample(config_state_next, shape)
+
+        def build_row_mpo(
             tensors,
-            config_state_next,
+            sample,
+            row,
+        ):
+            return blockade_model._build_row_mpo(tensors, sample, peps_config, row)
+
+        env_grads, local_energy, envs_next = _estimate_sweep(
+            tensors,
+            config_state,
             context.amp,
-            operator,
-            shape,
-            peps_config,
-            strategy,
             context.top_envs,
+            strategy=strategy,
             terms=terms,
+            build_row_mpo=build_row_mpo,
+            eval_term=blockade_model._eval_blockade_term,
+            env_config=peps_config,
             coeffs=context.coeffs,
+            collect_grads=True,
         )
         indices = config_state_next.reshape(shape)
         grad_parts = []

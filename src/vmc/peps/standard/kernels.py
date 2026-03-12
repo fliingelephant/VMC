@@ -15,7 +15,7 @@ from vmc.peps.common.contraction import (
     _compute_right_envs,
     _contract_bottom,
 )
-from vmc.peps.common.energy import _compute_all_env_grads_and_energy
+from vmc.peps.common.energy import _estimate_sweep
 from vmc.peps.standard.model import PEPS
 from vmc.operators.local_terms import (
     CoefficientStructure,
@@ -248,14 +248,22 @@ def build_mc_kernels(
         context: Context,
     ) -> tuple[Cache, LocalEstimates]:
         indices = config_state_next.reshape(shape)
-        env_grads, local_estimate, bottom_envs_next = _compute_all_env_grads_and_energy(
+
+        def build_row_mpo(
+            tensors: Any,
+            sample: jax.Array,
+            row: int,
+        ) -> tuple:
+            return _build_row_mpo(tensors, sample[row], row, n_cols)
+
+        env_grads, local_estimate, bottom_envs_next = _estimate_sweep(
             tensors,
             indices,
             context.amp,
-            shape,
-            model.strategy,
             context.top_envs,
+            strategy=model.strategy,
             terms=terms,
+            build_row_mpo=build_row_mpo,
             coeffs=context.coeffs,
             collect_grads=True,
         )

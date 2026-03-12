@@ -27,7 +27,6 @@ __all__ = [
     "_compute_right_envs_2row",
     "_compute_all_row_gradients",
     "_estimate_sweep",
-    "_compute_all_env_grads_and_energy",
     "_compute_single_gradient",
     "_compute_all_gradients",
 ]
@@ -43,7 +42,6 @@ class RowEnvs(NamedTuple):
     env_grad: jax.Array
     row_tensors: list
     amp: jax.Array | None = None
-    row_mpo: tuple | None = None
     config: Any = None
 
 
@@ -57,7 +55,6 @@ class TwoRowEnvs(NamedTuple):
     row_tensors: list
     row_tensors_next: list
     amp: jax.Array | None = None
-    row_mpo: tuple | None = None
     row_mpo_next: tuple | None = None
     config: Any = None
 
@@ -195,9 +192,6 @@ def _estimate_sweep(
     amp: jax.Array,
     top_envs: list[tuple],
     *,
-    n_rows: int,
-    n_cols: int,
-    phys_dim: int,
     strategy: ContractionStrategy,
     terms: BucketedOperators,
     build_row_mpo: Callable[[Any, jax.Array, int], tuple],
@@ -208,6 +202,8 @@ def _estimate_sweep(
 ) -> tuple[list[list[jax.Array]], jax.Array, list[tuple]]:
     """Shared backward sweep for PEPS local estimates and gradients."""
     dtype = jnp.asarray(tensors[0][0]).dtype
+    n_rows, n_cols = sample.shape
+    phys_dim = int(jnp.asarray(tensors[0][0]).shape[0])
 
     env_grads = (
         [[None for _ in range(n_cols)] for _ in range(n_rows)]
@@ -254,7 +250,6 @@ def _estimate_sweep(
                         env_grad,
                         tensors[row],
                         amp,
-                        row_mpo,
                         env_config,
                     )
                     for term, contributions in col_terms[col]:
@@ -288,7 +283,6 @@ def _estimate_sweep(
                         tensors[row],
                         tensors[row + 1],
                         amp,
-                        row_mpo,
                         next_row_mpo,
                         env_config,
                     )
@@ -314,46 +308,6 @@ def _estimate_sweep(
         next_row_mpo = row_mpo
 
     return env_grads, energies, bottom_envs_cache
-
-
-def _compute_all_env_grads_and_energy(
-    tensors: Any,
-    spins: jax.Array,
-    amp: jax.Array,
-    shape: tuple[int, int],
-    strategy: ContractionStrategy,
-    top_envs: list[tuple],
-    *,
-    terms: BucketedOperators,
-    coeffs: jax.Array | None = None,
-    collect_grads: bool = True,
-) -> tuple[list[list[jax.Array]], jax.Array, list[tuple]]:
-    """Backward pass for standard PEPS using cached top environments."""
-    n_rows, n_cols = shape
-    phys_dim = int(jnp.asarray(tensors[0][0]).shape[0])
-
-    def build_row_mpo(
-        tensors: Any,
-        sample: jax.Array,
-        row: int,
-    ) -> tuple:
-        return _build_row_mpo(tensors, sample[row], row, n_cols)
-
-    return _estimate_sweep(
-        tensors,
-        spins,
-        amp,
-        top_envs,
-        n_rows=n_rows,
-        n_cols=n_cols,
-        phys_dim=phys_dim,
-        strategy=strategy,
-        terms=terms,
-        build_row_mpo=build_row_mpo,
-        coeffs=coeffs,
-        collect_grads=collect_grads,
-    )
-
 
 def _compute_single_gradient(
     left_env: jax.Array,

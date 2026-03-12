@@ -12,9 +12,9 @@ from vmc.peps.common.energy import (
     RowEnvs,
     TwoRowEnvs,
     _eval_term,
-    _compute_all_env_grads_and_energy,
     _compute_all_gradients,
     _compute_all_row_gradients,
+    _estimate_sweep,
     _compute_right_envs_2row,
     _compute_single_gradient,
 )
@@ -40,9 +40,9 @@ __all__ = [
     "RowEnvs",
     "TwoRowEnvs",
     "_eval_term",
-    "_compute_all_env_grads_and_energy",
     "_compute_all_gradients",
     "_compute_all_row_gradients",
+    "_estimate_sweep",
     "_compute_right_envs_2row",
     "_compute_single_gradient",
 ]

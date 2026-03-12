@@ -20,7 +20,27 @@ from vmc.peps.blockade import (
     random_independent_set,
     rydberg_hamiltonian,
 )
-from vmc.peps.blockade.compat import assemble_tensors
+from vmc.peps.blockade import model as blockade_model
+from vmc.peps.common.contraction import _contract_bottom
+
+
+def _forward_with_cache_blockade(
+    tensors: list[list[jax.Array]],
+    config: jax.Array,
+    peps_config: BlockadePEPSConfig,
+    strategy,
+) -> tuple[jax.Array, tuple]:
+    n_rows, n_cols = peps_config.shape
+    dtype = tensors[0][0].dtype
+    top_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
+    top_envs = [None] * n_rows
+    for row in range(n_rows):
+        top_envs[row] = top_env
+        top_env = strategy.apply(
+            top_env,
+            blockade_model._build_row_mpo(tensors, config, peps_config, row),
+        )
+    return _contract_bottom(top_env), tuple(top_envs)
 
 
 def _sample_with_kernels(
@@ -260,7 +280,7 @@ class BlockadeConstraintTest(unittest.TestCase):
         valid_config = jnp.array([[1, 0], [0, 1]], dtype=jnp.int32)
         valid_sample = BlockadePEPS.flatten_sample(valid_config)
         amp_valid = BlockadePEPS.apply(
-            tensors, valid_sample, config.shape, config, model.strategy
+            tensors, valid_sample, config, model.strategy
         )
 
         # Invalid configuration: adjacent 1s (violation)
@@ -268,7 +288,7 @@ class BlockadeConstraintTest(unittest.TestCase):
         invalid_config = jnp.array([[1, 1], [0, 0]], dtype=jnp.int32)
         invalid_sample = BlockadePEPS.flatten_sample(invalid_config)
         amp_invalid = BlockadePEPS.apply(
-            tensors, invalid_sample, config.shape, config, model.strategy
+            tensors, invalid_sample, config, model.strategy
         )
 
         # Valid amplitude should be non-zero
@@ -346,8 +366,7 @@ class GradsAndEnergyTest(unittest.TestCase):
 
     def test_grads_and_energy_shapes(self):
         """Test that grads_and_energy returns correct shapes."""
-        from vmc.peps.blockade import model as blockade_model
-        from vmc.peps.common.contraction import _forward_with_cache
+        from vmc.peps.standard.kernels import Context
 
         config = BlockadePEPSConfig(shape=(3, 3), D0=2, D1=2)
         model = BlockadePEPS(
@@ -363,31 +382,25 @@ class GradsAndEnergyTest(unittest.TestCase):
 
         config_2d = sample.reshape(config.shape)
         tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
-        eff_tensors = assemble_tensors(
+        amp, top_envs = _forward_with_cache_blockade(
             tensors,
             config_2d,
             config,
-        )
-        amp, top_envs = _forward_with_cache(
-            eff_tensors,
-            config_2d,
-            config.shape,
             model.strategy,
         )
-        env_grads, energy, _ = blockade_model.estimate(
+        _, _, estimate = build_mc_kernels(model, h)
+        _, estimates = estimate(
             tensors,
             sample,
-            amp,
-            h,
-            config.shape,
-            config,
-            model.strategy,
-            top_envs,
+            Context(amp=amp, top_envs=top_envs, coeffs=None),
         )
 
-        self.assertEqual(len(env_grads), config.shape[0])
-        self.assertEqual(len(env_grads[0]), config.shape[1])
-        self.assertEqual(energy.shape, (1,))
+        self.assertEqual(estimates.local_estimate.shape, (1,))
+        self.assertEqual(estimates.local_log_derivatives.ndim, 1)
+        self.assertEqual(
+            estimates.local_log_derivatives.shape,
+            estimates.active_slice_indices.shape,
+        )
 
 
 class SamplerTest(unittest.TestCase):
@@ -487,7 +500,7 @@ class GradientFiniteDiffTest(unittest.TestCase):
         tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
 
         def amp_fn(ts):
-            return BlockadePEPS.apply(ts, sample, config.shape, config, model.strategy)
+            return BlockadePEPS.apply(ts, sample, config, model.strategy)
 
         amp, grad = jax.value_and_grad(amp_fn, holomorphic=True)(tensors)
         grad_flat, _ = ravel_pytree(grad)
@@ -521,7 +534,7 @@ class GradientFiniteDiffTest(unittest.TestCase):
         def amp_from_flat(flat_params):
             ts = unflatten_tensors(flat_params, shapes, config.shape[0], config.shape[1])
             return np.asarray(
-                BlockadePEPS.apply(ts, sample, config.shape, config, model.strategy)
+                BlockadePEPS.apply(ts, sample, config, model.strategy)
             )
 
         # Central difference
@@ -544,8 +557,7 @@ class DiagonalEnergyTest(unittest.TestCase):
 
     def test_diagonal_energy_direct(self):
         """Test that diagonal energy matches direct computation."""
-        from vmc.peps.blockade import model as blockade_model
-        from vmc.peps.common.contraction import _forward_with_cache
+        from vmc.peps.standard.kernels import Context
 
         shape = (2, 2)
         Omega = 0.0  # No X term for this test
@@ -566,31 +578,22 @@ class DiagonalEnergyTest(unittest.TestCase):
         expected_energy = -Delta * n_ones
         sample = BlockadePEPS.flatten_sample(config_arr)
         tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
-        eff_tensors = assemble_tensors(
+        amp, top_envs = _forward_with_cache_blockade(
             tensors,
             config_arr,
             config,
-        )
-        amp, top_envs = _forward_with_cache(
-            eff_tensors,
-            config_arr,
-            config.shape,
             model.strategy,
         )
-        _, energy, _ = blockade_model.estimate(
+        _, _, estimate = build_mc_kernels(model, h)
+        _, estimates = estimate(
             tensors,
             sample,
-            amp,
-            h,
-            config.shape,
-            config,
-            model.strategy,
-            top_envs,
+            Context(amp=amp, top_envs=top_envs, coeffs=None),
         )
 
         # With Omega=0, energy should just be diagonal
         self.assertAlmostEqual(
-            float(jnp.real(energy[0])),
+            float(jnp.real(estimates.local_estimate[0])),
             float(expected_energy),
             places=5,
         )
@@ -698,7 +701,7 @@ class SamplingBalanceTest(unittest.TestCase):
 
         tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
         amplitudes = jax.vmap(
-            lambda s: BlockadePEPS.apply(tensors, s, config.shape, config, model.strategy)
+            lambda s: BlockadePEPS.apply(tensors, s, config, model.strategy)
         )(valid_configs)
         probs_exact = jnp.abs(amplitudes) ** 2
         probs_exact = probs_exact / jnp.sum(probs_exact)

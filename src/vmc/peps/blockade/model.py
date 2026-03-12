@@ -38,17 +38,14 @@ from vmc.peps.common.contraction import (
 from vmc.peps.common.energy import (
     RowEnvs,
     TwoRowEnvs,
-    _estimate_sweep,
     _compute_right_envs_2row,
     _update_left_env_1row,
     _update_left_env_2row,
 )
 from vmc.peps.common.strategy import ContractionStrategy, Variational
 from vmc.operators.local_terms import (
-    BucketedOperators,
     OneSiteOperator,
     TransitionOperator,
-    merge_operators,
     support_span,
 )
 from vmc.utils.utils import _metropolis_hastings_accept, random_tensor
@@ -365,6 +362,16 @@ def _blockade_flip_amplitude_2row(
     )
 
 
+def _blockade_one_site_value(
+    term: OneSiteOperator,
+    n_cur: jax.Array,
+    amp: jax.Array,
+    amp_flip: jax.Array,
+) -> jax.Array:
+    """Return the unnormalized one-site matrix element contribution."""
+    return term.op[n_cur, n_cur] * amp + term.op[1 - n_cur, n_cur] * amp_flip
+
+
 @dispatch
 def _eval_blockade_term(
     term: OneSiteOperator,
@@ -400,14 +407,7 @@ def _eval_blockade_term(
         lambda _: jnp.zeros((), dtype=envs.amp.dtype),
         operand=None,
     )
-    amps = jnp.asarray(
-        (
-            jnp.where(n_cur == 0, envs.amp, amp_flip),
-            jnp.where(n_cur == 1, envs.amp, amp_flip),
-        ),
-        dtype=envs.amp.dtype,
-    )
-    return jnp.dot(term.op[:, n_cur], amps)
+    return _blockade_one_site_value(term, n_cur, envs.amp, amp_flip)
 
 
 @_eval_blockade_term.dispatch
@@ -446,68 +446,13 @@ def _eval_blockade_term(
         lambda _: jnp.zeros((), dtype=envs.amp.dtype),
         operand=None,
     )
-    amps = jnp.asarray(
-        (
-            jnp.where(n_cur == 0, envs.amp, amp_flip),
-            jnp.where(n_cur == 1, envs.amp, amp_flip),
-        ),
-        dtype=envs.amp.dtype,
-    )
-    return jnp.dot(term.op[:, n_cur], amps)
-
-
-def estimate(
-    tensors: list[list[jax.Array]],
-    sample: jax.Array,
-    amp: jax.Array,
-    operator: Any,
-    shape: tuple[int, int],
-    peps_config: BlockadePEPSConfig,
-    strategy: ContractionStrategy,
-    top_envs: list[tuple],
-    *,
-    terms: BucketedOperators | None = None,
-    coeffs: jax.Array | None = None,
-) -> tuple[list[list[jax.Array]], jax.Array, list[tuple]]:
-    """Compute environment gradients and local energy for BlockadePEPS."""
-    config = BlockadePEPS.unflatten_sample(sample, shape)
-    n_rows, n_cols = peps_config.shape
-    if terms is None:
-        terms, _ = merge_operators(
-            (operator,), peps_config.shape,
-            eval_span=BlockadePEPS.eval_span,
-        )
-
-    def build_row_mpo(
-        tensors: Any,
-        sample: jax.Array,
-        row: int,
-    ) -> tuple:
-        return _build_row_mpo(tensors, sample, peps_config, row)
-
-    return _estimate_sweep(
-        tensors,
-        config,
-        amp,
-        top_envs,
-        n_rows=n_rows,
-        n_cols=n_cols,
-        phys_dim=peps_config.phys_dim,
-        strategy=strategy,
-        terms=terms,
-        build_row_mpo=build_row_mpo,
-        eval_term=_eval_blockade_term,
-        env_config=peps_config,
-        coeffs=coeffs,
-        collect_grads=True,
-    )
+    return _blockade_one_site_value(term, n_cur, envs.amp, amp_flip)
 
 def transition(
     tensors: list[list[jax.Array]],
     sample: jax.Array,
     key: jax.Array,
     envs: list[tuple],
-    shape: tuple[int, int],
     peps_config: BlockadePEPSConfig,
     strategy: ContractionStrategy,
 ) -> tuple[jax.Array, jax.Array, jax.Array, tuple]:
@@ -515,7 +460,7 @@ def transition(
 
     Uses overlapping row pairs (0,1), (1,2), ... with 2-column explicit window.
     """
-    config = BlockadePEPS.unflatten_sample(sample, shape)
+    config = BlockadePEPS.unflatten_sample(sample, peps_config.shape)
     n_rows, n_cols = peps_config.shape
     dtype = tensors[0][0].dtype
 

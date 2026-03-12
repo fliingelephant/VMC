@@ -95,6 +95,27 @@ class TimeDependentHamiltonianTest(unittest.TestCase):
             places=12,
         )
 
+    def test_standard_time_dependent_requires_explicit_time(self) -> None:
+        model = PEPS(
+            rngs=nnx.Rngs(0),
+            shape=(1, 1),
+            bond_dim=1,
+            contraction_strategy=NoTruncation(),
+        )
+        operator = TimeDependentHamiltonian(
+            base=_diag_one_hamiltonian((1, 1)),
+            schedule=AffineSchedule(offset=2.5, slope=0.0),
+        )
+        init_cache, _, _ = build_mc_kernels(
+            model,
+            operator,
+            full_gradient=True,
+        )
+        tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
+        config_states = jnp.zeros((1, 1), dtype=jnp.int32)
+        with self.assertRaisesRegex(ValueError, "non-None time"):
+            init_cache(tensors, config_states)
+
     def test_tdvp_uses_time_dependent_coeffs(self) -> None:
         model = PEPS(
             rngs=nnx.Rngs(0),
@@ -210,6 +231,26 @@ class TimeDependentHamiltonianTest(unittest.TestCase):
         self.assertAlmostEqual(
             float(estimates.local_estimate[0, 0, 0].real), 2.5, places=12,
         )
+
+    def test_blockade_time_dependent_requires_explicit_time(self) -> None:
+        model = BlockadePEPS(
+            rngs=nnx.Rngs(0),
+            config=BlockadePEPSConfig(shape=(1, 1), D0=1, D1=1),
+            contraction_strategy=NoTruncation(),
+        )
+        operator = TimeDependentHamiltonian(
+            base=_diag_one_hamiltonian((1, 1)),
+            schedule=AffineSchedule(offset=2.5, slope=0.0),
+        )
+        init_cache, _, _ = build_mc_kernels(
+            model,
+            operator,
+            full_gradient=True,
+        )
+        tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
+        config_states = jnp.zeros((1, 1), dtype=jnp.int32)
+        with self.assertRaisesRegex(ValueError, "non-None time"):
+            init_cache(tensors, config_states)
 
 
 if __name__ == "__main__":

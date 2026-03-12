@@ -255,8 +255,12 @@ class CoefficientStructure:
             sched = self.schedules[op_idx]
             if sched is None:
                 parts.append(jnp.ones(n_terms, dtype=jnp.float64))
-            else:
-                parts.append(coeffs_at(sched, t))
+                continue
+            if t is None:
+                raise ValueError(
+                    "Time-dependent operators require a non-None time `t`."
+                )
+            parts.append(coeffs_at(sched, t))
         return jnp.concatenate(parts) if len(parts) > 1 else parts[0]
 
 

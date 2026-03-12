@@ -177,7 +177,6 @@ def local_estimate(
         return jax.vmap(diag_only)(samples)
 
     tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
-
     def per_sample(sample, amp):
         occupancy = spin_to_occupancy(sample)
         spins = occupancy.reshape(shape)

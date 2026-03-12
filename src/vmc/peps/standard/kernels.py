@@ -127,7 +127,6 @@ def build_mc_kernels(
         all_operators, shape, eval_span=type(model).eval_span,
     )
     has_time_dep = any(s is not None for s in coeff_structure.schedules)
-
     def init_cache(
         tensors: Any,
         samples: jax.Array,

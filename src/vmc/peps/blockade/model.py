@@ -36,8 +36,10 @@ from vmc.peps.common.contraction import (
     _contract_bottom,
 )
 from vmc.peps.common.energy import (
+    RowEnvs,
+    TwoRowEnvs,
+    _estimate_sweep,
     _compute_right_envs_2row,
-    _compute_single_gradient,
     _update_left_env_1row,
     _update_left_env_2row,
 )
@@ -363,6 +365,97 @@ def _blockade_flip_amplitude_2row(
     )
 
 
+@dispatch
+def _eval_blockade_term(
+    term: OneSiteOperator,
+    envs: RowEnvs,
+    tensors: Any,
+    row: int,
+    col: int,
+    sample: jax.Array,
+    phys_dim: int,
+) -> jax.Array:
+    del phys_dim
+    n_rows = sample.shape[0]
+    n_cols = sample.shape[1]
+    dtype = jnp.asarray(tensors[0][0]).dtype
+    n_cur = sample[row, col]
+    n_flip = 1 - n_cur
+    amp_flip = jax.lax.cond(
+        _flip_allowed(sample, n_rows, n_cols, row, col, n_flip),
+        lambda _: _blockade_flip_amplitude_1row(
+            tensors,
+            envs.config,
+            sample,
+            row,
+            col,
+            n_flip,
+            n_cols,
+            envs.left_env,
+            envs.top_env,
+            envs.bottom_env,
+            envs.right_envs,
+            dtype,
+        ),
+        lambda _: jnp.zeros((), dtype=envs.amp.dtype),
+        operand=None,
+    )
+    amps = jnp.asarray(
+        (
+            jnp.where(n_cur == 0, envs.amp, amp_flip),
+            jnp.where(n_cur == 1, envs.amp, amp_flip),
+        ),
+        dtype=envs.amp.dtype,
+    )
+    return jnp.dot(term.op[:, n_cur], amps)
+
+
+@_eval_blockade_term.dispatch
+def _eval_blockade_term(
+    term: OneSiteOperator,
+    envs: TwoRowEnvs,
+    tensors: Any,
+    row: int,
+    col: int,
+    sample: jax.Array,
+    phys_dim: int,
+) -> jax.Array:
+    del phys_dim
+    n_rows = sample.shape[0]
+    n_cols = sample.shape[1]
+    dtype = jnp.asarray(tensors[0][0]).dtype
+    n_cur = sample[row, col]
+    n_flip = 1 - n_cur
+    amp_flip = jax.lax.cond(
+        _flip_allowed(sample, n_rows, n_cols, row, col, n_flip),
+        lambda _: _blockade_flip_amplitude_2row(
+            tensors,
+            envs.config,
+            sample,
+            row,
+            col,
+            n_flip,
+            n_cols,
+            envs.left_env,
+            envs.top_env,
+            envs.row_mpo_next,
+            envs.bottom_env_next,
+            envs.right_envs,
+            dtype,
+        ),
+        lambda _: jnp.zeros((), dtype=envs.amp.dtype),
+        operand=None,
+    )
+    amps = jnp.asarray(
+        (
+            jnp.where(n_cur == 0, envs.amp, amp_flip),
+            jnp.where(n_cur == 1, envs.amp, amp_flip),
+        ),
+        dtype=envs.amp.dtype,
+    )
+    return jnp.dot(term.op[:, n_cur], amps)
+
+
 def estimate(
     tensors: list[list[jax.Array]],
     sample: jax.Array,
@@ -376,137 +469,38 @@ def estimate(
     terms: BucketedOperators | None = None,
     coeffs: jax.Array | None = None,
 ) -> tuple[list[list[jax.Array]], jax.Array, list[tuple]]:
-    """Compute environment gradients and local energy for BlockadePEPS.
-
-    Diagonal terms: computed directly from configuration (no tensor operations)
-    X terms: use 2-row sweep with tensor contractions
-    """
+    """Compute environment gradients and local energy for BlockadePEPS."""
     config = BlockadePEPS.unflatten_sample(sample, shape)
     n_rows, n_cols = peps_config.shape
-    dtype = tensors[0][0].dtype
-    phys_dim = peps_config.phys_dim
-    bottom_envs_cache = [None] * n_rows
-
     if terms is None:
         terms, _ = merge_operators(
             (operator,), peps_config.shape,
             eval_span=BlockadePEPS.eval_span,
         )
 
-    env_grads = [[None for _ in range(n_cols)] for _ in range(n_rows)]
+    def build_row_mpo(
+        tensors: Any,
+        sample: jax.Array,
+        row: int,
+    ) -> tuple:
+        return _build_row_mpo(tensors, sample, peps_config, row)
 
-    # 1. Diagonal energy - NO tensor operations!
-    energies = jnp.zeros(len(terms), dtype=amp.dtype)
-    for term, contributions in terms.diagonal:
-        idx = jnp.asarray(0, dtype=jnp.int32)
-        for row, col in term.sites:
-            idx = idx * phys_dim + config[row, col]
-        for op_idx, coeff_idx in contributions:
-            coeff = 1.0 if coeffs is None else coeffs[coeff_idx]
-            energies = energies.at[op_idx].add(coeff * term.diag[idx])
-
-    # 2. Gradients and X term energy with incremental bottom-env construction
-    bottom_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
-    empty_cols = tuple(() for _ in range(n_cols))
-    next_row_mpo = None
-    for row in range(n_rows - 1, -1, -1):
-        bottom_envs_cache[row] = bottom_env
-        top_env = top_envs[row]
-        mpo = tuple(
-            _assemble_mpo_site(
-                tensors,
-                peps_config,
-                config,
-                row,
-                c,
-            )
-            for c in range(n_cols)
-        )
-        row_passes = terms.rows[row]
-        if not any(dr == 1 for dr, _ in row_passes):
-            row_passes = ((1, empty_cols),) + row_passes
-
-        def _eval_dr1(
-            energies_acc: jax.Array,
-            col_terms: tuple,
-        ) -> jax.Array:
-            right_envs = _compute_right_envs(top_env, mpo, bottom_env, dtype)
-            left_env = jnp.ones((1, 1, 1), dtype=dtype)
-            for c in range(n_cols):
-                env_grads[row][c] = _compute_single_gradient(
-                    left_env, right_envs[c], top_env[c], bottom_env[c]
-                )
-                if col_terms[c]:
-                    n_cur = config[row, c]
-                    n_flip = 1 - n_cur
-                    amp_flip = jax.lax.cond(
-                        _flip_allowed(config, n_rows, n_cols, row, c, n_flip),
-                        lambda _: _blockade_flip_amplitude_1row(
-                            tensors, peps_config, config, row, c, n_flip, n_cols,
-                            left_env, top_env, bottom_env, right_envs, dtype,
-                        ),
-                        lambda _: jnp.zeros((), dtype=amp.dtype),
-                        operand=None,
-                    )
-                    for term, contributions in col_terms[c]:
-                        val = term.op[n_flip, n_cur] * amp_flip / amp
-                        for op_idx, coeff_idx in contributions:
-                            coeff = 1.0 if coeffs is None else coeffs[coeff_idx]
-                            energies_acc = energies_acc.at[op_idx].add(coeff * val)
-                left_env = _update_left_env_1row(left_env, top_env[c], mpo[c], bottom_env[c])
-            return energies_acc
-
-        def _eval_dr2(
-            energies_acc: jax.Array,
-            col_terms: tuple,
-        ) -> jax.Array:
-            if row >= n_rows - 1:
-                return energies_acc
-            if next_row_mpo is None:
-                raise NotImplementedError("Missing next-row MPO for blockade dr=2 evaluation.")
-            mpo_next = next_row_mpo
-            bottom_env_pair = bottom_envs_cache[row + 1]
-            right_envs_2row = _compute_right_envs_2row(
-                top_env, mpo, mpo_next, bottom_env_pair, dtype
-            )
-            left_env_2row = jnp.ones((1, 1, 1, 1), dtype=dtype)
-            for c in range(n_cols):
-                if col_terms[c]:
-                    n_cur = config[row, c]
-                    n_flip = 1 - n_cur
-                    amp_flip = jax.lax.cond(
-                        _flip_allowed(config, n_rows, n_cols, row, c, n_flip),
-                        lambda _: _blockade_flip_amplitude_2row(
-                            tensors, peps_config, config, row, c, n_flip, n_cols,
-                            left_env_2row, top_env, mpo_next, bottom_env_pair, right_envs_2row, dtype,
-                        ),
-                        lambda _: jnp.zeros((), dtype=amp.dtype),
-                        operand=None,
-                    )
-                    for term, contributions in col_terms[c]:
-                        val = term.op[n_flip, n_cur] * amp_flip / amp
-                        for op_idx, coeff_idx in contributions:
-                            coeff = 1.0 if coeffs is None else coeffs[coeff_idx]
-                            energies_acc = energies_acc.at[op_idx].add(coeff * val)
-                left_env_2row = _update_left_env_2row(left_env_2row, top_env[c], mpo[c], mpo_next[c], bottom_env_pair[c])
-            return energies_acc
-
-        pass_evaluators = {
-            1: _eval_dr1,
-            2: _eval_dr2,
-        }
-        for dr, col_terms in row_passes:
-            evaluator = pass_evaluators.get(dr)
-            if evaluator is None:
-                raise NotImplementedError(
-                    f"Blockade transition evaluation for dr={dr} is not implemented."
-                )
-            energies = evaluator(energies, col_terms)
-
-        bottom_env = _apply_mpo_from_below(bottom_env, mpo, strategy)
-        next_row_mpo = mpo
-
-    return env_grads, energies, bottom_envs_cache
+    return _estimate_sweep(
+        tensors,
+        config,
+        amp,
+        top_envs,
+        n_rows=n_rows,
+        n_cols=n_cols,
+        phys_dim=peps_config.phys_dim,
+        strategy=strategy,
+        terms=terms,
+        build_row_mpo=build_row_mpo,
+        eval_term=_eval_blockade_term,
+        env_config=peps_config,
+        coeffs=coeffs,
+        collect_grads=True,
+    )
 
 def transition(
     tensors: list[list[jax.Array]],

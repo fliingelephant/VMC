@@ -82,7 +82,6 @@ class TDVPDriver:
         self.n_chains = int(n_chains)
         self.full_gradient = bool(full_gradient)
         self._loss_stats = None
-        self._sampler_configuration = None
         self._graphdef, params, model_state = nnx.split(self._model, nnx.Param, ...)
         self._tensors = nnx.to_pure_dict(params)["tensors"]
         self._model_state = nnx.to_pure_dict(model_state)
@@ -95,13 +94,11 @@ class TDVPDriver:
         self._sampler_configuration = self._model.random_physical_configuration(
             init_key, n_samples=n_chains
         )
-        build_kwargs = {"full_gradient": self.full_gradient}
-        if self.observables:
-            build_kwargs["observables"] = self.observables
         init_cache, transition, estimate = build_mc_kernels(
             self._model,
             self.operator,
-            **build_kwargs,
+            full_gradient=self.full_gradient,
+            observables=self.observables,
         )
         self._init_cache = init_cache
         self._mc_sampler = make_mc_sampler(transition, estimate)

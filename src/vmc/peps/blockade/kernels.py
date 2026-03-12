@@ -6,11 +6,11 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 
-from vmc.operators.local_terms import LocalHamiltonian, merge_operators
-from vmc.operators.time_dependent import TimeDependentHamiltonian
+from vmc.operators.local_terms import merge_operators
 from vmc.peps.blockade import model as blockade_model
 from vmc.peps.blockade.model import BlockadePEPS
 from vmc.peps.common.contraction import _apply_mpo_from_below
+from vmc.peps.common.energy import _estimate_sweep
 from vmc.peps.standard.kernels import Cache, Context, LocalEstimates, build_mc_kernels
 
 __all__ = ["build_mc_kernels"]
@@ -19,25 +19,28 @@ __all__ = ["build_mc_kernels"]
 @build_mc_kernels.dispatch
 def build_mc_kernels(
     model: BlockadePEPS,
-    operator: LocalHamiltonian,
+    operator: object,
     *,
     full_gradient: bool = False,
+    observables: tuple = (),
 ) -> tuple[Any, Any, Any]:
     """Build blockade-PEPS init_cache/transition/estimate kernels."""
-    shape = model.shape
+    peps_config = model.config
+    shape = peps_config.shape
     n_rows, n_cols = shape
-    config = model.config
     strategy = model.strategy
-    bucketed_terms, _ = merge_operators(
-        (operator,), shape, eval_span=type(model).eval_span,
+
+    all_operators = (operator,) + observables
+    terms, coeff_structure = merge_operators(
+        all_operators, shape, eval_span=type(model).eval_span,
     )
+    has_time_dep = any(s is not None for s in coeff_structure.schedules)
 
     def init_cache(
         tensors: Any,
         config_states: jax.Array,
-        coeffs: jax.Array | None = None,
+        t: float | jax.Array | None = None,
     ) -> Cache:
-        del coeffs
         config_states_flat = config_states.reshape(config_states.shape[0], n_rows * n_cols)
 
         def build_one(config_state: jax.Array):
@@ -47,11 +50,21 @@ def build_mc_kernels(
             env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
             for row in range(n_rows - 1, -1, -1):
                 envs[row] = env
-                row_mpo = blockade_model._build_row_mpo(tensors, indices, config, row)
+                row_mpo = blockade_model._build_row_mpo(tensors, indices, peps_config, row)
                 env = _apply_mpo_from_below(env, row_mpo, strategy)
             return tuple(envs)
 
-        return Cache(bottom_envs=jax.vmap(build_one)(config_states_flat))
+        coeffs_batch = None
+        if has_time_dep:
+            coeffs = coeff_structure.build_coeffs(t)
+            coeffs_batch = jnp.broadcast_to(
+                coeffs,
+                (config_states_flat.shape[0], coeffs.shape[0]),
+            )
+        return Cache(
+            bottom_envs=jax.vmap(build_one)(config_states_flat),
+            coeffs=coeffs_batch,
+        )
 
     def transition(
         tensors: Any,
@@ -64,27 +77,37 @@ def build_mc_kernels(
             config_state,
             key,
             cache.bottom_envs,
-            shape,
-            config,
+            peps_config,
             strategy,
         )
-        return config_state_next, key_next, Context(amp=amp, top_envs=top_envs)
+        return config_state_next, key_next, Context(amp=amp, top_envs=top_envs, coeffs=cache.coeffs)
 
     def estimate(
         tensors: Any,
         config_state_next: jax.Array,
         context: Context,
     ) -> tuple[Cache, LocalEstimates]:
-        env_grads, local_energy, envs_next = blockade_model.estimate(
+        config_state = BlockadePEPS.unflatten_sample(config_state_next, shape)
+
+        def build_row_mpo(
             tensors,
-            config_state_next,
+            sample,
+            row,
+        ):
+            return blockade_model._build_row_mpo(tensors, sample, peps_config, row)
+
+        env_grads, local_energy, envs_next = _estimate_sweep(
+            tensors,
+            config_state,
             context.amp,
-            operator,
-            shape,
-            config,
-            strategy,
             context.top_envs,
-            terms=bucketed_terms,
+            strategy=strategy,
+            terms=terms,
+            build_row_mpo=build_row_mpo,
+            eval_term=blockade_model._eval_blockade_term,
+            env_config=peps_config,
+            coeffs=context.coeffs,
+            collect_grads=True,
         )
         indices = config_state_next.reshape(shape)
         grad_parts = []
@@ -109,7 +132,7 @@ def build_mc_kernels(
                     )
         local_log_derivatives = jnp.concatenate(grad_parts) / context.amp
         active_slice_indices = None if full_gradient else jnp.concatenate(p_parts)
-        return Cache(bottom_envs=tuple(envs_next)), LocalEstimates(
+        return Cache(bottom_envs=tuple(envs_next), coeffs=context.coeffs), LocalEstimates(
             local_log_derivatives=local_log_derivatives,
             local_estimate=local_energy,
             active_slice_indices=active_slice_indices,
@@ -117,16 +140,3 @@ def build_mc_kernels(
         )
 
     return init_cache, transition, estimate
-
-
-@build_mc_kernels.dispatch
-def build_mc_kernels(
-    model: BlockadePEPS,
-    operator: TimeDependentHamiltonian,
-    *,
-    full_gradient: bool = False,
-) -> tuple[Any, Any, Any]:
-    del model, operator, full_gradient
-    raise NotImplementedError(
-        "TimeDependentHamiltonian is not implemented for BlockadePEPS."
-    )

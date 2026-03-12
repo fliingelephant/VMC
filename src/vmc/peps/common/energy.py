@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from vmc import config  # noqa: F401 - JAX config must be imported first
 
-from typing import Any, NamedTuple
+from typing import Any, Callable, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -26,7 +26,7 @@ __all__ = [
     "_update_left_env_2row",
     "_compute_right_envs_2row",
     "_compute_all_row_gradients",
-    "_compute_all_env_grads_and_energy",
+    "_estimate_sweep",
     "_compute_single_gradient",
     "_compute_all_gradients",
 ]
@@ -34,22 +34,30 @@ __all__ = [
 
 class RowEnvs(NamedTuple):
     """1-row environment context for dr=1 evaluation."""
+
     left_env: jax.Array
     right_envs: list
     top_env: tuple
     bottom_env: tuple
     env_grad: jax.Array
     row_tensors: list
+    amp: jax.Array | None = None
+    config: Any = None
 
 
 class TwoRowEnvs(NamedTuple):
     """2-row environment context for dr=2 evaluation."""
+
     left_env: jax.Array
     right_envs: list
     top_env: tuple
     bottom_env_next: tuple
     row_tensors: list
     row_tensors_next: list
+    amp: jax.Array | None = None
+    row_mpo_next: tuple | None = None
+    config: Any = None
+
 
 def _update_left_env_1row(left_env, top, mpo, bottom):
     """Advance 1-row left environment by one column."""
@@ -81,9 +89,6 @@ def _compute_right_envs_2row(
     right_envs = [None] * n_cols
     right_envs[n_cols - 1] = jnp.ones((1, 1, 1, 1), dtype=dtype)
     for c in range(n_cols - 2, -1, -1):
-        # Direct einsum: top @ mpo0 @ mpo1 @ bot @ right_env -> new_right_env
-        # top: (a, u, b), mpo0: (l, r, u, v), mpo1: (x, y, v, w), bot: (e, w, f)
-        # right_env: (b, r, y, f) -> output: (a, l, x, e)
         right_envs[c] = jnp.einsum(
             "aub,lruv,xyvw,ewf,bryf->alxe",
             top_env[c + 1], mpo_row0[c + 1], mpo_row1[c + 1], bottom_env[c + 1], right_envs[c + 1],
@@ -122,6 +127,7 @@ def _eval_term(
     spins: jax.Array,
     phys_dim: int,
 ) -> jax.Array:
+    del tensors, phys_dim
     amps = jnp.einsum("pudlr,udlr->p", envs.row_tensors[col], envs.env_grad)
     return jnp.dot(term.op[:, spins[row, col]], amps)
 
@@ -136,6 +142,7 @@ def _eval_term(
     spins: jax.Array,
     phys_dim: int,
 ) -> jax.Array:
+    del tensors
     amps = jnp.einsum(
         "ace,aub,edf,pudcr,qvwrx,bvg,fwi,gxi->pq",
         envs.left_env,
@@ -164,6 +171,7 @@ def _eval_term(
     spins: jax.Array,
     phys_dim: int,
 ) -> jax.Array:
+    del tensors
     amps = jnp.einsum(
         "almg,aub,puvlr,qvwmn,gwf,brnf->pq",
         envs.left_env,
@@ -178,24 +186,23 @@ def _eval_term(
     return jnp.dot(term.op[:, s0 * phys_dim + s1], amps.reshape(-1))
 
 
-def _compute_all_env_grads_and_energy(
+def _estimate_sweep(
     tensors: Any,
-    spins: jax.Array,
+    sample: jax.Array,
     amp: jax.Array,
-    shape: tuple[int, int],
-    strategy: ContractionStrategy,
     top_envs: list[tuple],
     *,
+    strategy: ContractionStrategy,
     terms: BucketedOperators,
+    build_row_mpo: Callable[[Any, jax.Array, int], tuple],
+    eval_term: Callable[[Any, Any, Any, int, int, jax.Array, int], jax.Array] = _eval_term,
+    env_config: Any = None,
     coeffs: jax.Array | None = None,
     collect_grads: bool = True,
 ) -> tuple[list[list[jax.Array]], jax.Array, list[tuple]]:
-    """Backward pass: use cached top_envs, build and cache bottom_envs.
-
-    Returns ``energies`` of shape ``(len(terms),)``.
-    """
-    n_rows, n_cols = shape
+    """Shared backward sweep for PEPS local estimates and gradients."""
     dtype = jnp.asarray(tensors[0][0]).dtype
+    n_rows, n_cols = sample.shape
     phys_dim = int(jnp.asarray(tensors[0][0]).shape[0])
 
     env_grads = (
@@ -206,94 +213,101 @@ def _compute_all_env_grads_and_energy(
     bottom_envs_cache = [None] * n_rows
     energies = jnp.zeros(len(terms), dtype=amp.dtype)
 
-    # Diagonal terms
     for term, contributions in terms.diagonal:
         idx = jnp.asarray(0, dtype=jnp.int32)
         for row, col in term.sites:
-            idx = idx * phys_dim + spins[row, col]
+            idx = idx * phys_dim + sample[row, col]
         for op_idx, coeff_idx in contributions:
             coeff = 1.0 if coeffs is None else coeffs[coeff_idx]
             energies = energies.at[op_idx].add(coeff * term.diag[idx])
 
-    # Backward pass: bottom → top
     bottom_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
     empty_cols = tuple(() for _ in range(n_cols))
     next_row_mpo = None
     for row in range(n_rows - 1, -1, -1):
         bottom_envs_cache[row] = bottom_env
         top_env = top_envs[row]
-        mpo = _build_row_mpo(tensors, spins[row], row, n_cols)
+        row_mpo = build_row_mpo(tensors, sample, row)
         row_passes = terms.rows[row]
         if collect_grads and not any(dr == 1 for dr, _ in row_passes):
             row_passes = ((1, empty_cols),) + row_passes
 
-        def _eval_dr1(
-            energies_acc: jax.Array,
-            col_terms: tuple[tuple[TaggedTransition, ...], ...],
-        ) -> jax.Array:
-            right_envs = _compute_right_envs(top_env, mpo, bottom_env, dtype)
-            left_env = jnp.ones((1, 1, 1), dtype=dtype)
-            for col in range(n_cols):
-                env_grad = _compute_single_gradient(
-                    left_env, right_envs[col], top_env[col], bottom_env[col]
-                )
-                if collect_grads:
-                    env_grads[row][col] = env_grad
-                envs = RowEnvs(left_env, right_envs, top_env, bottom_env, env_grad, tensors[row])
-                for term, contributions in col_terms[col]:
-                    val = _eval_term(
-                        term, envs, tensors, row, col, spins, phys_dim,
-                    ) / amp
-                    for op_idx, coeff_idx in contributions:
-                        coeff = 1.0 if coeffs is None else coeffs[coeff_idx]
-                        energies_acc = energies_acc.at[op_idx].add(coeff * val)
-                left_env = _update_left_env_1row(left_env, top_env[col], mpo[col], bottom_env[col])
-            return energies_acc
-
-        def _eval_dr2(
-            energies_acc: jax.Array,
-            col_terms: tuple[tuple[TaggedTransition, ...], ...],
-        ) -> jax.Array:
-            if row >= n_rows - 1:
-                return energies_acc
-            if next_row_mpo is None:
-                raise NotImplementedError("Missing next-row MPO for dr=2 evaluation.")
-            bottom_env_next = bottom_envs_cache[row + 1]
-            right_envs_2row = _compute_right_envs_2row(
-                top_env, mpo, next_row_mpo, bottom_env_next, dtype
-            )
-            left_env_2row = jnp.ones((1, 1, 1, 1), dtype=dtype)
-            for col in range(n_cols):
-                envs = TwoRowEnvs(
-                    left_env_2row, right_envs_2row, top_env, bottom_env_next,
-                    tensors[row], tensors[row + 1],
-                )
-                for term, contributions in col_terms[col]:
-                    val = _eval_term(
-                        term, envs, tensors, row, col, spins, phys_dim,
-                    ) / amp
-                    for op_idx, coeff_idx in contributions:
-                        coeff = 1.0 if coeffs is None else coeffs[coeff_idx]
-                        energies_acc = energies_acc.at[op_idx].add(coeff * val)
-                left_env_2row = _update_left_env_2row(left_env_2row, top_env[col], mpo[col], next_row_mpo[col], bottom_env_next[col])
-            return energies_acc
-
-        pass_evaluators = {
-            1: _eval_dr1,
-            2: _eval_dr2,
-        }
         for dr, col_terms in row_passes:
-            evaluator = pass_evaluators.get(dr)
-            if evaluator is None:
-                raise NotImplementedError(
-                    f"dr={dr} transition evaluation is not implemented."
+            if dr == 1:
+                right_envs = _compute_right_envs(top_env, row_mpo, bottom_env, dtype)
+                left_env = jnp.ones((1, 1, 1), dtype=dtype)
+                for col in range(n_cols):
+                    env_grad = _compute_single_gradient(
+                        left_env, right_envs[col], top_env[col], bottom_env[col]
+                    )
+                    if collect_grads:
+                        env_grads[row][col] = env_grad
+                    envs = RowEnvs(
+                        left_env,
+                        right_envs,
+                        top_env,
+                        bottom_env,
+                        env_grad,
+                        tensors[row],
+                        amp,
+                        env_config,
+                    )
+                    for term, contributions in col_terms[col]:
+                        val = eval_term(
+                            term, envs, tensors, row, col, sample, phys_dim,
+                        ) / amp
+                        for op_idx, coeff_idx in contributions:
+                            coeff = 1.0 if coeffs is None else coeffs[coeff_idx]
+                            energies = energies.at[op_idx].add(coeff * val)
+                    left_env = _update_left_env_1row(
+                        left_env, top_env[col], row_mpo[col], bottom_env[col],
+                    )
+                continue
+
+            if dr == 2:
+                if row >= n_rows - 1:
+                    continue
+                if next_row_mpo is None:
+                    raise NotImplementedError("Missing next-row MPO for dr=2 evaluation.")
+                bottom_env_next = bottom_envs_cache[row + 1]
+                right_envs_2row = _compute_right_envs_2row(
+                    top_env, row_mpo, next_row_mpo, bottom_env_next, dtype,
                 )
-            energies = evaluator(energies, col_terms)
-        bottom_env = _apply_mpo_from_below(bottom_env, mpo, strategy)
-        next_row_mpo = mpo
+                left_env_2row = jnp.ones((1, 1, 1, 1), dtype=dtype)
+                for col in range(n_cols):
+                    envs = TwoRowEnvs(
+                        left_env_2row,
+                        right_envs_2row,
+                        top_env,
+                        bottom_env_next,
+                        tensors[row],
+                        tensors[row + 1],
+                        amp,
+                        next_row_mpo,
+                        env_config,
+                    )
+                    for term, contributions in col_terms[col]:
+                        val = eval_term(
+                            term, envs, tensors, row, col, sample, phys_dim,
+                        ) / amp
+                        for op_idx, coeff_idx in contributions:
+                            coeff = 1.0 if coeffs is None else coeffs[coeff_idx]
+                            energies = energies.at[op_idx].add(coeff * val)
+                    left_env_2row = _update_left_env_2row(
+                        left_env_2row,
+                        top_env[col],
+                        row_mpo[col],
+                        next_row_mpo[col],
+                        bottom_env_next[col],
+                    )
+                continue
+
+            raise NotImplementedError(f"dr={dr} transition evaluation is not implemented.")
+
+        bottom_env = _apply_mpo_from_below(bottom_env, row_mpo, strategy)
+        next_row_mpo = row_mpo
 
     return env_grads, energies, bottom_envs_cache
-
 
 def _compute_single_gradient(
     left_env: jax.Array,
@@ -301,10 +315,7 @@ def _compute_single_gradient(
     top_tensor: jax.Array,
     bot_tensor: jax.Array,
 ) -> jax.Array:
-    """Compute gradient for a single tensor given left/right environments.
-
-    Returns gradient tensor with shape (up, down, mL, mR).
-    """
+    """Compute gradient for a single tensor given left/right environments."""
     return jnp.einsum(
         "ace,aub,evf,bdf->uvcd", left_env, top_tensor, bot_tensor, right_env,
         optimize=[(0, 1), (0, 1), (0, 1)],

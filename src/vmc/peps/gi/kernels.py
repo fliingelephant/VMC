@@ -101,8 +101,6 @@ def build_mc_kernels(
             tensors,
             config_state_next,
             context.amp,
-            operator,
-            shape,
             config,
             strategy,
             context.top_envs,

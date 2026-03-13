@@ -41,7 +41,6 @@ from vmc.operators.local_terms import (
     BucketedOperators,
     PlaquetteOperator,
     VerticalTwoSiteOperator,
-    merge_operators,
     support_span,
 )
 from vmc.utils.utils import random_tensor, _hastings_ratio, _metropolis_hastings_accept
@@ -463,29 +462,21 @@ def estimate(
     tensors: list[list[jax.Array]],
     sample: jax.Array,
     amp: jax.Array,
-    operator: Any,
-    shape: tuple[int, int],
     config: GIPEPSConfig,
     strategy: Any,
     top_envs: list[tuple],
     *,
-    terms: BucketedOperators | None = None,
+    terms: BucketedOperators,
     coeffs: jax.Array | None = None,
 ) -> tuple[list[list[jax.Array]], jax.Array, list[tuple]]:
     """Compute environment gradients and local energy for GI-PEPS."""
     from vmc.peps.gi.local_terms import LinkDiagonalTerm
 
-    sites, h_links, v_links = GIPEPS.unflatten_sample(sample, shape)
+    sites, h_links, v_links = GIPEPS.unflatten_sample(sample, config.shape)
     n_rows, n_cols = config.shape
     dtype = tensors[0][0].dtype
     phys_dim = config.phys_dim
     bottom_envs_cache = [None] * n_rows
-
-    if terms is None:
-        terms, _ = merge_operators(
-            (operator,), config.shape,
-            eval_span=GIPEPS.eval_span,
-        )
 
     env_grads = [[None for _ in range(n_cols)] for _ in range(n_rows)]
 

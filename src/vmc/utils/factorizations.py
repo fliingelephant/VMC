@@ -37,16 +37,16 @@ def _householder_wy(r: jax.Array, tau: jax.Array) -> jax.Array:
     dtype = r.dtype
 
     Y = jnp.tril(r[..., :, :k], k=-1) + jnp.eye(m, k, dtype=dtype)
-    YHY = jnp.einsum("...ki,...kj->...ij", Y.conj(), Y, optimize=True)
+    YHY = Y.conj().mT @ Y
     strict_lower = jnp.tril(jnp.ones((k, k), dtype=dtype), k=-1)
     basis = jnp.eye(k, dtype=dtype)
 
     def update_column(j: int, T: jax.Array) -> jax.Array:
         mask = strict_lower[j, :]
         yhy_col = YHY[..., :, j] * mask
-        t_yhy = jnp.einsum("...ab,...b->...a", T, yhy_col, optimize=True)
+        t_yhy = (T @ yhy_col[..., None])[..., 0]
         tau_j = tau[..., j][..., None]
-        new_col = -tau_j * t_yhy * mask + tau_j * basis[j]
+        new_col = -tau_j * t_yhy + tau_j * basis[j]
         return jax.lax.dynamic_update_slice_in_dim(T, new_col[..., None], j, axis=-1)
 
     T = jax.lax.fori_loop(
@@ -86,7 +86,7 @@ def _householder_sequential(r: jax.Array, tau: jax.Array) -> jax.Array:
         col = jax.lax.dynamic_index_in_dim(r, j, axis=-1, keepdims=False)
         v = jnp.where(rows < j, zero, col)
         v = jax.lax.dynamic_update_slice_in_dim(v, one, j, axis=-1)
-        proj = jnp.einsum("...i,...ij->...j", v.conj(), q, optimize=True)
+        proj = (v.conj()[..., None, :] @ q)[..., 0, :]
         return q - tau[..., j][..., None, None] * v[..., :, None] * proj[..., None, :]
 
     return jax.lax.fori_loop(0, k, apply_reflector, q)

@@ -18,7 +18,6 @@ from vmc.peps.common.contraction import (
 from vmc.peps.common.energy import _estimate_sweep
 from vmc.peps.standard.model import PEPS
 from vmc.operators.local_terms import (
-    CoefficientStructure,
     merge_operators,
 )
 from vmc.utils.smallo import params_per_site as params_per_site_fn
@@ -118,6 +117,8 @@ def build_mc_kernels(
     shape = model.shape
     n_rows, n_cols = shape
     n_sites = int(n_rows * n_cols)
+    strategy = model.strategy
+    phys_dim = model.phys_dim
     params_per_site = tuple(int(p) for p in params_per_site_fn(model))
     params_per_site_repeats = jnp.asarray(params_per_site, dtype=jnp.int32)
     total_active_params = int(sum(params_per_site))
@@ -142,7 +143,7 @@ def build_mc_kernels(
             for row in range(n_rows - 1, -1, -1):
                 envs[row] = env
                 mpo = _build_row_mpo(tensors, sample[row], row, n_cols)
-                env = _apply_mpo_from_below(env, mpo, model.strategy)
+                env = _apply_mpo_from_below(env, mpo, strategy)
             return tuple(envs)
 
         coeffs_batch = None
@@ -166,7 +167,6 @@ def build_mc_kernels(
         """Transition kernel for a single Markov chain."""
         sample = sample.reshape(shape)
         dtype = tensors[0][0].dtype
-        phys_dim = model.phys_dim
         top_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
         top_envs_cache = [None] * n_rows
 
@@ -234,7 +234,7 @@ def build_mc_kernels(
                     optimize=[(0, 1), (0, 2), (0, 1)],
                 )
 
-            top_env = model.strategy.apply(top_env, tuple(updated_row))
+            top_env = strategy.apply(top_env, tuple(updated_row))
 
         return sample.reshape(-1), key, Context(
             amp=_contract_bottom(top_env),
@@ -261,7 +261,7 @@ def build_mc_kernels(
             indices,
             context.amp,
             context.top_envs,
-            strategy=model.strategy,
+            strategy=strategy,
             terms=terms,
             build_row_mpo=build_row_mpo,
             coeffs=context.coeffs,

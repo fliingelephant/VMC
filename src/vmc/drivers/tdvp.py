@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from vmc import config  # noqa: F401 - JAX config must be imported first
 
-import functools
 import logging
 import os
 from typing import Any
@@ -71,7 +70,6 @@ class TDVPDriver:
         n_chains: int = 1,
         full_gradient: bool = False,
     ):
-        self._model = model
         self.operator = operator
         self.observables = tuple(observables)
         self.preconditioner = preconditioner
@@ -82,7 +80,7 @@ class TDVPDriver:
         self.n_chains = int(n_chains)
         self.full_gradient = bool(full_gradient)
         self._loss_stats = None
-        self._graphdef, params, model_state = nnx.split(self._model, nnx.Param, ...)
+        self._graphdef, params, model_state = nnx.split(model, nnx.Param, ...)
         self._tensors = nnx.to_pure_dict(params)["tensors"]
         self._model_state = nnx.to_pure_dict(model_state)
 
@@ -91,17 +89,90 @@ class TDVPDriver:
         self._sampler_key = sampler_key
 
         self._sampler_key, init_key = jax.random.split(self._sampler_key)
-        self._sampler_configuration = self._model.random_physical_configuration(
+        self._sampler_configuration = model.random_physical_configuration(
             init_key, n_samples=n_chains
         )
         init_cache, transition, estimate = build_mc_kernels(
-            self._model,
+            model,
             self.operator,
             full_gradient=self.full_gradient,
             observables=self.observables,
         )
-        self._init_cache = init_cache
-        self._mc_sampler = make_mc_sampler(transition, estimate)
+        mc_sampler = make_mc_sampler(transition, estimate)
+        integrator = self.integrator
+        n_samples = self.n_samples
+        n_chains = self.n_chains
+        full_gradient = self.full_gradient
+        grad_factor = self.time_unit.grad_factor
+        _, num_chains, chain_length, total_samples = _sample_counts(
+            n_samples,
+            n_chains,
+        )
+
+        def time_derivative(
+            tensors: Any,
+            t: float,
+            carry: tuple[jax.Array, jax.Array],
+        ) -> tuple[Any, tuple[jax.Array, jax.Array], tuple[jax.Array, dict[str, Any]]]:
+            key, config_states = carry
+            key, chain_key = jax.random.split(key)
+            chain_keys = jax.random.split(chain_key, num_chains)
+            cache = init_cache(tensors, config_states, t)
+            (config_states, _, _), (samples_hist, estimates) = mc_sampler(
+                tensors,
+                config_states,
+                chain_keys,
+                cache,
+                n_steps=chain_length,
+            )
+            samples = _trim_samples(samples_hist, total_samples, n_samples)
+            o = _trim_samples(
+                estimates.local_log_derivatives,
+                total_samples,
+                n_samples,
+            )
+            local_estimates = _trim_samples(
+                estimates.local_estimate,
+                total_samples,
+                n_samples,
+            )
+            if full_gradient:
+                p = None
+            else:
+                p = _trim_samples(
+                    estimates.active_slice_indices,
+                    total_samples,
+                    n_samples,
+                )
+            updates, metrics = preconditioner.apply(
+                model,
+                tensors,
+                samples,
+                o,
+                p,
+                local_estimates[:, 0],
+                grad_factor=grad_factor,
+            )
+            return updates, (key, config_states), (local_estimates, metrics)
+
+        def step(
+            tensors: Any,
+            t: float,
+            key: jax.Array,
+            config_states: jax.Array,
+            dt: float,
+        ) -> tuple[Any, float, jax.Array, jax.Array, jax.Array, dict[str, Any]]:
+            tensors, t, (key, config_states), (local_estimates, metrics) = integrator.step(
+                time_derivative,
+                tensors,
+                t,
+                dt,
+                (key, config_states),
+            )
+            return tensors, t, key, config_states, local_estimates, metrics
+
+        self._time_derivative = time_derivative
+        self._step = jax.jit(step, donate_argnums=(0, 3))
 
         self.diag_shift_error: float | None = None
         self.residual_error: float | None = None
@@ -113,95 +184,6 @@ class TDVPDriver:
         self.residual_error = metrics.get("residual_error")
         self.solve_time = metrics.get("solve_time")
         self.preconditioner._metrics = metrics
-
-    def _time_derivative(
-        self,
-        tensors: Any,
-        t: float,
-        carry: tuple[jax.Array, jax.Array],
-    ) -> tuple[Any, tuple[jax.Array, jax.Array], tuple[jax.Array, dict[str, Any]]]:
-        key, config_states = carry
-        _, num_chains, chain_length, total_samples = _sample_counts(
-            self.n_samples,
-            self.n_chains,
-        )
-        key, chain_key = jax.random.split(key)
-        chain_keys = jax.random.split(chain_key, num_chains)
-        cache = self._init_cache(tensors, config_states, t)
-        (config_states, _, _), (samples_hist, estimates) = self._mc_sampler(
-            tensors,
-            config_states,
-            chain_keys,
-            cache,
-            n_steps=chain_length,
-        )
-        samples = _trim_samples(samples_hist, total_samples, self.n_samples)
-        o = _trim_samples(
-            estimates.local_log_derivatives,
-            total_samples,
-            self.n_samples,
-        )
-        local_estimates = _trim_samples(
-            estimates.local_estimate,
-            total_samples,
-            self.n_samples,
-        )
-        if self.full_gradient:
-            p = None
-        else:
-            p = _trim_samples(
-                estimates.active_slice_indices,
-                total_samples,
-                self.n_samples,
-            )
-        updates, metrics = self.preconditioner.apply(
-            self._model,
-            tensors,
-            samples,
-            o,
-            p,
-            local_estimates[:, 0],
-            grad_factor=self.time_unit.grad_factor,
-        )
-        return updates, (key, config_states), (local_estimates, metrics)
-
-    @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(1, 3, 4))
-    def _run_n_steps(
-        self,
-        tensors: Any,
-        t: float,
-        key: jax.Array,
-        config_states: jax.Array,
-        n_steps: int,
-    ) -> tuple[Any, float, jax.Array, jax.Array, jax.Array, dict[str, Any]]:
-        tensors, t, (key, config_states), (local_estimates, metrics) = self.integrator.step(
-            self._time_derivative,
-            tensors,
-            t,
-            self.dt,
-            (key, config_states),
-        )
-
-        def body(
-            _: int,
-            carry: tuple[Any, float, jax.Array, jax.Array, jax.Array, dict[str, Any]],
-        ) -> tuple[Any, float, jax.Array, jax.Array, jax.Array, dict[str, Any]]:
-            state, t_cur, key_cur, configs_cur, _, _ = carry
-            state, t_next, (key_next, configs_next), (estimates_next, metrics_next) = self.integrator.step(
-                self._time_derivative,
-                state,
-                t_cur,
-                self.dt,
-                (key_cur, configs_cur),
-            )
-            return state, t_next, key_next, configs_next, estimates_next, metrics_next
-
-        return jax.lax.fori_loop(
-            1,
-            n_steps,
-            body,
-            (tensors, t, key, config_states, local_estimates, metrics),
-        )
 
     def run(self, T: float) -> None:
         duration = float(T)
@@ -215,31 +197,40 @@ class TDVPDriver:
             f"T={duration} with dt={self.dt} yields zero integration steps."
         )
 
-        self._tensors, self.t, self._sampler_key, self._sampler_configuration, local_estimates, metrics = (
-            self._run_n_steps(
+        config_states = self._sampler_configuration.reshape(self.n_chains, -1)
+        for _ in range(n_steps):
+            step_index = self.step_count
+            (
                 self._tensors,
                 self.t,
                 self._sampler_key,
-                self._sampler_configuration.reshape(self.n_chains, -1),
-                n_steps,
+                config_states,
+                local_estimates,
+                metrics,
+            ) = self._step(
+                self._tensors,
+                self.t,
+                self._sampler_key,
+                config_states,
+                self.dt,
             )
-        )
-        self._loss_stats = nkstats.statistics(local_estimates[:, 0])
-        self.observable_stats = tuple(
-            nkstats.statistics(local_estimates[:, idx])
-            for idx in range(1, local_estimates.shape[1])
-        )
-        self._sync_preconditioner_metrics(metrics)
-        self.step_count += n_steps
-        if logger.isEnabledFor(logging.INFO):
-            e = self._loss_stats
-            logger.info(
-                "Step %d | E = %.6f +/- %.4f [var=%.4f]",
-                self.step_count - 1,
-                e.mean.real,
-                e.error_of_mean.real,
-                e.variance.real,
+            self._loss_stats = nkstats.statistics(local_estimates[:, 0])
+            self.observable_stats = tuple(
+                nkstats.statistics(local_estimates[:, idx])
+                for idx in range(1, local_estimates.shape[1])
             )
+            self._sync_preconditioner_metrics(metrics)
+            self.step_count += 1
+            if logger.isEnabledFor(logging.INFO):
+                e = self._loss_stats
+                logger.info(
+                    "Step %d | E = %.6f +/- %.4f [var=%.4f]",
+                    step_index,
+                    e.mean.real,
+                    e.error_of_mean.real,
+                    e.variance.real,
+                )
+        self._sampler_configuration = config_states
 
     @property
     def energy(self) -> Any:

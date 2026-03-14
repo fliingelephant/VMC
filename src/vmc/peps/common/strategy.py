@@ -4,6 +4,7 @@ from __future__ import annotations
 from vmc import config  # noqa: F401 - JAX config must be imported first
 
 import abc
+from dataclasses import dataclass, field
 
 import jax
 import jax.numpy as jnp
@@ -25,9 +26,6 @@ __all__ = [
 class ContractionStrategy(abc.ABC):
     """Abstract base class for MPO-to-boundary state contraction strategies."""
 
-    def __init__(self, truncate_bond_dimension: int):
-        self.truncate_bond_dimension = truncate_bond_dimension
-
     @abc.abstractmethod
     def apply(self, mps: tuple, mpo: tuple) -> tuple:
         """Apply MPO to boundary state with this strategy.
@@ -41,36 +39,34 @@ class ContractionStrategy(abc.ABC):
         """
 
 
+@dataclass(frozen=True)
 class NoTruncation(ContractionStrategy):
     """No truncation strategy - exact contraction."""
-
-    def __init__(self):
-        super().__init__(truncate_bond_dimension=1)
+    truncate_bond_dimension: int = field(default=1, init=False)
 
     def apply(self, mps: tuple, mpo: tuple) -> tuple:
         return _apply_mpo_exact(mps, mpo)
 
 
+@dataclass(frozen=True)
 class ZipUp(ContractionStrategy):
     """Zip-up truncation strategy - on-the-fly SVD truncation."""
-
-    def __init__(self, truncate_bond_dimension: int):
-        super().__init__(truncate_bond_dimension=truncate_bond_dimension)
+    truncate_bond_dimension: int
 
     def apply(self, mps: tuple, mpo: tuple) -> tuple:
         return _apply_mpo_zip_up(mps, mpo, self.truncate_bond_dimension)
 
 
+@dataclass(frozen=True)
 class DensityMatrix(ContractionStrategy):
     """Density-matrix truncation strategy - TEBD-style truncation."""
-
-    def __init__(self, truncate_bond_dimension: int):
-        super().__init__(truncate_bond_dimension=truncate_bond_dimension)
+    truncate_bond_dimension: int
 
     def apply(self, mps: tuple, mpo: tuple) -> tuple:
         return _apply_mpo_density_matrix(mps, mpo, self.truncate_bond_dimension)
 
 
+@dataclass(frozen=True)
 class Variational(ContractionStrategy):
     """Variational boundary state compression - iterative sweep optimization.
 
@@ -82,9 +78,8 @@ class Variational(ContractionStrategy):
     Reference: Liu et al. 2021, Appendix B - "Boundary-boundary state contraction scheme"
     """
 
-    def __init__(self, truncate_bond_dimension: int, n_sweeps: int = 2):
-        super().__init__(truncate_bond_dimension=truncate_bond_dimension)
-        self.n_sweeps = n_sweeps
+    truncate_bond_dimension: int
+    n_sweeps: int = 2
 
     def apply(self, mps: tuple, mpo: tuple) -> tuple:
         return _apply_mpo_variational(

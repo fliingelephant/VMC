@@ -3,7 +3,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-__all__ = ["_qr_compactwy", "_qr_cholesky"]
+__all__ = ["_qr_compactwy", "_qr_householder", "_qr_cholesky"]
 
 
 def _qr_compactwy(a: jax.Array) -> tuple[jax.Array, jax.Array]:
@@ -13,6 +13,17 @@ def _qr_compactwy(a: jax.Array) -> tuple[jax.Array, jax.Array]:
     """
     r, tau = jnp.linalg.qr(a, mode="raw")  # batchable geqrf by CuSOLVER
     q = _householder_wy(r.mT, tau)
+    return q, jnp.triu(r.mT[..., : tau.shape[-1], :])
+
+
+def _qr_householder(a: jax.Array) -> tuple[jax.Array, jax.Array]:
+    """Householder QR via sequential reflector application.
+
+    Computes reduced ``(Q, R)`` on trailing matrix axes without forming the
+    compact-WY ``T`` factor.
+    """
+    r, tau = jnp.linalg.qr(a, mode="raw")  # batchable geqrf by CuSOLVER
+    q = _householder_sequential(r.mT, tau)
     return q, jnp.triu(r.mT[..., : tau.shape[-1], :])
 
 
@@ -52,6 +63,33 @@ def _householder_wy(r: jax.Array, tau: jax.Array) -> jax.Array:
         Y[..., :k, :].conj(),
         optimize=True,
     )
+
+
+def _householder_sequential(r: jax.Array, tau: jax.Array) -> jax.Array:
+    """Build reduced ``Q`` by applying Householder reflectors sequentially."""
+    m = r.shape[-2]
+    k = tau.shape[-1]
+    dtype = r.dtype
+    q = jnp.broadcast_to(
+        jnp.eye(m, k, dtype=dtype),
+        tau.shape[:-1] + (m, k),
+    )
+    rows = jnp.arange(m)
+    one = jnp.broadcast_to(
+        jnp.asarray([1.0], dtype=dtype),
+        tau.shape[:-1] + (1,),
+    )
+    zero = jnp.asarray(0.0, dtype=dtype)
+
+    def apply_reflector(i: int, q: jax.Array) -> jax.Array:
+        j = k - 1 - i
+        col = jax.lax.dynamic_index_in_dim(r, j, axis=-1, keepdims=False)
+        v = jnp.where(rows < j, zero, col)
+        v = jax.lax.dynamic_update_slice_in_dim(v, one, j, axis=-1)
+        proj = jnp.einsum("...i,...ij->...j", v.conj(), q, optimize=True)
+        return q - tau[..., j][..., None, None] * v[..., :, None] * proj[..., None, :]
+
+    return jax.lax.fori_loop(0, k, apply_reflector, q)
 
 
 def _qr_cholesky(a: jax.Array) -> tuple[jax.Array, jax.Array]:

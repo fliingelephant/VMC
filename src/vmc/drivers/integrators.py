@@ -4,7 +4,7 @@ from __future__ import annotations
 from vmc import config  # noqa: F401 - JAX config must be imported first
 
 import abc
-import functools
+from dataclasses import dataclass
 from typing import Any, Callable
 
 import jax
@@ -42,13 +42,11 @@ class Integrator(abc.ABC):
         """
 
 
+@dataclass(frozen=True)
 class Euler(Integrator):
     """1st-order Euler integrator."""
 
     @staticmethod
-    @functools.partial(
-        jax.jit, static_argnames=("derivative_fn",), inline=True
-    )
     def step(
         derivative_fn: Callable[..., tuple[Any, Any, Any]],
         state: Any,
@@ -65,13 +63,11 @@ class Euler(Integrator):
         )
 
 
+@dataclass(frozen=True)
 class RK4(Integrator):
     """4th-order Runge-Kutta integrator."""
 
     @staticmethod
-    @functools.partial(
-        jax.jit, static_argnames=("derivative_fn",), inline=True
-    )
     def step(
         derivative_fn: Callable[..., tuple[Any, Any, Any]],
         state: Any,
@@ -126,6 +122,7 @@ class TimeUnit(abc.ABC):
         """Default integrator for this time unit."""
 
 
+@dataclass(frozen=True)
 class RealTimeUnit(TimeUnit):
     """Real-time propagation: i d/dt |psi> = H |psi>."""
 
@@ -137,6 +134,7 @@ class RealTimeUnit(TimeUnit):
         return RK4()
 
 
+@dataclass(frozen=True)
 class ImaginaryTimeUnit(TimeUnit):
     """Imaginary-time propagation: d/dt |psi> = -H |psi>."""
 

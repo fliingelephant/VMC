@@ -7,9 +7,7 @@ import jax
 import jax.numpy as jnp
 
 from vmc.operators.local_terms import merge_operators
-from vmc.operators.time_dependent import TimeDependentHamiltonian
 from vmc.peps.gi import model as gi_model
-from vmc.peps.gi.local_terms import GILocalHamiltonian
 from vmc.peps.gi.model import GIPEPS, _link_value_or_zero, _site_cfg_index
 from vmc.peps.standard.kernels import Cache, Context, LocalEstimates, build_mc_kernels
 
@@ -19,9 +17,10 @@ __all__ = ["build_mc_kernels"]
 @build_mc_kernels.dispatch
 def build_mc_kernels(
     model: GIPEPS,
-    operator: GILocalHamiltonian,
+    operator: object,
     *,
     full_gradient: bool = False,
+    observables: tuple = (),
 ) -> tuple[Any, Any, Any]:
     """Build GI-PEPS init_cache/transition/estimate kernels."""
     shape = model.shape
@@ -31,17 +30,19 @@ def build_mc_kernels(
     charge_of_site = jnp.asarray(model.charge_of_site, dtype=jnp.int32)
     charge_to_indices = model.charge_to_indices
     charge_deg = model.charge_deg
-    bucketed_terms, _ = merge_operators(
-        (operator,), shape,
+    all_operators = (operator,) + observables
+    bucketed_terms, coeff_structure = merge_operators(
+        all_operators,
+        shape,
         eval_span=type(model).eval_span,
     )
+    has_time_dep = any(s is not None for s in coeff_structure.schedules)
 
     def init_cache(
         tensors: Any,
         config_states: jax.Array,
-        coeffs: jax.Array | None = None,
+        t: float | jax.Array | None = None,
     ) -> Cache:
-        del coeffs
         def build_one(config_state: jax.Array):
             sites, h_links, v_links = GIPEPS.unflatten_sample(config_state, shape)
             dtype = tensors[0][0].dtype
@@ -55,7 +56,17 @@ def build_mc_kernels(
                 env = gi_model._apply_mpo_from_below(env, row_mpo, strategy)
             return tuple(envs)
 
-        return Cache(bottom_envs=jax.vmap(build_one)(config_states))
+        coeffs_batch = None
+        if has_time_dep:
+            coeffs = coeff_structure.build_coeffs(t)
+            coeffs_batch = jnp.broadcast_to(
+                coeffs,
+                (config_states.shape[0], coeffs.shape[0]),
+            )
+        return Cache(
+            bottom_envs=jax.vmap(build_one)(config_states),
+            coeffs=coeffs_batch,
+        )
 
     def transition(
         tensors: Any,
@@ -75,7 +86,11 @@ def build_mc_kernels(
             charge_to_indices,
             charge_deg,
         )
-        return config_state_next, key_next, Context(amp=amp, top_envs=top_envs)
+        return config_state_next, key_next, Context(
+            amp=amp,
+            top_envs=top_envs,
+            coeffs=cache.coeffs,
+        )
 
     def estimate(
         tensors: Any,
@@ -86,12 +101,11 @@ def build_mc_kernels(
             tensors,
             config_state_next,
             context.amp,
-            operator,
-            shape,
             config,
             strategy,
             context.top_envs,
             terms=bucketed_terms,
+            coeffs=context.coeffs,
         )
         sites, h_links, v_links = GIPEPS.unflatten_sample(config_state_next, shape)
         if full_gradient:
@@ -128,7 +142,7 @@ def build_mc_kernels(
                     p_parts.append(jnp.full((params_per_site,), combined_idx, dtype=jnp.int16))
             local_log_derivatives = jnp.concatenate(grad_parts) / context.amp
             active_slice_indices = jnp.concatenate(p_parts)
-        return Cache(bottom_envs=tuple(envs_next)), LocalEstimates(
+        return Cache(bottom_envs=tuple(envs_next), coeffs=context.coeffs), LocalEstimates(
             local_log_derivatives=local_log_derivatives,
             local_estimate=local_energy,
             active_slice_indices=active_slice_indices,
@@ -136,14 +150,3 @@ def build_mc_kernels(
         )
 
     return init_cache, transition, estimate
-
-
-@build_mc_kernels.dispatch
-def build_mc_kernels(
-    model: GIPEPS,
-    operator: TimeDependentHamiltonian,
-    *,
-    full_gradient: bool = False,
-) -> tuple[Any, Any, Any]:
-    del model, operator, full_gradient
-    raise NotImplementedError("TimeDependentHamiltonian is not implemented for GIPEPS.")

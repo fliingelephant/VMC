@@ -23,8 +23,10 @@ from vmc.peps import (
     PEPS,
     BlockadePEPS,
     BlockadePEPSConfig,
+    Variational,
     build_mc_kernels,
 )
+from vmc.peps.gi import GILocalHamiltonian
 
 
 class _ZeroPreconditioner:
@@ -52,6 +54,21 @@ def _diag_one_hamiltonian(shape: tuple[int, int]) -> LocalHamiltonian:
             DiagonalOperator(
                 sites=((0, 0),),
                 diag=jnp.asarray([1.0, 1.0], dtype=jnp.complex128),
+            ),
+        ),
+    )
+
+
+def _diag_one_gi_hamiltonian(
+    shape: tuple[int, int],
+    value: complex | float,
+) -> GILocalHamiltonian:
+    return GILocalHamiltonian(
+        shape=shape,
+        terms=(
+            DiagonalOperator(
+                sites=((0, 0),),
+                diag=jnp.asarray([value], dtype=jnp.complex128),
             ),
         ),
     )
@@ -181,56 +198,107 @@ class TimeDependentHamiltonianTest(unittest.TestCase):
             float(estimates.local_estimate[0, 0, 0].real), 2.5, places=12,
         )
 
-    def test_gi_time_dependent_not_implemented(self) -> None:
+    def test_gi_tdvp_uses_time_dependent_hamiltonian_and_observable(self) -> None:
+        shape = (3, 3)
         model = GIPEPS(
             rngs=nnx.Rngs(0),
             config=GIPEPSConfig(
-                shape=(1, 1),
+                shape=shape,
                 N=2,
                 phys_dim=1,
                 Qx=0,
-                degeneracy_per_charge=(1, 1),
+                degeneracy_per_charge=(4, 4),
                 charge_of_site=(0,),
             ),
-            contraction_strategy=NoTruncation(),
+            contraction_strategy=Variational(16, n_sweeps=2),
         )
-        operator = TimeDependentHamiltonian(
-            base=LocalHamiltonian(shape=(1, 1), terms=()),
+        hamiltonian = TimeDependentHamiltonian(
+            base=_diag_one_gi_hamiltonian(shape, 1.0),
             schedule=AffineSchedule(
-                offset=jnp.asarray([], dtype=jnp.float64),
-                slope=jnp.asarray([], dtype=jnp.float64),
+                offset=jnp.asarray([1.0], dtype=jnp.float64),
+                slope=jnp.asarray([3.0], dtype=jnp.float64),
             ),
         )
-        with self.assertRaises(NotImplementedError):
-            build_mc_kernels(model, operator, full_gradient=False)
+        observable = TimeDependentHamiltonian(
+            base=_diag_one_gi_hamiltonian(shape, 1.0),
+            schedule=AffineSchedule(
+                offset=jnp.asarray([5.0], dtype=jnp.float64),
+                slope=jnp.asarray([-2.0], dtype=jnp.float64),
+            ),
+        )
+        driver = TDVPDriver(
+            model,
+            hamiltonian,
+            observables=(observable,),
+            preconditioner=_ZeroPreconditioner(),
+            dt=0.1,
+            n_samples=1,
+            n_chains=1,
+        )
+        params = driver._tensors
+        key = driver._sampler_key
+        config_states = driver._sampler_configuration.reshape(driver.n_chains, -1)
+        _, carry_next, (local_0, _) = driver._time_derivative(
+            params,
+            0.0,
+            (key, config_states),
+        )
+        _, _, (local_2, _) = driver._time_derivative(
+            params,
+            2.0,
+            carry_next,
+        )
+        self.assertAlmostEqual(float(jnp.mean(local_0[:, 0]).real), 1.0, places=12)
+        self.assertAlmostEqual(float(jnp.mean(local_2[:, 0]).real), 7.0, places=12)
+        self.assertAlmostEqual(float(jnp.mean(local_0[:, 1]).real), 5.0, places=12)
+        self.assertAlmostEqual(float(jnp.mean(local_2[:, 1]).real), 1.0, places=12)
 
-    def test_blockade_time_dependent_scales_local_energy(self) -> None:
+    def test_blockade_tdvp_uses_time_dependent_hamiltonian_and_observable(self) -> None:
         model = BlockadePEPS(
             rngs=nnx.Rngs(0),
-            config=BlockadePEPSConfig(shape=(1, 1), D0=1, D1=1),
-            contraction_strategy=NoTruncation(),
+            config=BlockadePEPSConfig(shape=(3, 3), D0=4, D1=4),
+            contraction_strategy=Variational(16, n_sweeps=2),
         )
-        operator = TimeDependentHamiltonian(
-            base=_diag_one_hamiltonian((1, 1)),
+        hamiltonian = TimeDependentHamiltonian(
+            base=_diag_one_hamiltonian((3, 3)),
             schedule=AffineSchedule(
-                offset=jnp.asarray([2.5], dtype=jnp.float64),
-                slope=jnp.asarray([0.0], dtype=jnp.float64),
+                offset=jnp.asarray([1.0], dtype=jnp.float64),
+                slope=jnp.asarray([3.0], dtype=jnp.float64),
             ),
         )
-        init_cache, transition, estimate = build_mc_kernels(
-            model, operator, full_gradient=True,
+        observable = TimeDependentHamiltonian(
+            base=_diag_one_hamiltonian((3, 3)),
+            schedule=AffineSchedule(
+                offset=jnp.asarray([5.0], dtype=jnp.float64),
+                slope=jnp.asarray([-2.0], dtype=jnp.float64),
+            ),
         )
-        tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
-        config_states = jnp.zeros((1, 1), dtype=jnp.int32)
-        cache = init_cache(tensors, config_states, t=0.0)
-        chain_keys = jax.random.split(jax.random.key(1), 1)
-        mc_sampler = make_mc_sampler(transition, estimate)
-        (_, _, _), (_, estimates) = mc_sampler(
-            tensors, config_states, chain_keys, cache, n_steps=1,
+        driver = TDVPDriver(
+            model,
+            hamiltonian,
+            observables=(observable,),
+            preconditioner=_ZeroPreconditioner(),
+            dt=0.1,
+            n_samples=1,
+            n_chains=1,
         )
-        self.assertAlmostEqual(
-            float(estimates.local_estimate[0, 0, 0].real), 2.5, places=12,
+        params = driver._tensors
+        key = driver._sampler_key
+        config_states = driver._sampler_configuration.reshape(driver.n_chains, -1)
+        _, carry_next, (local_0, _) = driver._time_derivative(
+            params,
+            0.0,
+            (key, config_states),
         )
+        _, _, (local_2, _) = driver._time_derivative(
+            params,
+            2.0,
+            carry_next,
+        )
+        self.assertAlmostEqual(float(jnp.mean(local_0[:, 0]).real), 1.0, places=12)
+        self.assertAlmostEqual(float(jnp.mean(local_2[:, 0]).real), 7.0, places=12)
+        self.assertAlmostEqual(float(jnp.mean(local_0[:, 1]).real), 5.0, places=12)
+        self.assertAlmostEqual(float(jnp.mean(local_2[:, 1]).real), 1.0, places=12)
 
     def test_blockade_time_dependent_requires_explicit_time(self) -> None:
         model = BlockadePEPS(

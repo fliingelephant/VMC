@@ -39,7 +39,6 @@ from vmc.preconditioners.preconditioners import _adjoint_matvec, _reorder_update
 from vmc.qgt import ParameterSpace, SlicedJacobian
 from vmc.qgt.jacobian import SliceOrdering
 from vmc.utils import _tree_add_scaled
-from vmc.utils.smallo import params_per_site, sliced_dims
 
 
 L = 4
@@ -586,8 +585,8 @@ def run_adam(
         N_SAMPLES, N_CHAINS
     )
     ordering = SliceOrdering()
-    params_per_site_tuple = tuple(params_per_site(model))
-    sliced_dims_tuple = sliced_dims(model)
+    params_per_site_tuple = model.params_per_site
+    sliced_dims_tuple = model.sliced_dims
     grad_factor = ImaginaryTimeUnit().grad_factor
 
     params = [[jnp.asarray(tensor) for tensor in row] for row in model.tensors]

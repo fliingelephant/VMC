@@ -46,26 +46,26 @@ L = 4
 SHAPE = (L, L)
 J = 1.0
 
-BOND_DIM = 4
-BOUNDARY_DIM = 16
+BOND_DIM = 2
+BOUNDARY_DIM = 8
 
-N_SAMPLES = 4096
+N_SAMPLES = 8192
 N_CHAINS = 128
 SEED = 42
 
-SR_FIXED_STEPS = 120
-SR_FIXED_DT = 0.01
+SR_FIXED_STEPS = 200
+SR_FIXED_DT = 0.02
 SR_DIAG_SHIFT = 1e-8
 
 ADAM_STEPS = SR_FIXED_STEPS
-ADAM_LEARNING_RATE = 0.01
+ADAM_LEARNING_RATE = 0.02
 ADAM_BETA1 = 0.9
 ADAM_BETA2 = 0.999
 ADAM_EPS = 1e-8
 
-SR_ADAPTIVE_TARGET_FS_NORM = 0.005
+SR_ADAPTIVE_TARGET_FS_NORM = SR_FIXED_DT
 SR_ADAPTIVE_DT_MIN = 1e-4
-SR_ADAPTIVE_DT_MAX = SR_FIXED_DT
+SR_ADAPTIVE_DT_MAX = SR_FIXED_DT * 2
 SR_ADAPTIVE_MAX_STEPS = 1000
 
 SR_METRICS_CONFIG = MetricsConfig(
@@ -730,6 +730,7 @@ def main() -> None:
     )
     print(f"Exact ground-state energy: {exact_energy:.10f}", flush=True)
 
+    """
     # Comment out any run below to execute methods separately.
     run_sr(
         hamiltonian,
@@ -745,6 +746,7 @@ def main() -> None:
         exact_energy,
         output_dir / "adam.json",
     )
+    """
     run_sr(
         hamiltonian,
         observables,

@@ -1013,7 +1013,10 @@ def _(model: GIPEPS) -> list[int]:
     """
     n_rows, n_cols = model.shape
     return [
-        int(jnp.asarray(model.tensors[r][c])[0, 0].size)
+        (model.dmax if r > 0 else 1)
+        * (model.dmax if r < n_rows - 1 else 1)
+        * (model.dmax if c > 0 else 1)
+        * (model.dmax if c < n_cols - 1 else 1)
         for r in range(n_rows)
         for c in range(n_cols)
     ]
@@ -1029,7 +1032,11 @@ def _(model: GIPEPS) -> tuple[int, ...]:
     """
     n_rows, n_cols = model.shape
     return tuple(
-        model.phys_dim * jnp.asarray(model.tensors[r][c]).shape[1]
+        model.phys_dim
+        * model.N ** max(
+            int(r > 0) + int(r < n_rows - 1) + int(c > 0) + int(c < n_cols - 1) - 1,
+            0,
+        )
         for r in range(n_rows)
         for c in range(n_cols)
     )

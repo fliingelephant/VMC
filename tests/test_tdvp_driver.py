@@ -20,7 +20,14 @@ from vmc.operators import (
     TimeDependentHamiltonian,
 )
 from vmc.peps import NoTruncation, PEPS
-from vmc.preconditioners import DirectSolve, SRPreconditioner, solve_svd
+from vmc.peps.gi import GILocalHamiltonian, GIPEPS, GIPEPSConfig
+from vmc.peps.gi.local_terms import build_electric_terms
+from vmc.preconditioners import (
+    DirectSolve,
+    SRPreconditioner,
+    solve_cholesky,
+    solve_svd,
+)
 
 
 class _ZeroPreconditioner:
@@ -180,6 +187,39 @@ class TDVPKernelCacheTest(unittest.TestCase):
         driver.run(driver.dt)
         self.assertIsNotNone(driver.energy)
         self.assertAlmostEqual(float(driver.energy.mean.real), 1.0, places=12)
+
+    def test_gi_fixed_step_sr_runs_multiple_steps_with_sliced_gradients(self) -> None:
+        shape = (2, 2)
+        model = GIPEPS(
+            rngs=nnx.Rngs(0),
+            config=GIPEPSConfig(
+                shape=shape,
+                N=2,
+                phys_dim=1,
+                Qx=0,
+                degeneracy_per_charge=(2, 2),
+                charge_of_site=(0,),
+            ),
+            contraction_strategy=NoTruncation(),
+        )
+        driver = TDVPDriver(
+            model,
+            GILocalHamiltonian(
+                shape=shape,
+                terms=build_electric_terms(shape, coeff=0.1, N=2),
+            ),
+            preconditioner=SRPreconditioner(
+                strategy=DirectSolve(solver=solve_cholesky),
+                diag_shift=1e-8,
+            ),
+            dt=0.1,
+            n_samples=4,
+            n_chains=2,
+            full_gradient=False,
+        )
+        driver.run(2 * driver.dt)
+        self.assertEqual(driver.step_count, 2)
+        self.assertAlmostEqual(driver.t, 0.2, places=12)
 
 if __name__ == "__main__":
     unittest.main()

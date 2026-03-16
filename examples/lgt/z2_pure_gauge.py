@@ -1,247 +1,336 @@
-"""Ground state of pure Z2 lattice gauge theory.
+"""Fixed-step SR benchmark for pure Z2 lattice gauge theory.
 
-This example demonstrates gauge-invariant PEPS simulation of pure Z2 LGT
-following Wu & Liu (2025). The Hamiltonian is:
+This example mirrors the benchmark-script structure used by the ground-state
+examples, but targets the gauge-invariant PEPS implementation for pure Z2 LGT.
+It runs one fixed-step imaginary-time SR trajectory and records:
 
-    H = -h Σ_x (P_x + P_x†) + g Σ_links (2 - 2cos(2πE/N))
-
-where P_x is the plaquette operator and E is the electric field.
-
-For Z2: cos(2πE/2) = cos(πE) = (-1)^E, so H_E = g Σ (2 - 2*(-1)^E) = g Σ 2*(1 - (-1)^E)
-
-Phase transition at g_c ≈ 0.3285 (from QMC of dual transverse-field Ising model).
-- g < g_c: Deconfined phase (perimeter-law Wilson loop)
-- g > g_c: Confined phase (area-law Wilson loop)
-
-Reference: Wu & Liu, Phys. Rev. Lett. 135, 130401 (2025)
+- total energy
+- mean plaquette value
+- mean horizontal-link Z expectation
+- mean vertical-link Z expectation
 """
 
 from __future__ import annotations
 
-from vmc import config  # noqa: F401
+from vmc import config  # noqa: F401 - JAX config must be imported first
 
-import logging
+import json
 from pathlib import Path
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from vmc.drivers import TDVPDriver, ImaginaryTimeUnit
+from vmc.drivers import ImaginaryTimeUnit, TDVPDriver
 from vmc.operators import PlaquetteOperator
 from vmc.peps import ZipUp
-from vmc.peps.gi.local_terms import GILocalHamiltonian, build_electric_terms
-from vmc.peps.gi.model import GIPEPS, GIPEPSConfig
-from vmc.preconditioners import SRPreconditioner
+from vmc.peps.gi import GILocalHamiltonian, GIPEPS, GIPEPSConfig
+from vmc.peps.gi.local_terms import LinkDiagonalTerm, build_electric_terms
+from vmc.preconditioners import (
+    DirectSolve,
+    MetricsConfig,
+    SRPreconditioner,
+    solve_cholesky,
+)
+from vmc.qgt import ParameterSpace
 
-from .observables import SimulationData, format_step_log
 
-logger = logging.getLogger(__name__)
+L = 3
+SHAPE = (L, L)
+H_COUPLING = 1.0
+G_COUPLING = 0.2
+
+BOND_DIM = 2
+BOUNDARY_DIM = 3 * BOND_DIM
+
+N_SAMPLES = 1024
+N_CHAINS = 64
+SEED = 42
+
+SR_FIXED_STEPS = 100
+SR_FIXED_DT = 0.01
+SR_DIAG_SHIFT = 1e-8
+
+SR_METRICS_CONFIG = MetricsConfig(
+    record_FS_norm=True,
+    record_TDVP_residual=True,
+    record_SR_solve_residual=True,
+    record_step_wall_time=True,
+)
 
 
 def build_z2_hamiltonian(
     shape: tuple[int, int],
-    h: float = 1.0,
-    g: float = 0.33,
+    h: float,
+    g: float,
 ) -> GILocalHamiltonian:
-    """Build pure Z2 LGT Hamiltonian.
-    
-    Args:
-        shape: Lattice shape (n_rows, n_cols).
-        h: Magnetic (plaquette) coupling.
-        g: Electric field coupling.
-    
-    Returns:
-        GILocalHamiltonian for Z2 LGT.
-    """
+    """Build the pure Z2 gauge Hamiltonian."""
     n_rows, n_cols = shape
-    
-    # Plaquette terms: -h (P + P†) = -2h Re(P)
     plaquette_terms = tuple(
         PlaquetteOperator(row=r, col=c, coeff=-h)
         for r in range(n_rows - 1)
         for c in range(n_cols - 1)
     )
-    
-    # Electric terms: g * (2 - 2*(-1)^E) = 4g for E=1, 0 for E=0
     electric_terms = build_electric_terms(shape, coeff=g, N=2)
-    
     return GILocalHamiltonian(shape=shape, terms=electric_terms + plaquette_terms)
 
 
-def run_optimization(
-    model: GIPEPS,
-    operator: GILocalHamiltonian,
+def build_mean_plaquette_observable(shape: tuple[int, int]) -> GILocalHamiltonian:
+    """Build the average plaquette operator.
+
+    ``PlaquetteOperator`` evaluates ``coeff * (P + P†)``. For Z2, ``P = P†``,
+    so the average plaquette value is obtained with a coefficient of
+    ``1 / (2 * n_plaquettes)``.
+    """
+    n_rows, n_cols = shape
+    n_plaquettes = (n_rows - 1) * (n_cols - 1)
+    coeff = jnp.asarray(0.5 / n_plaquettes, dtype=jnp.complex128)
+    terms = tuple(
+        PlaquetteOperator(row=r, col=c, coeff=coeff)
+        for r in range(n_rows - 1)
+        for c in range(n_cols - 1)
+    )
+    return GILocalHamiltonian(shape=shape, terms=terms)
+
+
+def build_mean_link_z_observable(
+    shape: tuple[int, int],
     *,
-    n_samples: int = 500,
-    n_steps: int = 200,
-    dt: float = 0.01,
-    diag_shift: float = 0.1,
-    seed: int = 42,
-    data: SimulationData | None = None,
-    g: float | None = None,
-) -> TDVPDriver:
-    """Run imaginary-time ground state optimization."""
+    orientation: str,
+) -> GILocalHamiltonian:
+    """Build the average Z expectation on horizontal or vertical links."""
+    n_rows, n_cols = shape
+    if orientation == "h":
+        count = n_rows * (n_cols - 1)
+        positions = tuple(
+            (r, c)
+            for r in range(n_rows)
+            for c in range(n_cols - 1)
+        )
+    elif orientation == "v":
+        count = (n_rows - 1) * n_cols
+        positions = tuple(
+            (r, c)
+            for r in range(n_rows - 1)
+            for c in range(n_cols)
+        )
+    else:
+        raise ValueError(f"Unsupported orientation: {orientation!r}")
+
+    diag = jnp.asarray([1.0, -1.0], dtype=jnp.complex128) / count
+    terms = tuple(
+        LinkDiagonalTerm(
+            sites=(position,),
+            diag=diag,
+            orientation=orientation,
+        )
+        for position in positions
+    )
+    return GILocalHamiltonian(shape=shape, terms=terms)
+
+
+def build_problem() -> tuple[GILocalHamiltonian, tuple[GILocalHamiltonian, ...]]:
+    """Build the Hamiltonian and benchmark observables."""
+    return (
+        build_z2_hamiltonian(SHAPE, H_COUPLING, G_COUPLING),
+        (
+            build_mean_plaquette_observable(SHAPE),
+            build_mean_link_z_observable(SHAPE, orientation="h"),
+            build_mean_link_z_observable(SHAPE, orientation="v"),
+        ),
+    )
+
+
+def build_model(seed: int) -> GIPEPS:
+    """Build a fresh GIPEPS model."""
+    return GIPEPS(
+        rngs=nnx.Rngs(seed),
+        config=GIPEPSConfig(
+            shape=SHAPE,
+            N=2,
+            phys_dim=1,
+            Qx=0,
+            degeneracy_per_charge=(BOND_DIM, BOND_DIM),
+            charge_of_site=(0,),
+        ),
+        contraction_strategy=ZipUp(truncate_bond_dimension=BOUNDARY_DIM),
+    )
+
+
+def append_series(series: dict[str, list], **values) -> None:
+    """Append one row into a columnar series dict."""
+    for key, value in values.items():
+        series.setdefault(key, []).append(value)
+
+
+def benchmark_output_dir() -> Path:
+    """Build the output directory for the current benchmark settings."""
+    g_token = format(G_COUPLING, ".3f").replace(".", "p")
+    return (
+        Path(__file__).resolve().parent
+        / f"z2_pure_gauge_benchmark_{L}x{L}_g{g_token}_ns{N_SAMPLES}_{SR_FIXED_STEPS}"
+    )
+
+
+def save_run(
+    output_path: Path,
+    *,
+    config_data: dict,
+    series: dict[str, list],
+) -> None:
+    """Write one benchmark run to JSON."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    summary = {
+        "final_step": series["step"][-1],
+        "final_energy_mean": series["energy_mean"][-1],
+        "final_energy_error": series["energy_error"][-1],
+        "final_plaquette_mean": series["plaquette_mean"][-1],
+        "final_plaquette_error": series["plaquette_error"][-1],
+        "final_z_h_mean": series["z_h_mean"][-1],
+        "final_z_h_error": series["z_h_error"][-1],
+        "final_z_v_mean": series["z_v_mean"][-1],
+        "final_z_v_error": series["z_v_error"][-1],
+        "final_imaginary_time": series["imaginary_time"][-1],
+    }
+    output_path.write_text(
+        json.dumps(
+            {
+                "problem": {
+                    "gauge_group": "Z2",
+                    "shape": SHAPE,
+                    "h": H_COUPLING,
+                    "g": G_COUPLING,
+                    "bond_dim": BOND_DIM,
+                    "boundary_method": "ZipUp",
+                    "boundary_dimension": BOUNDARY_DIM,
+                    "n_samples": N_SAMPLES,
+                    "n_chains": N_CHAINS,
+                    "seed": SEED,
+                    "Qx": 0,
+                },
+                "config": config_data,
+                "series": series,
+                "summary": summary,
+            },
+            indent=2,
+        )
+    )
+    print(f"Saved {output_path}", flush=True)
+
+
+def run_sr(
+    hamiltonian: GILocalHamiltonian,
+    observables: tuple[GILocalHamiltonian, ...],
+    output_path: Path,
+    *,
+    n_steps: int,
+    dt: float,
+) -> None:
+    """Run fixed-step SR and save the trajectory."""
+    label = output_path.stem
     driver = TDVPDriver(
-        model,
-        operator,
-        preconditioner=SRPreconditioner(diag_shift=diag_shift),
+        build_model(SEED),
+        hamiltonian,
+        observables=observables,
+        preconditioner=SRPreconditioner(
+            space=ParameterSpace(),
+            strategy=DirectSolve(solver=solve_cholesky),
+            diag_shift=SR_DIAG_SHIFT,
+            metrics_config=SR_METRICS_CONFIG,
+        ),
         dt=dt,
         time_unit=ImaginaryTimeUnit(),
-        sampler_key=jax.random.key(seed),
-        n_samples=n_samples,
-        full_gradient=True,
+        sampler_key=jax.random.key(SEED),
+        n_samples=N_SAMPLES,
+        n_chains=N_CHAINS,
+        full_gradient=False,
+    )
+    series: dict[str, list] = {}
+    print(
+        (
+            f"[{label}] step t dt wall_time energy energy_err energy_var "
+            "plaquette plaquette_err z_h z_h_err z_v z_v_err "
+            "applied_FS_step_norm_squared FS_norm_squared TDVP_residual "
+            "SR_solve_residual"
+        ),
+        flush=True,
     )
 
-    k = 5
-    n_chunks = n_steps // k
-    assert n_steps == n_chunks * k, (
-        f"n_steps={n_steps} must be a multiple of chunk size k={k}"
-    )
-    for chunk in range(n_chunks):
-        driver.run(k * dt)
-        completed_steps = (chunk + 1) * k
-        if driver.energy is not None:
-            e = driver.energy
-            logger.info(format_step_log(
-                step=completed_steps,
-                energy=e.mean.real,
-                energy_error=e.error_of_mean.real,
-                energy_variance=e.variance.real,
-            ))
-            if data is not None:
-                data.add_step(
-                    step=completed_steps,
-                    time=driver.t,
-                    energy=e.mean.real,
-                    energy_error=e.error_of_mean.real,
-                    energy_variance=e.variance.real,
-                )
-
-    e = driver.energy
-    logger.info("Final: E = %.6f ± %.4f [σ²=%.4f]", e.mean.real, e.error_of_mean.real, e.variance.real)
-    return driver
-
-
-def main(
-    size: int = 8,
-    g: float = 0.33,
-    h: float = 1.0,
-    bond_dim: int = 2,
-    n_samples: int = 2000,
-    n_steps: int = 500,
-    dt: float = 0.01,
-    output_dir: str | None = None,
-):
-    """Run Z2 pure gauge ground state optimization.
-    
-    Args:
-        size: Lattice size (size x size). Paper uses up to 32×32.
-        g: Electric field coupling (phase transition at g_c ≈ 0.3285).
-        h: Magnetic (plaquette) coupling.
-        bond_dim: Bond dimension per charge sector (D_k). Paper uses D_k=2.
-        n_samples: MC samples per step. Paper uses ~10^4.
-        n_steps: Optimization steps.
-        dt: Imaginary time step.
-        output_dir: Directory to save output data (JSON). None to skip saving.
-    """
-    shape = (size, size)
-    
-    logger.info("=" * 60)
-    logger.info("Pure Z2 Lattice Gauge Theory")
-    logger.info("=" * 60)
-    logger.info(f"Lattice: {size}x{size}, h={h}, g={g}")
-    logger.info(f"Bond dimension per charge: D_k={bond_dim} (total D={2*bond_dim})")
-    logger.info(f"Phase: {'Deconfined' if g < 0.3285 else 'Near critical' if g < 0.35 else 'Confined'}")
-    
-    # Pure gauge: phys_dim=1 (no matter), single charge sector
-    cfg = GIPEPSConfig(
-        shape=shape,
-        N=2,
-        phys_dim=1,
-        Qx=0,
-        degeneracy_per_charge=(bond_dim, bond_dim),
-        charge_of_site=(0,),
-    )
-    
-    model = GIPEPS(
-        rngs=nnx.Rngs(42),
-        config=cfg,
-        contraction_strategy=ZipUp(truncate_bond_dimension=3 * bond_dim),
-    )
-    
-    operator = build_z2_hamiltonian(shape, h=h, g=g)
-    
-    logger.info(f"Number of plaquettes: {(size-1)**2}")
-    logger.info(f"Number of links: {2*size*(size-1)}")
-    
-    # Setup data logging
-    data = SimulationData(
-        model_type="Z2_pure_gauge",
-        lattice_size=shape,
-        parameters={"h": h, "g": g, "bond_dim": bond_dim, "n_samples": n_samples},
-    )
-    
-    run_optimization(model, operator, n_samples=n_samples, n_steps=n_steps, dt=dt, data=data, g=g)
-    
-    # Save data if output_dir specified
-    if output_dir:
-        path = Path(output_dir) / f"z2_pure_L{size}_g{g:.3f}.json"
-        data.save(path)
-    
-    return data
-
-
-def scan_g(
-    size: int = 8,
-    g_values: tuple[float, ...] = (0.1, 0.2, 0.3, 0.33, 0.35, 0.4, 0.5),
-    bond_dim: int = 2,
-    n_samples: int = 2000,
-    n_steps: int = 500,
-    dt: float = 0.01,
-    output_dir: str = "output/z2_scan",
-):
-    """Scan over g values to map out phase diagram (replicates Fig 2 style).
-    
-    This produces E(g) data that can be used to compute:
-    - dE/dg = (1/g)⟨H_E⟩  
-    - d²E/dg² via finite difference
-    
-    Args:
-        size: Lattice size.
-        g_values: Values of g to scan.
-        bond_dim: Bond dimension per charge.
-        n_samples: MC samples per step.
-        n_steps: Optimization steps.
-        dt: Imaginary time step.
-        output_dir: Directory to save output data.
-    """
-    logger.info("=" * 60)
-    logger.info("Z2 Phase Diagram Scan")
-    logger.info(f"Lattice: {size}x{size}, D_k={bond_dim}")
-    logger.info(f"g values: {g_values}")
-    logger.info("=" * 60)
-    
-    results = []
-    for g in g_values:
-        logger.info(f"\n{'='*40}\nRunning g = {g}\n{'='*40}")
-        data = main(
-            size=size, g=g, bond_dim=bond_dim,
-            n_samples=n_samples, n_steps=n_steps, dt=dt,
-            output_dir=output_dir,
+    for step in range(1, n_steps + 1):
+        driver.run(dt)
+        metrics = driver.metrics
+        energy = driver.energy
+        plaquette, z_h, z_v = driver.observable_stats
+        fs_norm_squared = float(metrics["FS_norm_squared"])
+        row = {
+            "step": step,
+            "imaginary_time": float(driver.t),
+            "dt": dt,
+            "step_wall_time": float(metrics["step_wall_time"]),
+            "energy_mean": float(energy.mean.real),
+            "energy_error": float(energy.error_of_mean.real),
+            "energy_variance": float(energy.variance.real),
+            "plaquette_mean": float(plaquette.mean.real),
+            "plaquette_error": float(plaquette.error_of_mean.real),
+            "z_h_mean": float(z_h.mean.real),
+            "z_h_error": float(z_h.error_of_mean.real),
+            "z_v_mean": float(z_v.mean.real),
+            "z_v_error": float(z_v.error_of_mean.real),
+            "applied_FS_step_norm_squared": dt**2 * fs_norm_squared,
+            "FS_norm_squared": fs_norm_squared,
+            "TDVP_residual": float(metrics["TDVP_residual"]),
+            "SR_solve_residual": float(metrics["SR_solve_residual"]),
+        }
+        append_series(series, **row)
+        print(
+            (
+                f"[{label}] {row['step']:3d} {row['imaginary_time']:.6f} "
+                f"{row['dt']:.6f} {row['step_wall_time']:.3f} "
+                f"{row['energy_mean']:.10f} {row['energy_error']:.6f} "
+                f"{row['energy_variance']:.6f} {row['plaquette_mean']:.10f} "
+                f"{row['plaquette_error']:.6f} {row['z_h_mean']:.10f} "
+                f"{row['z_h_error']:.6f} {row['z_v_mean']:.10f} "
+                f"{row['z_v_error']:.6f} "
+                f"{row['applied_FS_step_norm_squared']:.6e} "
+                f"{row['FS_norm_squared']:.6e} "
+                f"{row['TDVP_residual']:.6e} "
+                f"{row['SR_solve_residual']:.6e}"
+            ),
+            flush=True,
         )
-        results.append(data)
-    
-    # Summary
-    logger.info("\n" + "=" * 60)
-    logger.info("SCAN SUMMARY")
-    logger.info("=" * 60)
-    for data in results:
-        g = data.parameters["g"]
-        e = data.energies[-1] if data.energies else float('nan')
-        logger.info(f"g = {g:.3f}: E = {e:.6f}")
+
+    save_run(
+        output_path,
+        config_data={
+            "method": label,
+            "diag_shift": SR_DIAG_SHIFT,
+            "dt": dt,
+            "n_steps": n_steps,
+        },
+        series=series,
+    )
+
+
+def main() -> None:
+    """Run the fixed-step SR benchmark."""
+    hamiltonian, observables = build_problem()
+    output_dir = benchmark_output_dir()
+    print(
+        (
+            f"Benchmarking pure Z2 gauge theory on {SHAPE}, "
+            f"h={H_COUPLING:.3f}, g={G_COUPLING:.3f}, "
+            f"Dk={BOND_DIM}, Dc={BOUNDARY_DIM}, nsamples={N_SAMPLES}"
+        ),
+        flush=True,
+    )
+    run_sr(
+        hamiltonian,
+        observables,
+        output_dir / "sr_fixed.json",
+        n_steps=SR_FIXED_STEPS,
+        dt=SR_FIXED_DT,
+    )
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
     main()

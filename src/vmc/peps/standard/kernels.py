@@ -15,7 +15,7 @@ from vmc.peps.common.contraction import (
     _compute_right_envs,
     _contract_bottom,
 )
-from vmc.peps.common.energy import _estimate_sweep
+from vmc.peps.common.energy import _estimate_sweep, _update_left_env_1row
 from vmc.peps.standard.model import PEPS
 from vmc.operators.local_terms import (
     merge_operators,
@@ -201,38 +201,49 @@ def build_mc_kernels(
             for col in range(n_cols):
                 site_tensor = tensors[row][col]
                 current_idx = sample[row, col]
+                current_mpo = mpo_row[col]
                 key, proposed_idx = propose_index(key, current_idx, phys_dim)
                 proposed_mpo = jnp.transpose(site_tensor[proposed_idx], (2, 3, 0, 1))
-                proposed_amplitude = jnp.einsum(
-                    "ace,aub,cduv,evf,bdf->",
+                proposed_prefix = _update_left_env_1row(
                     left_env,
                     top_env[col],
                     proposed_mpo,
                     bottom_env[col],
+                )
+                proposed_amplitude = jnp.einsum(
+                    "bdf,bdf->",
+                    proposed_prefix,
                     right_envs[col],
-                    optimize=[(0, 1), (1, 2), (1, 2), (0, 1)],
+                    optimize=[(0, 1)],
                 )
                 key, accept = _metropolis_hastings_accept(
                     key,
                     jnp.abs(current_amplitude) ** 2,
                     jnp.abs(proposed_amplitude) ** 2,
                 )
-                sample = sample.at[row, col].set(
-                    jnp.where(accept, proposed_idx, current_idx)
+                next_idx, current_amplitude, left_env, updated_mpo = jax.lax.cond(
+                    accept,
+                    lambda _: (
+                        proposed_idx,
+                        proposed_amplitude,
+                        proposed_prefix,
+                        proposed_mpo,
+                    ),
+                    lambda _: (
+                        current_idx,
+                        current_amplitude,
+                        _update_left_env_1row(
+                            left_env,
+                            top_env[col],
+                            current_mpo,
+                            bottom_env[col],
+                        ),
+                        current_mpo,
+                    ),
+                    operand=None,
                 )
-                current_amplitude = jnp.where(
-                    accept, proposed_amplitude, current_amplitude
-                )
-                updated_mpo = jnp.where(accept, proposed_mpo, mpo_row[col])
+                sample = sample.at[row, col].set(next_idx)
                 updated_row.append(updated_mpo)
-                left_env = jnp.einsum(
-                    "ace,aub,cduv,evf->bdf",
-                    left_env,
-                    top_env[col],
-                    updated_mpo,
-                    bottom_env[col],
-                    optimize=[(0, 1), (0, 2), (0, 1)],
-                )
 
             top_env = strategy.apply(top_env, tuple(updated_row))
 

@@ -9,6 +9,7 @@ from vmc import config  # noqa: F401 - JAX config must be imported first
 
 import logging
 import os
+import time
 from typing import Any
 
 import jax
@@ -174,16 +175,8 @@ class TDVPDriver:
         self._time_derivative = time_derivative
         self._step = jax.jit(step, donate_argnums=(0, 3))
 
-        self.diag_shift_error: float | None = None
-        self.residual_error: float | None = None
-        self.solve_time: float | None = None
+        self._metrics: dict[str, Any] = {}
         self.observable_stats: tuple[Any, ...] = ()
-
-    def _sync_preconditioner_metrics(self, metrics: dict[str, Any]) -> None:
-        self.diag_shift_error = metrics.get("diag_shift_error")
-        self.residual_error = metrics.get("residual_error")
-        self.solve_time = metrics.get("solve_time")
-        self.preconditioner._metrics = metrics
 
     def run(self, T: float) -> None:
         duration = float(T)
@@ -198,8 +191,14 @@ class TDVPDriver:
         )
 
         config_states = self._sampler_configuration.reshape(self.n_chains, -1)
+        record_step_wall_time = getattr(
+            getattr(self.preconditioner, "metrics_config", None),
+            "record_step_wall_time",
+            False,
+        )
         for _ in range(n_steps):
             step_index = self.step_count
+            step_start = time.perf_counter() if record_step_wall_time else None
             (
                 self._tensors,
                 self.t,
@@ -214,12 +213,18 @@ class TDVPDriver:
                 config_states,
                 self.dt,
             )
+            step_wall_time = None
+            if record_step_wall_time:
+                jax.block_until_ready(local_estimates)
+                step_wall_time = time.perf_counter() - step_start
             self._loss_stats = nkstats.statistics(local_estimates[:, 0])
             self.observable_stats = tuple(
                 nkstats.statistics(local_estimates[:, idx])
                 for idx in range(1, local_estimates.shape[1])
             )
-            self._sync_preconditioner_metrics(metrics)
+            self._metrics = dict(metrics)
+            if step_wall_time is not None:
+                self._metrics["step_wall_time"] = step_wall_time
             self.step_count += 1
             if logger.isEnabledFor(logging.INFO):
                 e = self._loss_stats
@@ -235,6 +240,10 @@ class TDVPDriver:
     @property
     def energy(self) -> Any:
         return self._loss_stats
+
+    @property
+    def metrics(self) -> dict[str, Any]:
+        return self._metrics
 
     @property
     def model(self):

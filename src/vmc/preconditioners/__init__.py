@@ -4,6 +4,7 @@ from __future__ import annotations
 from vmc.preconditioners.preconditioners import (
     DirectSolve,
     LinearSolver,
+    MetricsConfig,
     QRSolve,
     SRPreconditioner,
 )
@@ -12,6 +13,7 @@ from vmc.qgt.solvers import solve_cg, solve_cholesky, solve_svd
 __all__ = [
     "DirectSolve",
     "LinearSolver",
+    "MetricsConfig",
     "QRSolve",
     "SRPreconditioner",
     "solve_cg",

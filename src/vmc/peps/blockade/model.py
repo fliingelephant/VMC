@@ -577,7 +577,22 @@ def _sweep_single_row(
             mpo_c1 = mpo[c + 1]
             right_env = right_envs[c + 1]
 
-            def _compute_flip(_):
+            def _keep(_):
+                return (
+                    key,
+                    n_cur,
+                    amp_cur,
+                    _update_left_env_1row(
+                        left_env,
+                        top_env[c],
+                        mpo_c,
+                        bottom_env[c],
+                    ),
+                    mpo_c,
+                    mpo_c1,
+                )
+
+            def _attempt_flip(_):
                 mpo_c_flip = _assemble_mpo_site(
                     tensors,
                     peps_config,
@@ -594,27 +609,69 @@ def _sweep_single_row(
                     c + 1,
                     k_l=n_flip,
                 )
-                amp_flip = _contract_1row_2col(
+                prefix_flip = _update_left_env_1row(
                     left_env,
-                    top_env,
+                    top_env[c],
                     mpo_c_flip,
-                    mpo_c1_flip,
-                    bottom_env,
-                    right_env,
-                    c,
+                    bottom_env[c],
                 )
-                return amp_flip, mpo_c_flip, mpo_c1_flip
+                amp_flip = _contract_1row_1col(
+                    prefix_flip,
+                    top_env[c + 1],
+                    mpo_c1_flip,
+                    bottom_env[c + 1],
+                    right_env,
+                )
+                key_next, accept = _metropolis_hastings_accept(
+                    key,
+                    jnp.abs(amp_cur) ** 2,
+                    jnp.abs(amp_flip) ** 2,
+                )
 
-            def _no_flip(_):
-                return jnp.zeros((), dtype=amp_cur.dtype), mpo_c, mpo_c1
+                def _accept(_):
+                    return key_next, n_flip, amp_flip, prefix_flip, mpo_c_flip, mpo_c1_flip
 
-            amp_flip, mpo_c_flip, mpo_c1_flip = jax.lax.cond(
-                can_flip, _compute_flip, _no_flip, operand=None
+                def _reject(_):
+                    return (
+                        key_next,
+                        n_cur,
+                        amp_cur,
+                        _update_left_env_1row(
+                            left_env,
+                            top_env[c],
+                            mpo_c,
+                            bottom_env[c],
+                        ),
+                        mpo_c,
+                        mpo_c1,
+                    )
+
+                return jax.lax.cond(accept, _accept, _reject, operand=None)
+
+            key, n_next, amp_cur, left_env, mpo[c], mpo[c + 1] = jax.lax.cond(
+                can_flip,
+                _attempt_flip,
+                _keep,
+                operand=None,
             )
         else:
             right_env = right_envs[c]
 
-            def _compute_flip(_):
+            def _keep(_):
+                return (
+                    key,
+                    n_cur,
+                    amp_cur,
+                    _update_left_env_1row(
+                        left_env,
+                        top_env[c],
+                        mpo_c,
+                        bottom_env[c],
+                    ),
+                    mpo_c,
+                )
+
+            def _attempt_flip(_):
                 mpo_c_flip = _assemble_mpo_site(
                     tensors,
                     peps_config,
@@ -623,31 +680,51 @@ def _sweep_single_row(
                     c,
                     n=n_flip,
                 )
-                amp_flip = _contract_1row_1col(
+                prefix_flip = _update_left_env_1row(
                     left_env,
                     top_env[c],
                     mpo_c_flip,
                     bottom_env[c],
-                    right_env,
                 )
-                return amp_flip, mpo_c_flip
+                amp_flip = jnp.einsum(
+                    "bdf,bdf->",
+                    prefix_flip,
+                    right_env,
+                    optimize=[(0, 1)],
+                )
+                key_next, accept = _metropolis_hastings_accept(
+                    key,
+                    jnp.abs(amp_cur) ** 2,
+                    jnp.abs(amp_flip) ** 2,
+                )
 
-            def _no_flip(_):
-                return jnp.zeros((), dtype=amp_cur.dtype), mpo_c
+                def _accept(_):
+                    return key_next, n_flip, amp_flip, prefix_flip, mpo_c_flip
 
-            amp_flip, mpo_c_flip = jax.lax.cond(
-                can_flip, _compute_flip, _no_flip, operand=None
+                def _reject(_):
+                    return (
+                        key_next,
+                        n_cur,
+                        amp_cur,
+                        _update_left_env_1row(
+                            left_env,
+                            top_env[c],
+                            mpo_c,
+                            bottom_env[c],
+                        ),
+                        mpo_c,
+                    )
+
+                return jax.lax.cond(accept, _accept, _reject, operand=None)
+
+            key, n_next, amp_cur, left_env, mpo[c] = jax.lax.cond(
+                can_flip,
+                _attempt_flip,
+                _keep,
+                operand=None,
             )
 
-        key, accept = _metropolis_hastings_accept(key, jnp.abs(amp_cur) ** 2, jnp.abs(amp_flip) ** 2)
-
-        config = config.at[r, c].set(jnp.where(accept, n_flip, n_cur))
-        amp_cur = jnp.where(accept, amp_flip, amp_cur)
-        mpo[c] = jnp.where(accept, mpo_c_flip, mpo_c)
-        if c + 1 < n_cols:
-            mpo[c + 1] = jnp.where(accept, mpo_c1_flip, mpo_c1)
-
-        left_env = _update_left_env_1row(left_env, top_env[c], mpo[c], bottom_env[c])
+        config = config.at[r, c].set(n_next)
 
     return key, config, tuple(mpo)
 
@@ -714,7 +791,24 @@ def _sweep_row_pair(
             mpo0_c1 = mpo0[c + 1]
             mpo1_c1 = mpo1[c + 1]
 
-            def _compute_flip(_):
+            def _keep(_):
+                return (
+                    key,
+                    n_cur,
+                    amp_cur,
+                    _update_left_env_2row(
+                        left_env,
+                        top_env[c],
+                        mpo0_c,
+                        mpo1_c,
+                        bottom_env[c],
+                    ),
+                    mpo0_c,
+                    mpo1_c,
+                    mpo0_c1,
+                )
+
+            def _attempt_flip(_):
                 mpo0_c_flip = _assemble_mpo_site(
                     tensors,
                     peps_config,
@@ -739,27 +833,81 @@ def _sweep_row_pair(
                     c + 1,
                     k_l=n_flip,
                 )
-                amp_flip = _contract_2row_2col(
+                prefix_flip = _update_left_env_2row(
                     left_env,
-                    top_env,
+                    top_env[c],
                     mpo0_c_flip,
                     mpo1_c_flip,
+                    bottom_env[c],
+                )
+                amp_flip = _contract_2row_1col(
+                    prefix_flip,
+                    top_env[c + 1],
                     mpo0_c1_flip,
                     mpo1_c1,
-                    bottom_env,
+                    bottom_env[c + 1],
                     right_envs[c + 1],
-                    c,
                 )
-                return amp_flip, mpo0_c_flip, mpo1_c_flip, mpo0_c1_flip
+                key_next, accept = _metropolis_hastings_accept(
+                    key,
+                    jnp.abs(amp_cur) ** 2,
+                    jnp.abs(amp_flip) ** 2,
+                )
 
-            def _no_flip(_):
-                return jnp.zeros((), dtype=amp_cur.dtype), mpo0_c, mpo1_c, mpo0_c1
+                def _accept(_):
+                    return (
+                        key_next,
+                        n_flip,
+                        amp_flip,
+                        prefix_flip,
+                        mpo0_c_flip,
+                        mpo1_c_flip,
+                        mpo0_c1_flip,
+                    )
 
-            amp_flip, mpo0_c_flip, mpo1_c_flip, mpo0_c1_flip = jax.lax.cond(
-                can_flip, _compute_flip, _no_flip, operand=None
+                def _reject(_):
+                    return (
+                        key_next,
+                        n_cur,
+                        amp_cur,
+                        _update_left_env_2row(
+                            left_env,
+                            top_env[c],
+                            mpo0_c,
+                            mpo1_c,
+                            bottom_env[c],
+                        ),
+                        mpo0_c,
+                        mpo1_c,
+                        mpo0_c1,
+                    )
+
+                return jax.lax.cond(accept, _accept, _reject, operand=None)
+
+            key, n_next, amp_cur, left_env, mpo0[c], mpo1[c], mpo0[c + 1] = jax.lax.cond(
+                can_flip,
+                _attempt_flip,
+                _keep,
+                operand=None,
             )
         else:
-            def _compute_flip(_):
+            def _keep(_):
+                return (
+                    key,
+                    n_cur,
+                    amp_cur,
+                    _update_left_env_2row(
+                        left_env,
+                        top_env[c],
+                        mpo0_c,
+                        mpo1_c,
+                        bottom_env[c],
+                    ),
+                    mpo0_c,
+                    mpo1_c,
+                )
+
+            def _attempt_flip(_):
                 mpo0_c_flip = _assemble_mpo_site(
                     tensors,
                     peps_config,
@@ -776,33 +924,54 @@ def _sweep_row_pair(
                     c,
                     k_u=n_flip,
                 )
-                amp_flip = _contract_2row_1col(
+                prefix_flip = _update_left_env_2row(
                     left_env,
                     top_env[c],
                     mpo0_c_flip,
                     mpo1_c_flip,
                     bottom_env[c],
-                    right_envs[c],
                 )
-                return amp_flip, mpo0_c_flip, mpo1_c_flip
+                amp_flip = jnp.einsum(
+                    "bryf,bryf->",
+                    prefix_flip,
+                    right_envs[c],
+                    optimize=[(0, 1)],
+                )
+                key_next, accept = _metropolis_hastings_accept(
+                    key,
+                    jnp.abs(amp_cur) ** 2,
+                    jnp.abs(amp_flip) ** 2,
+                )
 
-            def _no_flip(_):
-                return jnp.zeros((), dtype=amp_cur.dtype), mpo0_c, mpo1_c
+                def _accept(_):
+                    return key_next, n_flip, amp_flip, prefix_flip, mpo0_c_flip, mpo1_c_flip
 
-            amp_flip, mpo0_c_flip, mpo1_c_flip = jax.lax.cond(
-                can_flip, _compute_flip, _no_flip, operand=None
+                def _reject(_):
+                    return (
+                        key_next,
+                        n_cur,
+                        amp_cur,
+                        _update_left_env_2row(
+                            left_env,
+                            top_env[c],
+                            mpo0_c,
+                            mpo1_c,
+                            bottom_env[c],
+                        ),
+                        mpo0_c,
+                        mpo1_c,
+                    )
+
+                return jax.lax.cond(accept, _accept, _reject, operand=None)
+
+            key, n_next, amp_cur, left_env, mpo0[c], mpo1[c] = jax.lax.cond(
+                can_flip,
+                _attempt_flip,
+                _keep,
+                operand=None,
             )
 
-        key, accept = _metropolis_hastings_accept(key, jnp.abs(amp_cur) ** 2, jnp.abs(amp_flip) ** 2)
-
-        config = config.at[r, c].set(jnp.where(accept, n_flip, n_cur))
-        amp_cur = jnp.where(accept, amp_flip, amp_cur)
-        mpo0[c] = jnp.where(accept, mpo0_c_flip, mpo0_c)
-        mpo1[c] = jnp.where(accept, mpo1_c_flip, mpo1_c)
-        if c + 1 < n_cols:
-            mpo0[c + 1] = jnp.where(accept, mpo0_c1_flip, mpo0_c1)
-
-        left_env = _update_left_env_2row(left_env, top_env[c], mpo0[c], mpo1[c], bottom_env[c])
+        config = config.at[r, c].set(n_next)
 
     return key, config, tuple(mpo0), tuple(mpo1)
 

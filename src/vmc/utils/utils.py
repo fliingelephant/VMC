@@ -41,11 +41,30 @@ def random_tensor(
         real_dtype = jnp.real(jnp.zeros((), dtype=dtype)).dtype
         complex_unit = jnp.array(1j, dtype=dtype)
         key_re, key_im = rngs.params(), rngs.params()
-        return 0.5 * (
-            jax.random.uniform(key_re, shape, dtype=real_dtype)
-            + complex_unit * jax.random.uniform(key_im, shape, dtype=real_dtype)
+        return (
+            jax.random.uniform(
+                key_re,
+                shape,
+                dtype=real_dtype,
+                minval=-0.25,
+                maxval=0.25,
+            )
+            + complex_unit
+            * jax.random.uniform(
+                key_im,
+                shape,
+                dtype=real_dtype,
+                minval=-0.25,
+                maxval=0.25,
+            )
         )
-    return jax.random.uniform(rngs.params(), shape, dtype=dtype)
+    return jax.random.uniform(
+        rngs.params(),
+        shape,
+        dtype=dtype,
+        minval=-0.5,
+        maxval=0.5,
+    )
 
 
 def occupancy_to_spin(occupancies: jax.Array) -> jax.Array:

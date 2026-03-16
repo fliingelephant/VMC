@@ -42,6 +42,10 @@ tpu_cache/
 # Logs
 *.log
 
+# Generated example outputs
+examples/**/*.json
+examples/**/*.png
+
 # macOS
 .DS_Store
 

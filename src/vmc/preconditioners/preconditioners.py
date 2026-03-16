@@ -31,6 +31,7 @@ __all__ = [
     "solve_cholesky",
     "solve_svd",
     "DirectSolve",
+    "MetricsConfig",
     "QRSolve",
     "SRPreconditioner",
 ]
@@ -51,6 +52,16 @@ class QRSolve:
 
     rcond: float | None = None
     min_norm: bool = True
+
+
+@dataclass(frozen=True)
+class MetricsConfig:
+    """Optional SR metrics."""
+
+    record_FS_norm: bool = False
+    record_TDVP_residual: bool = False
+    record_SR_solve_residual: bool = False
+    record_step_wall_time: bool = False
 
 
 # --------------------------------------------------------------------------- #
@@ -121,15 +132,41 @@ def _direct_solve(
     dv: jax.Array,
     diag_shift: float,
     solver: LinearSolver,
+    metrics_config: MetricsConfig,
 ) -> tuple[jax.Array, dict]:
     rhs = _adjoint_matvec(jac, dv)
     qgt = QGT(jac, space=ParameterSpace())
     S = qgt.to_dense()
     mat = S + diag_shift * jnp.eye(S.shape[0], dtype=S.dtype)
     x = solver(mat, rhs)
-    metrics = {
-        "residual_error": jnp.linalg.norm(S @ x - rhs) ** 2 / jnp.linalg.norm(rhs) ** 2,
-    }
+    metrics = {}
+    shifted_residual = None
+    rhs_norm = None
+    if (
+        metrics_config.record_TDVP_residual
+        or metrics_config.record_SR_solve_residual
+    ):
+        shifted_residual = mat @ x - rhs
+        rhs_norm = jnp.linalg.norm(rhs)
+    if metrics_config.record_FS_norm:
+        if shifted_residual is None:
+            metrics["FS_norm_squared"] = (
+                jnp.real(jnp.vdot(x, rhs))
+                - diag_shift * jnp.real(jnp.vdot(x, x))
+            )
+        else:
+            metrics["FS_norm_squared"] = jnp.real(
+                jnp.vdot(x, rhs - diag_shift * x + shifted_residual)
+            )
+    if metrics_config.record_TDVP_residual:
+        tdvp_residual = jnp.linalg.norm(
+            shifted_residual - diag_shift * x
+        ) / rhs_norm
+        metrics["TDVP_residual"] = tdvp_residual
+    if metrics_config.record_SR_solve_residual:
+        metrics["SR_solve_residual"] = (
+            jnp.linalg.norm(shifted_residual) / rhs_norm
+        )
     return x, metrics
 
 
@@ -140,15 +177,38 @@ def _direct_solve(
     dv: jax.Array,
     diag_shift: float,
     solver: LinearSolver,
+    metrics_config: MetricsConfig,
 ) -> tuple[jax.Array, dict]:
     qgt = QGT(jac, space=SampleSpace())
     S = qgt.to_dense()
     mat = S + diag_shift * jnp.eye(S.shape[0], dtype=S.dtype)
     y = solver(mat, dv)
     x = _adjoint_matvec(jac, y)
-    metrics = {
-        "residual_error": jnp.linalg.norm(S @ y - dv) ** 2 / jnp.linalg.norm(dv) ** 2,
-    }
+    metrics = {}
+    shifted_residual = None
+    dv_norm = None
+    if (
+        metrics_config.record_TDVP_residual
+        or metrics_config.record_SR_solve_residual
+    ):
+        shifted_residual = mat @ y - dv
+        dv_norm = jnp.linalg.norm(dv)
+    if metrics_config.record_FS_norm:
+        Gy = (
+            dv - diag_shift * y
+            if shifted_residual is None
+            else dv - diag_shift * y + shifted_residual
+        )
+        metrics["FS_norm_squared"] = dv.shape[0] * jnp.real(jnp.vdot(Gy, Gy))
+    if metrics_config.record_TDVP_residual:
+        tdvp_residual = jnp.linalg.norm(
+            shifted_residual - diag_shift * y
+        ) / dv_norm
+        metrics["TDVP_residual"] = tdvp_residual
+    if metrics_config.record_SR_solve_residual:
+        metrics["SR_solve_residual"] = (
+            jnp.linalg.norm(shifted_residual) / dv_norm
+        )
     return x, metrics
 
 
@@ -159,8 +219,16 @@ def _solve_sr(
     jac: Jacobian | SlicedJacobian,
     dv: jax.Array,
     diag_shift: float,
+    metrics_config: MetricsConfig,
 ) -> tuple[jax.Array, dict]:
-    return _direct_solve(space, jac, dv, diag_shift, strategy.solver)
+    return _direct_solve(
+        space,
+        jac,
+        dv,
+        diag_shift,
+        strategy.solver,
+        metrics_config,
+    )
 
 
 @dispatch
@@ -170,6 +238,7 @@ def _solve_sr(
     jac: Jacobian,
     dv: jax.Array,
     diag_shift: float,
+    metrics_config: MetricsConfig,
 ) -> tuple[jax.Array, dict]:
     """QR solve in parameter space."""
     # TODO: diag_shift not used
@@ -207,10 +276,21 @@ def _solve_sr(
 
     rhs = o_centered.conj().T @ dv
     resid = o_centered.conj().T @ (o_centered @ x) - rhs
-    metrics = {
-        "residual_error": jnp.linalg.norm(resid) ** 2 / jnp.linalg.norm(rhs) ** 2,
-        "rank": r_rank,
-    }
+    metrics = {"rank": r_rank}
+    rhs_norm = None
+    if (
+        metrics_config.record_FS_norm
+        or metrics_config.record_TDVP_residual
+        or metrics_config.record_SR_solve_residual
+    ):
+        rhs_norm = jnp.linalg.norm(rhs)
+    if metrics_config.record_FS_norm:
+        metrics["FS_norm_squared"] = jnp.real(jnp.vdot(x, rhs + resid)) / jac.O.shape[0]
+    if metrics_config.record_TDVP_residual:
+        tdvp_residual = jnp.linalg.norm(resid) / rhs_norm
+        metrics["TDVP_residual"] = tdvp_residual
+    if metrics_config.record_SR_solve_residual:
+        metrics["SR_solve_residual"] = jnp.linalg.norm(resid) / rhs_norm
     return x, metrics
 
 
@@ -221,6 +301,7 @@ def _solve_sr(
     jac: SlicedJacobian,
     dv: jax.Array,
     diag_shift: float,
+    metrics_config: MetricsConfig,
 ) -> tuple[jax.Array, dict]:
     raise NotImplementedError("QRSolve not supported for SlicedJacobian")
 
@@ -232,6 +313,7 @@ def _solve_sr(
     jac: Jacobian | SlicedJacobian,
     dv: jax.Array,
     diag_shift: float,
+    metrics_config: MetricsConfig,
 ) -> tuple[jax.Array, dict]:
     raise NotImplementedError("QRSolve not supported for SampleSpace")
 
@@ -251,19 +333,21 @@ class SRPreconditioner:
         diag_shift: float = 1e-2,
         gauge_config: "GaugeConfig | None" = None,
         ordering: SliceOrdering | SiteOrdering = SliceOrdering(),
+        metrics_config: MetricsConfig = MetricsConfig(),
     ):
         self.space = space
         self.strategy = strategy
         self.diag_shift = diag_shift
         self.gauge_config = gauge_config
         self.ordering = ordering
+        self.metrics_config = metrics_config
         self.uses_local_energies = True
         self._metrics: dict = {}
 
     @property
-    def residual_error(self) -> jax.Array | None:
-        """Return residual error from last solve."""
-        return self._metrics.get("residual_error")
+    def metrics(self) -> dict[str, Any]:
+        """Return metrics from the last solve."""
+        return self._metrics
 
     def apply(
         self,
@@ -315,7 +399,12 @@ class SRPreconditioner:
 
         strategy = self.strategy
         updates_red, metrics = _solve_sr(
-            strategy, self.space, jac, dv, self.diag_shift
+            strategy,
+            self.space,
+            jac,
+            dv,
+            self.diag_shift,
+            self.metrics_config,
         )
 
         updates_flat = Q @ updates_red if Q is not None else updates_red

@@ -1012,11 +1012,12 @@ def _(model: GIPEPS) -> list[int]:
     the local gauge configuration. Each slice has shape [bond_dims...].
     """
     n_rows, n_cols = model.shape
+    dmax = model.dmax
     return [
-        (model.dmax if r > 0 else 1)
-        * (model.dmax if r < n_rows - 1 else 1)
-        * (model.dmax if c > 0 else 1)
-        * (model.dmax if c < n_cols - 1 else 1)
+        (dmax if r > 0 else 1)
+        * (dmax if r < n_rows - 1 else 1)
+        * (dmax if c > 0 else 1)
+        * (dmax if c < n_cols - 1 else 1)
         for r in range(n_rows)
         for c in range(n_cols)
     ]
@@ -1031,9 +1032,11 @@ def _(model: GIPEPS) -> tuple[int, ...]:
     encodes the local gauge configuration satisfying Gauss law.
     """
     n_rows, n_cols = model.shape
+    n = model.N
+    phys_dim = model.phys_dim
     return tuple(
-        model.phys_dim
-        * model.N ** max(
+        phys_dim
+        * n ** max(
             int(r > 0) + int(r < n_rows - 1) + int(c > 0) + int(c < n_cols - 1) - 1,
             0,
         )

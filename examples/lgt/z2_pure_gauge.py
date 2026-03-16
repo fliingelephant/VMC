@@ -102,29 +102,24 @@ def build_mean_link_z_observable(
     n_rows, n_cols = shape
     if orientation == "h":
         count = n_rows * (n_cols - 1)
-        positions = tuple(
-            (r, c)
-            for r in range(n_rows)
-            for c in range(n_cols - 1)
-        )
+        row_range = range(n_rows)
+        col_range = range(n_cols - 1)
     elif orientation == "v":
         count = (n_rows - 1) * n_cols
-        positions = tuple(
-            (r, c)
-            for r in range(n_rows - 1)
-            for c in range(n_cols)
-        )
+        row_range = range(n_rows - 1)
+        col_range = range(n_cols)
     else:
         raise ValueError(f"Unsupported orientation: {orientation!r}")
 
     diag = jnp.asarray([1.0, -1.0], dtype=jnp.complex128) / count
     terms = tuple(
         LinkDiagonalTerm(
-            sites=(position,),
+            sites=((r, c),),
             diag=diag,
             orientation=orientation,
         )
-        for position in positions
+        for r in row_range
+        for c in col_range
     )
     return GILocalHamiltonian(shape=shape, terms=terms)
 
@@ -182,16 +177,11 @@ def save_run(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     summary = {
         "final_step": series["step"][-1],
-        "final_energy_mean": series["energy_mean"][-1],
-        "final_energy_error": series["energy_error"][-1],
-        "final_plaquette_mean": series["plaquette_mean"][-1],
-        "final_plaquette_error": series["plaquette_error"][-1],
-        "final_z_h_mean": series["z_h_mean"][-1],
-        "final_z_h_error": series["z_h_error"][-1],
-        "final_z_v_mean": series["z_v_mean"][-1],
-        "final_z_v_error": series["z_v_error"][-1],
         "final_imaginary_time": series["imaginary_time"][-1],
     }
+    for name in ("energy", "plaquette", "z_h", "z_v"):
+        summary[f"final_{name}_mean"] = series[f"{name}_mean"][-1]
+        summary[f"final_{name}_error"] = series[f"{name}_error"][-1]
     output_path.write_text(
         json.dumps(
             {
@@ -260,7 +250,11 @@ def run_sr(
         driver.run(dt)
         metrics = driver.metrics
         energy = driver.energy
-        plaquette, z_h, z_v = driver.observable_stats
+        observable_stats = {
+            "plaquette": driver.observable_stats[0],
+            "z_h": driver.observable_stats[1],
+            "z_v": driver.observable_stats[2],
+        }
         fs_norm_squared = float(metrics["FS_norm_squared"])
         row = {
             "step": step,
@@ -270,17 +264,14 @@ def run_sr(
             "energy_mean": float(energy.mean.real),
             "energy_error": float(energy.error_of_mean.real),
             "energy_variance": float(energy.variance.real),
-            "plaquette_mean": float(plaquette.mean.real),
-            "plaquette_error": float(plaquette.error_of_mean.real),
-            "z_h_mean": float(z_h.mean.real),
-            "z_h_error": float(z_h.error_of_mean.real),
-            "z_v_mean": float(z_v.mean.real),
-            "z_v_error": float(z_v.error_of_mean.real),
             "applied_FS_step_norm_squared": dt**2 * fs_norm_squared,
             "FS_norm_squared": fs_norm_squared,
             "TDVP_residual": float(metrics["TDVP_residual"]),
             "SR_solve_residual": float(metrics["SR_solve_residual"]),
         }
+        for name, stats in observable_stats.items():
+            row[f"{name}_mean"] = float(stats.mean.real)
+            row[f"{name}_error"] = float(stats.error_of_mean.real)
         append_series(series, **row)
         print(
             (

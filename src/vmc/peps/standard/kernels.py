@@ -20,7 +20,6 @@ from vmc.peps.standard.model import PEPS
 from vmc.operators.local_terms import (
     merge_operators,
 )
-from vmc.utils.smallo import params_per_site as params_per_site_fn
 from vmc.utils.utils import _metropolis_hastings_accept
 
 __all__ = [
@@ -57,7 +56,7 @@ class LocalEstimates(NamedTuple):
 
 def _assemble_log_derivatives(
     tensors: Any,
-    params_per_site: jax.Array,
+    params_per_site: tuple[int, ...],
     total_active_params: int,
     shape: tuple[int, int],
     env_grads: list[list[jax.Array]],
@@ -85,7 +84,7 @@ def _assemble_log_derivatives(
     ]
     active_slice_indices = jnp.repeat(
         config_state.astype(jnp.int8),
-        params_per_site,
+        jnp.asarray(params_per_site, dtype=jnp.int32),
         axis=0,
         total_repeat_length=total_active_params,
     )
@@ -119,8 +118,7 @@ def build_mc_kernels(
     n_sites = int(n_rows * n_cols)
     strategy = model.strategy
     phys_dim = model.phys_dim
-    params_per_site = tuple(int(p) for p in params_per_site_fn(model))
-    params_per_site_repeats = jnp.asarray(params_per_site, dtype=jnp.int32)
+    params_per_site = model.params_per_site
     total_active_params = int(sum(params_per_site))
 
     all_operators = (operator,) + observables
@@ -280,7 +278,7 @@ def build_mc_kernels(
         )
         local_log_derivatives, active_slice_indices = _assemble_log_derivatives(
             tensors,
-            params_per_site_repeats,
+            params_per_site,
             total_active_params,
             shape,
             env_grads,

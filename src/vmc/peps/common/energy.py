@@ -201,9 +201,9 @@ def _estimate_sweep(
     collect_grads: bool = True,
 ) -> tuple[list[list[jax.Array]], jax.Array, list[tuple]]:
     """Shared backward sweep for PEPS local estimates and gradients."""
-    dtype = jnp.asarray(tensors[0][0]).dtype
+    dtype = tensors[0][0].dtype
     n_rows, n_cols = sample.shape
-    phys_dim = int(jnp.asarray(tensors[0][0]).shape[0])
+    phys_dim = int(tensors[0][0].shape[0])
 
     env_grads = (
         [[None for _ in range(n_cols)] for _ in range(n_rows)]

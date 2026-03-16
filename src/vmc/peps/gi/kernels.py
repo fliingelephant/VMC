@@ -30,6 +30,7 @@ def build_mc_kernels(
     charge_of_site = jnp.asarray(model.charge_of_site, dtype=jnp.int32)
     charge_to_indices = model.charge_to_indices
     charge_deg = model.charge_deg
+    nc_per_site = tuple(sd // model.phys_dim for sd in model.sliced_dims)
     all_operators = (operator,) + observables
     bucketed_terms, coeff_structure = merge_operators(
         all_operators,
@@ -138,7 +139,7 @@ def build_mc_kernels(
                     cfg_idx = _site_cfg_index(
                         config, k_l=k_l, k_u=k_u, k_r=k_r, k_d=k_d, r=r, c=c
                     )
-                    combined_idx = sites[r, c] * jnp.asarray(tensors[r][c]).shape[1] + cfg_idx
+                    combined_idx = sites[r, c] * nc_per_site[r * n_cols + c] + cfg_idx
                     p_parts.append(jnp.full((params_per_site,), combined_idx, dtype=jnp.int16))
             local_log_derivatives = jnp.concatenate(grad_parts) / context.amp
             active_slice_indices = jnp.concatenate(p_parts)

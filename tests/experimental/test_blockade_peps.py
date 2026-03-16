@@ -742,6 +742,10 @@ class SamplingBalanceTest(unittest.TestCase):
 
         observed = counts[mask]
         expected = expected_counts[mask]
+        tail_expected = expected_counts[~mask].sum()
+        if tail_expected > 0:
+            observed = np.append(observed, counts[~mask].sum())
+            expected = np.append(expected, tail_expected)
 
         chi2, p_value = stats.chisquare(observed, expected)
         self.assertGreater(

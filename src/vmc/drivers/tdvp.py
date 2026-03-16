@@ -186,7 +186,6 @@ class TDVPDriver:
         *,
         step_wall_time: float | None = None,
     ) -> None:
-        self.preconditioner._metrics = dict(metrics)
         self._metrics = dict(metrics)
         if step_wall_time is not None:
             self._metrics["step_wall_time"] = step_wall_time
@@ -206,7 +205,11 @@ class TDVPDriver:
         )
 
         config_states = self._sampler_configuration.reshape(self.n_chains, -1)
-        record_step_wall_time = self.preconditioner.metrics_config.record_step_wall_time
+        record_step_wall_time = getattr(
+            getattr(self.preconditioner, "metrics_config", None),
+            "record_step_wall_time",
+            False,
+        )
         for _ in range(n_steps):
             step_index = self.step_count
             step_start = time.perf_counter() if record_step_wall_time else None

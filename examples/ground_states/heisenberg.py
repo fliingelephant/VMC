@@ -1,4 +1,4 @@
-"""Benchmark TFIM ground-state optimization with SR, Adam, and adaptive SR.
+"""Benchmark AFM Heisenberg ground-state optimization with SR, Adam, and adaptive SR.
 
 The script writes one JSON file per method so each run in ``main()`` can be
 commented out independently.
@@ -21,7 +21,12 @@ from netket import stats as nkstats
 
 from vmc.core import _sample_counts, _trim_samples, make_mc_sampler
 from vmc.drivers import ImaginaryTimeUnit, TDVPDriver
-from vmc.operators import DiagonalOperator, LocalHamiltonian, OneSiteOperator
+from vmc.operators import (
+    DiagonalOperator,
+    HorizontalTwoSiteOperator,
+    LocalHamiltonian,
+    VerticalTwoSiteOperator,
+)
 from vmc.peps import PEPS, build_mc_kernels
 from vmc.peps.common.strategy import Variational
 from vmc.preconditioners import (
@@ -39,8 +44,7 @@ from vmc.utils.smallo import params_per_site, sliced_dims
 
 L = 4
 SHAPE = (L, L)
-J = -1.0
-H_FIELD = 3.04433
+J = 1.0
 
 BOND_DIM = 4
 BOUNDARY_DIM = 16
@@ -59,7 +63,7 @@ ADAM_BETA1 = 0.9
 ADAM_BETA2 = 0.999
 ADAM_EPS = 1e-8
 
-SR_ADAPTIVE_TARGET_FS_NORM = 0.01
+SR_ADAPTIVE_TARGET_FS_NORM = 0.005
 SR_ADAPTIVE_DT_MIN = 1e-4
 SR_ADAPTIVE_DT_MAX = 5e-2
 SR_ADAPTIVE_MAX_STEPS = 1000
@@ -72,59 +76,85 @@ SR_METRICS_CONFIG = MetricsConfig(
 )
 
 
-def build_ising_2d(
-    shape: tuple[int, int],
-    coupling: float,
-    field: float,
-) -> LocalHamiltonian:
-    """Build the 2D transverse-field Ising Hamiltonian."""
-    diag_zz = coupling * jnp.array([1, -1, -1, 1], dtype=jnp.complex128)
-    sigma_x = -field * jnp.array([[0, 1], [1, 0]], dtype=jnp.complex128)
+def build_heisenberg_2d(shape: tuple[int, int], coupling: float) -> LocalHamiltonian:
+    """Build the 2D antiferromagnetic Heisenberg Hamiltonian."""
+    szsz = 0.25 * coupling * jnp.array([1, -1, -1, 1], dtype=jnp.complex128)
+    exchange = 0.5 * coupling * jnp.array(
+        [
+            [0, 0, 0, 0],
+            [0, 0, 1, 0],
+            [0, 1, 0, 0],
+            [0, 0, 0, 0],
+        ],
+        dtype=jnp.complex128,
+    )
     terms = []
     for row in range(shape[0]):
         for col in range(shape[1]):
-            terms.append(OneSiteOperator(row, col, sigma_x))
             if col + 1 < shape[1]:
-                terms.append(
-                    DiagonalOperator(((row, col), (row, col + 1)), diag_zz)
-                )
+                terms.append(DiagonalOperator(((row, col), (row, col + 1)), szsz))
+                terms.append(HorizontalTwoSiteOperator(row=row, col=col, op=exchange))
             if row + 1 < shape[0]:
-                terms.append(
-                    DiagonalOperator(((row, col), (row + 1, col)), diag_zz)
-                )
+                terms.append(DiagonalOperator(((row, col), (row + 1, col)), szsz))
+                terms.append(VerticalTwoSiteOperator(row=row, col=col, op=exchange))
     return LocalHamiltonian(shape=shape, terms=tuple(terms))
 
 
-def build_mx_observable(shape: tuple[int, int]) -> LocalHamiltonian:
-    """Build average transverse magnetization."""
-    sigma_x = jnp.array([[0, 1], [1, 0]], dtype=jnp.complex128) / (
-        shape[0] * shape[1]
-    )
-    return LocalHamiltonian(
-        shape=shape,
-        terms=tuple(
-            OneSiteOperator(row, col, sigma_x)
-            for row in range(shape[0])
-            for col in range(shape[1])
-        ),
-    )
-
-
-def build_nn_zz_observable(shape: tuple[int, int]) -> LocalHamiltonian:
-    """Build average nearest-neighbor zz."""
+def build_nn_sxsx_observable(shape: tuple[int, int]) -> LocalHamiltonian:
+    """Build average nearest-neighbor SxSx."""
     n_bonds = shape[0] * (shape[1] - 1) + (shape[0] - 1) * shape[1]
-    diag_zz = jnp.array([1, -1, -1, 1], dtype=jnp.complex128) / n_bonds
+    sxsx = 0.25 * jnp.array(
+        [
+            [0, 0, 0, 1],
+            [0, 0, 1, 0],
+            [0, 1, 0, 0],
+            [1, 0, 0, 0],
+        ],
+        dtype=jnp.complex128,
+    ) / n_bonds
     terms = []
     for row in range(shape[0]):
         for col in range(shape[1]):
             if col + 1 < shape[1]:
-                terms.append(
-                    DiagonalOperator(((row, col), (row, col + 1)), diag_zz)
-                )
+                terms.append(HorizontalTwoSiteOperator(row=row, col=col, op=sxsx))
             if row + 1 < shape[0]:
-                terms.append(
-                    DiagonalOperator(((row, col), (row + 1, col)), diag_zz)
-                )
+                terms.append(VerticalTwoSiteOperator(row=row, col=col, op=sxsx))
+    return LocalHamiltonian(shape=shape, terms=tuple(terms))
+
+
+def build_nn_sysy_observable(shape: tuple[int, int]) -> LocalHamiltonian:
+    """Build average nearest-neighbor SySy."""
+    n_bonds = shape[0] * (shape[1] - 1) + (shape[0] - 1) * shape[1]
+    sysy = 0.25 * jnp.array(
+        [
+            [0, 0, 0, -1],
+            [0, 0, 1, 0],
+            [0, 1, 0, 0],
+            [-1, 0, 0, 0],
+        ],
+        dtype=jnp.complex128,
+    ) / n_bonds
+    terms = []
+    for row in range(shape[0]):
+        for col in range(shape[1]):
+            if col + 1 < shape[1]:
+                terms.append(HorizontalTwoSiteOperator(row=row, col=col, op=sysy))
+            if row + 1 < shape[0]:
+                terms.append(VerticalTwoSiteOperator(row=row, col=col, op=sysy))
+    return LocalHamiltonian(shape=shape, terms=tuple(terms))
+
+
+def build_nn_szsz_observable(shape: tuple[int, int]) -> LocalHamiltonian:
+    """Build average nearest-neighbor SzSz."""
+    n_bonds = shape[0] * (shape[1] - 1) + (shape[0] - 1) * shape[1]
+    szsz = 0.25 * jnp.array([1, -1, -1, 1], dtype=jnp.complex128) / n_bonds
+    terms = []
+    for row in range(shape[0]):
+        for col in range(shape[1]):
+            if col + 1 < shape[1]:
+                terms.append(DiagonalOperator(((row, col), (row, col + 1)), szsz))
+            if row + 1 < shape[0]:
+                terms.append(DiagonalOperator(((row, col), (row + 1, col)), szsz))
     return LocalHamiltonian(shape=shape, terms=tuple(terms))
 
 
@@ -132,21 +162,27 @@ def build_problem() -> tuple[LocalHamiltonian, tuple[LocalHamiltonian, ...], flo
     """Build the Hamiltonian, observables, and exact energy."""
     graph = nk.graph.Grid(extent=SHAPE, pbc=False)
     hilbert = nk.hilbert.Spin(s=0.5, N=SHAPE[0] * SHAPE[1])
+    # NetKet's Heisenberg operator uses Pauli normalization, so the local
+    # S.S Hamiltonian defined above matches J/4 with sign_rule disabled.
     exact_energy = float(
         nk.exact.lanczos_ed(
-            nk.operator.Ising(
+            nk.operator.Heisenberg(
                 hilbert,
                 graph,
-                h=H_FIELD,
-                J=J,
+                J=0.25 * J,
+                sign_rule=False,
                 dtype=jnp.complex128,
             ),
             k=1,
         )[0].real
     )
     return (
-        build_ising_2d(SHAPE, J, H_FIELD),
-        (build_mx_observable(SHAPE), build_nn_zz_observable(SHAPE)),
+        build_heisenberg_2d(SHAPE, J),
+        (
+            build_nn_sxsx_observable(SHAPE),
+            build_nn_sysy_observable(SHAPE),
+            build_nn_szsz_observable(SHAPE),
+        ),
         exact_energy,
     )
 
@@ -169,10 +205,9 @@ def append_series(series: dict[str, list], **values) -> None:
 
 def benchmark_output_dir() -> Path:
     """Build the default output folder for the current benchmark settings."""
-    h_token = format(H_FIELD, ".5f").replace(".", "p")
     return (
         Path(__file__).resolve().parent
-        / f"ising_benchmark_{L}x{L}_h{h_token}_ns{N_SAMPLES}_{SR_FIXED_STEPS}"
+        / f"heisenberg_benchmark_{L}x{L}_J{J:.0f}_ns{N_SAMPLES}_{SR_FIXED_STEPS}"
     )
 
 
@@ -189,8 +224,9 @@ def save_run(
         "final_step": series["step"][-1],
         "final_energy_mean": series["energy_mean"][-1],
         "final_energy_error": series["energy_error"][-1],
-        "final_mx_mean": series["mx_mean"][-1],
-        "final_zz_mean": series["zz_mean"][-1],
+        "final_nn_sxsx_mean": series["nn_sxsx_mean"][-1],
+        "final_nn_sysy_mean": series["nn_sysy_mean"][-1],
+        "final_nn_szsz_mean": series["nn_szsz_mean"][-1],
     }
     if "imaginary_time" in series:
         summary["final_imaginary_time"] = series["imaginary_time"][-1]
@@ -200,7 +236,6 @@ def save_run(
                 "problem": {
                     "shape": SHAPE,
                     "J": J,
-                    "h": H_FIELD,
                     "bond_dim": BOND_DIM,
                     "boundary_method": "Variational",
                     "boundary_dimension": BOUNDARY_DIM,
@@ -338,18 +373,26 @@ def write_figures(output_dir: Path) -> None:
     plot_errorbars_step(
         plt,
         outputs,
-        "mx_mean",
-        "mx_error",
-        "m_x",
-        output_dir / "mx_vs_step_errorbars.png",
+        "nn_sxsx_mean",
+        "nn_sxsx_error",
+        "nn_sxsx",
+        output_dir / "nn_sxsx_vs_step_errorbars.png",
     )
     plot_errorbars_step(
         plt,
         outputs,
-        "zz_mean",
-        "zz_error",
-        "Nearest-neighbor zz",
-        output_dir / "zz_vs_step_errorbars.png",
+        "nn_sysy_mean",
+        "nn_sysy_error",
+        "nn_sysy",
+        output_dir / "nn_sysy_vs_step_errorbars.png",
+    )
+    plot_errorbars_step(
+        plt,
+        outputs,
+        "nn_szsz_mean",
+        "nn_szsz_error",
+        "nn_szsz",
+        output_dir / "nn_szsz_vs_step_errorbars.png",
     )
     plot_energy_vs_imaginary_time(
         plt,
@@ -396,8 +439,9 @@ def run_sr(
     print(
         (
             f"[{label}] step t dt wall_time energy energy_err energy_var "
-            "mx mx_err zz zz_err applied_FS_step_norm_squared "
-            "FS_norm_squared TDVP_residual SR_solve_residual"
+            "nn_sxsx nn_sxsx_err nn_sysy nn_sysy_err nn_szsz nn_szsz_err "
+            "applied_FS_step_norm_squared FS_norm_squared TDVP_residual "
+            "SR_solve_residual"
         ),
         flush=True,
     )
@@ -430,8 +474,9 @@ def run_sr(
             wall_time = time.perf_counter() - t0
 
             energy = nkstats.statistics(local_estimates[:, 0])
-            mx = nkstats.statistics(local_estimates[:, 1])
-            zz = nkstats.statistics(local_estimates[:, 2])
+            nn_sxsx = nkstats.statistics(local_estimates[:, 1])
+            nn_sysy = nkstats.statistics(local_estimates[:, 2])
+            nn_szsz = nkstats.statistics(local_estimates[:, 3])
             row = {
                 "step": step,
                 "imaginary_time": t,
@@ -440,10 +485,12 @@ def run_sr(
                 "energy_mean": float(energy.mean.real),
                 "energy_error": float(energy.error_of_mean.real),
                 "energy_variance": float(energy.variance.real),
-                "mx_mean": float(mx.mean.real),
-                "mx_error": float(mx.error_of_mean.real),
-                "zz_mean": float(zz.mean.real),
-                "zz_error": float(zz.error_of_mean.real),
+                "nn_sxsx_mean": float(nn_sxsx.mean.real),
+                "nn_sxsx_error": float(nn_sxsx.error_of_mean.real),
+                "nn_sysy_mean": float(nn_sysy.mean.real),
+                "nn_sysy_error": float(nn_sysy.error_of_mean.real),
+                "nn_szsz_mean": float(nn_szsz.mean.real),
+                "nn_szsz_error": float(nn_szsz.error_of_mean.real),
                 "applied_FS_step_norm_squared": step_dt**2 * FS_norm_squared,
                 "FS_norm_squared": FS_norm_squared,
                 "TDVP_residual": float(metrics["TDVP_residual"]),
@@ -455,9 +502,10 @@ def run_sr(
                     f"[{label}] {row['step']:3d} {row['imaginary_time']:.6f} "
                     f"{row['dt']:.6f} {row['step_wall_time']:.3f} "
                     f"{row['energy_mean']:.10f} {row['energy_error']:.6f} "
-                    f"{row['energy_variance']:.6f} {row['mx_mean']:.10f} "
-                    f"{row['mx_error']:.6f} {row['zz_mean']:.10f} "
-                    f"{row['zz_error']:.6f} "
+                    f"{row['energy_variance']:.6f} {row['nn_sxsx_mean']:.10f} "
+                    f"{row['nn_sxsx_error']:.6f} {row['nn_sysy_mean']:.10f} "
+                    f"{row['nn_sysy_error']:.6f} {row['nn_szsz_mean']:.10f} "
+                    f"{row['nn_szsz_error']:.6f} "
                     f"{row['applied_FS_step_norm_squared']:.6e} "
                     f"{row['FS_norm_squared']:.6e} "
                     f"{row['TDVP_residual']:.6e} "
@@ -486,7 +534,7 @@ def run_sr(
         driver.run(dt)
         metrics = driver.metrics
         energy = driver.energy
-        mx, zz = driver.observable_stats
+        nn_sxsx, nn_sysy, nn_szsz = driver.observable_stats
         FS_norm_squared = float(metrics["FS_norm_squared"])
         row = {
             "step": step,
@@ -496,10 +544,12 @@ def run_sr(
             "energy_mean": float(energy.mean.real),
             "energy_error": float(energy.error_of_mean.real),
             "energy_variance": float(energy.variance.real),
-            "mx_mean": float(mx.mean.real),
-            "mx_error": float(mx.error_of_mean.real),
-            "zz_mean": float(zz.mean.real),
-            "zz_error": float(zz.error_of_mean.real),
+            "nn_sxsx_mean": float(nn_sxsx.mean.real),
+            "nn_sxsx_error": float(nn_sxsx.error_of_mean.real),
+            "nn_sysy_mean": float(nn_sysy.mean.real),
+            "nn_sysy_error": float(nn_sysy.error_of_mean.real),
+            "nn_szsz_mean": float(nn_szsz.mean.real),
+            "nn_szsz_error": float(nn_szsz.error_of_mean.real),
             "applied_FS_step_norm_squared": dt**2 * FS_norm_squared,
             "FS_norm_squared": FS_norm_squared,
             "TDVP_residual": float(metrics["TDVP_residual"]),
@@ -511,9 +561,10 @@ def run_sr(
                 f"[{label}] {row['step']:3d} {row['imaginary_time']:.6f} "
                 f"{row['dt']:.6f} {row['step_wall_time']:.3f} "
                 f"{row['energy_mean']:.10f} {row['energy_error']:.6f} "
-                f"{row['energy_variance']:.6f} {row['mx_mean']:.10f} "
-                f"{row['mx_error']:.6f} {row['zz_mean']:.10f} "
-                f"{row['zz_error']:.6f} "
+                f"{row['energy_variance']:.6f} {row['nn_sxsx_mean']:.10f} "
+                f"{row['nn_sxsx_error']:.6f} {row['nn_sysy_mean']:.10f} "
+                f"{row['nn_sysy_error']:.6f} {row['nn_szsz_mean']:.10f} "
+                f"{row['nn_szsz_error']:.6f} "
                 f"{row['applied_FS_step_norm_squared']:.6e} "
                 f"{row['FS_norm_squared']:.6e} "
                 f"{row['TDVP_residual']:.6e} "
@@ -617,7 +668,10 @@ def run_adam(
     raw_gradient_step = jax.jit(raw_gradient_step)
     series: dict[str, list] = {}
     print(
-        f"[{label}] step wall_time energy energy_err energy_var mx mx_err zz zz_err",
+        (
+            f"[{label}] step wall_time energy energy_err energy_var "
+            "nn_sxsx nn_sxsx_err nn_sysy nn_sysy_err nn_szsz nn_szsz_err"
+        ),
         flush=True,
     )
     for step in range(1, ADAM_STEPS + 1):
@@ -639,27 +693,31 @@ def run_adam(
         wall_time = time.perf_counter() - t0
 
         energy = nkstats.statistics(local_estimates[:, 0])
-        mx = nkstats.statistics(local_estimates[:, 1])
-        zz = nkstats.statistics(local_estimates[:, 2])
+        nn_sxsx = nkstats.statistics(local_estimates[:, 1])
+        nn_sysy = nkstats.statistics(local_estimates[:, 2])
+        nn_szsz = nkstats.statistics(local_estimates[:, 3])
         row = {
             "step": step,
             "step_wall_time": wall_time,
             "energy_mean": float(energy.mean.real),
             "energy_error": float(energy.error_of_mean.real),
             "energy_variance": float(energy.variance.real),
-            "mx_mean": float(mx.mean.real),
-            "mx_error": float(mx.error_of_mean.real),
-            "zz_mean": float(zz.mean.real),
-            "zz_error": float(zz.error_of_mean.real),
+            "nn_sxsx_mean": float(nn_sxsx.mean.real),
+            "nn_sxsx_error": float(nn_sxsx.error_of_mean.real),
+            "nn_sysy_mean": float(nn_sysy.mean.real),
+            "nn_sysy_error": float(nn_sysy.error_of_mean.real),
+            "nn_szsz_mean": float(nn_szsz.mean.real),
+            "nn_szsz_error": float(nn_szsz.error_of_mean.real),
         }
         append_series(series, **row)
         print(
             (
                 f"[{label}] {row['step']:3d} {row['step_wall_time']:.3f} "
                 f"{row['energy_mean']:.10f} {row['energy_error']:.6f} "
-                f"{row['energy_variance']:.6f} {row['mx_mean']:.10f} "
-                f"{row['mx_error']:.6f} {row['zz_mean']:.10f} "
-                f"{row['zz_error']:.6f}"
+                f"{row['energy_variance']:.6f} {row['nn_sxsx_mean']:.10f} "
+                f"{row['nn_sxsx_error']:.6f} {row['nn_sysy_mean']:.10f} "
+                f"{row['nn_sysy_error']:.6f} {row['nn_szsz_mean']:.10f} "
+                f"{row['nn_szsz_error']:.6f}"
             ),
             flush=True,
         )
@@ -685,7 +743,7 @@ def main() -> None:
     output_dir = benchmark_output_dir()
     print(
         (
-            f"Benchmarking TFIM on {SHAPE}, J={J:.3f}, h={H_FIELD:.3f}, "
+            f"Benchmarking AFM Heisenberg on {SHAPE}, J={J:.3f}, "
             f"D={BOND_DIM}, Dc={BOUNDARY_DIM}, nsamples={N_SAMPLES}"
         ),
         flush=True,

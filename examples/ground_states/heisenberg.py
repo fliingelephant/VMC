@@ -46,8 +46,8 @@ L = 4
 SHAPE = (L, L)
 J = 1.0
 
-BOND_DIM = 2
-BOUNDARY_DIM = 8
+BOND_DIM = 3
+BOUNDARY_DIM = 9
 
 N_SAMPLES = 8192
 N_CHAINS = 128
@@ -730,7 +730,6 @@ def main() -> None:
     )
     print(f"Exact ground-state energy: {exact_energy:.10f}", flush=True)
 
-    """
     # Comment out any run below to execute methods separately.
     run_sr(
         hamiltonian,
@@ -746,7 +745,6 @@ def main() -> None:
         exact_energy,
         output_dir / "adam.json",
     )
-    """
     run_sr(
         hamiltonian,
         observables,

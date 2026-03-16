@@ -342,12 +342,6 @@ class SRPreconditioner:
         self.ordering = ordering
         self.metrics_config = metrics_config
         self.uses_local_energies = True
-        self._metrics: dict = {}
-
-    @property
-    def metrics(self) -> dict[str, Any]:
-        """Return metrics from the last solve."""
-        return self._metrics
 
     def apply(
         self,

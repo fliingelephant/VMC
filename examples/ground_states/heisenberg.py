@@ -65,7 +65,7 @@ ADAM_EPS = 1e-8
 
 SR_ADAPTIVE_TARGET_FS_NORM = 0.005
 SR_ADAPTIVE_DT_MIN = 1e-4
-SR_ADAPTIVE_DT_MAX = 5e-2
+SR_ADAPTIVE_DT_MAX = SR_FIXED_DT
 SR_ADAPTIVE_MAX_STEPS = 1000
 
 SR_METRICS_CONFIG = MetricsConfig(
@@ -254,94 +254,103 @@ def save_run(
     print(f"Saved {output_path}", flush=True)
 
 
-def plot_errorbars_step(
+def plot_observables_vs_step(
     plt,
     outputs: dict[str, dict],
-    y_key: str,
-    err_key: str,
-    ylabel: str,
     output_path: Path,
-    *,
-    exact_energy: float | None = None,
 ) -> None:
-    """Plot one observable against optimization step with error bars."""
+    """Plot energy and nearest-neighbor correlators against optimization step."""
     colors = {
         "sr_fixed": "#1f4e79",
         "adam": "#b07a00",
         "sr_adaptive": "#7a3e9d",
+        "exact": "#b22222",
     }
-    fig, ax = plt.subplots(figsize=(9, 5.5))
-    for name, label in (
-        ("sr_fixed", "SR fixed"),
-        ("adam", "Adam"),
-        ("sr_adaptive", "SR adaptive"),
-    ):
-        series = outputs[name]["series"]
-        ax.errorbar(
-            series["step"],
-            series[y_key],
-            yerr=series[err_key],
-            label=label,
-            color=colors[name],
-            linewidth=1.4,
-            elinewidth=0.8,
-            capsize=2,
-            alpha=0.95,
-        )
-    if exact_energy is not None:
-        ax.axhline(
-            exact_energy,
-            color="#b22222",
-            linestyle="--",
-            linewidth=1.2,
-            label=f"Exact E = {exact_energy:.6f}",
-        )
-    ax.set_xlabel("Optimization step")
-    ax.set_ylabel(ylabel)
-    ax.grid(alpha=0.25)
-    ax.legend(fontsize=9)
+    exact_energy = outputs["sr_fixed"]["problem"]["exact_energy"]
+    fig, axes = plt.subplots(4, 1, figsize=(9, 13.0), sharex=True)
+    specs = (
+        ("energy_mean", "energy_error", "Energy"),
+        ("nn_sxsx_mean", "nn_sxsx_error", "nn_sxsx"),
+        ("nn_sysy_mean", "nn_sysy_error", "nn_sysy"),
+        ("nn_szsz_mean", "nn_szsz_error", "nn_szsz"),
+    )
+    for ax, (y_key, err_key, ylabel) in zip(axes, specs):
+        for name, label in (
+            ("sr_fixed", "SR fixed"),
+            ("adam", "Adam"),
+            ("sr_adaptive", "SR adaptive"),
+        ):
+            series = outputs[name]["series"]
+            ax.errorbar(
+                series["step"],
+                series[y_key],
+                yerr=series[err_key],
+                label=label,
+                color=colors[name],
+                linewidth=1.4,
+                elinewidth=0.8,
+                capsize=2,
+                alpha=0.95,
+            )
+        if y_key == "energy_mean":
+            ax.axhline(
+                exact_energy,
+                color=colors["exact"],
+                linestyle="--",
+                linewidth=1.2,
+                label=f"Exact E = {exact_energy:.6f}",
+            )
+        ax.set_ylabel(ylabel)
+        ax.grid(alpha=0.25)
+        ax.legend(fontsize=9)
+    axes[-1].set_xlabel("Optimization step")
     fig.tight_layout()
     fig.savefig(output_path, dpi=180, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved {output_path}", flush=True)
 
 
-def plot_energy_vs_imaginary_time(
+def plot_observables_vs_imaginary_time(
     plt,
     outputs: dict[str, dict],
     output_path: Path,
 ) -> None:
-    """Plot SR energy against imaginary time with error bars."""
+    """Plot energy and nearest-neighbor correlators against imaginary time for SR runs."""
     colors = {"sr_fixed": "#1f4e79", "sr_adaptive": "#7a3e9d", "exact": "#b22222"}
     exact_energy = outputs["sr_fixed"]["problem"]["exact_energy"]
-    fig, ax = plt.subplots(figsize=(9, 5.5))
-    for name, label in (
-        ("sr_fixed", "SR fixed"),
-        ("sr_adaptive", "SR adaptive"),
-    ):
-        series = outputs[name]["series"]
-        ax.errorbar(
-            series["imaginary_time"],
-            series["energy_mean"],
-            yerr=series["energy_error"],
-            label=label,
-            color=colors[name],
-            linewidth=1.4,
-            elinewidth=0.8,
-            capsize=2,
-            alpha=0.95,
-        )
-    ax.axhline(
-        exact_energy,
-        color=colors["exact"],
-        linestyle="--",
-        linewidth=1.2,
-        label=f"Exact E = {exact_energy:.6f}",
+    fig, axes = plt.subplots(4, 1, figsize=(9, 13.0), sharex=True)
+    specs = (
+        ("energy_mean", "energy_error", "Energy"),
+        ("nn_sxsx_mean", "nn_sxsx_error", "nn_sxsx"),
+        ("nn_sysy_mean", "nn_sysy_error", "nn_sysy"),
+        ("nn_szsz_mean", "nn_szsz_error", "nn_szsz"),
     )
-    ax.set_xlabel("Imaginary time")
-    ax.set_ylabel("Energy")
-    ax.grid(alpha=0.25)
-    ax.legend(fontsize=9)
+    for ax, (y_key, err_key, ylabel) in zip(axes, specs):
+        for name, label in (("sr_fixed", "SR fixed"), ("sr_adaptive", "SR adaptive")):
+            series = outputs[name]["series"]
+            ax.errorbar(
+                series["imaginary_time"],
+                series[y_key],
+                yerr=series[err_key],
+                label=label,
+                color=colors[name],
+                linewidth=1.4,
+                elinewidth=0.8,
+                capsize=2,
+                alpha=0.95,
+            )
+        if y_key == "energy_mean":
+            ax.axhline(
+                exact_energy,
+                color=colors["exact"],
+                linestyle="--",
+                linewidth=1.2,
+                label=f"Exact E = {exact_energy:.6f}",
+            )
+        ax.set_ylabel(ylabel)
+        ax.grid(alpha=0.25)
+        ax.legend(fontsize=9)
+    axes[-1].set_xlabel("Imaginary time")
     fig.tight_layout()
     fig.savefig(output_path, dpi=180, bbox_inches="tight")
     plt.close(fig)
@@ -360,44 +369,15 @@ def write_figures(output_dir: Path) -> None:
         name: json.loads((output_dir / f"{name}.json").read_text())
         for name in ("sr_fixed", "adam", "sr_adaptive")
     }
-    exact_energy = outputs["sr_fixed"]["problem"]["exact_energy"]
-    plot_errorbars_step(
+    plot_observables_vs_step(
         plt,
         outputs,
-        "energy_mean",
-        "energy_error",
-        "Energy",
-        output_dir / "energy_vs_step_errorbars.png",
-        exact_energy=exact_energy,
+        output_dir / "observables_vs_step_errorbars.png",
     )
-    plot_errorbars_step(
+    plot_observables_vs_imaginary_time(
         plt,
         outputs,
-        "nn_sxsx_mean",
-        "nn_sxsx_error",
-        "nn_sxsx",
-        output_dir / "nn_sxsx_vs_step_errorbars.png",
-    )
-    plot_errorbars_step(
-        plt,
-        outputs,
-        "nn_sysy_mean",
-        "nn_sysy_error",
-        "nn_sysy",
-        output_dir / "nn_sysy_vs_step_errorbars.png",
-    )
-    plot_errorbars_step(
-        plt,
-        outputs,
-        "nn_szsz_mean",
-        "nn_szsz_error",
-        "nn_szsz",
-        output_dir / "nn_szsz_vs_step_errorbars.png",
-    )
-    plot_energy_vs_imaginary_time(
-        plt,
-        outputs,
-        output_dir / "energy_vs_imaginary_time_errorbars.png",
+        output_dir / "observables_vs_imaginary_time_errorbars.png",
     )
 
 
@@ -748,6 +728,7 @@ def main() -> None:
         ),
         flush=True,
     )
+    print(f"Exact ground-state energy: {exact_energy:.10f}", flush=True)
 
     # Comment out any run below to execute methods separately.
     run_sr(

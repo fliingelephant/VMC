@@ -176,21 +176,7 @@ class TDVPDriver:
         self._step = jax.jit(step, donate_argnums=(0, 3))
 
         self._metrics: dict[str, Any] = {}
-        self.diag_shift_error: float | None = None
-        self.solve_time: float | None = None
         self.observable_stats: tuple[Any, ...] = ()
-
-    def _sync_preconditioner_metrics(
-        self,
-        metrics: dict[str, Any],
-        *,
-        step_wall_time: float | None = None,
-    ) -> None:
-        self._metrics = dict(metrics)
-        if step_wall_time is not None:
-            self._metrics["step_wall_time"] = step_wall_time
-        self.diag_shift_error = self._metrics.get("diag_shift_error")
-        self.solve_time = self._metrics.get("solve_time")
 
     def run(self, T: float) -> None:
         duration = float(T)
@@ -236,10 +222,9 @@ class TDVPDriver:
                 nkstats.statistics(local_estimates[:, idx])
                 for idx in range(1, local_estimates.shape[1])
             )
-            self._sync_preconditioner_metrics(
-                metrics,
-                step_wall_time=step_wall_time,
-            )
+            self._metrics = dict(metrics)
+            if step_wall_time is not None:
+                self._metrics["step_wall_time"] = step_wall_time
             self.step_count += 1
             if logger.isEnabledFor(logging.INFO):
                 e = self._loss_stats

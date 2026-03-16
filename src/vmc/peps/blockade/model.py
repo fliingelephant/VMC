@@ -48,7 +48,7 @@ from vmc.operators.local_terms import (
     TransitionOperator,
     support_span,
 )
-from vmc.utils.utils import _metropolis_hastings_accept, random_tensor
+from vmc.utils.utils import _metropolis_ratio, random_tensor
 
 
 @dispatch
@@ -574,6 +574,7 @@ def _sweep_single_row(
         )
 
     for c in range(n_cols):
+        key, accept_key = jax.random.split(key)
         n_cur = config[r, c]
         n_flip = 1 - n_cur
         can_flip = _flip_allowed(config, n_rows, n_cols, r, c, n_flip)
@@ -628,18 +629,17 @@ def _sweep_single_row(
                     bottom_env[c + 1],
                     right_env,
                 )
-                key_next, accept = _metropolis_hastings_accept(
-                    key,
-                    jnp.abs(amp_cur) ** 2,
-                    jnp.abs(amp_flip) ** 2,
+                accept = (
+                    jax.random.uniform(accept_key)
+                    < jnp.minimum(1.0, _metropolis_ratio(jnp.abs(amp_cur) ** 2, jnp.abs(amp_flip) ** 2))
                 )
 
                 def _accept(_):
-                    return key_next, n_flip, amp_flip, prefix_flip, mpo_c_flip, mpo_c1_flip
+                    return key, n_flip, amp_flip, prefix_flip, mpo_c_flip, mpo_c1_flip
 
                 def _reject(_):
                     return (
-                        key_next,
+                        key,
                         n_cur,
                         amp_cur,
                         _update_left_env_1row(
@@ -698,18 +698,17 @@ def _sweep_single_row(
                     right_env,
                     optimize=[(0, 1)],
                 )
-                key_next, accept = _metropolis_hastings_accept(
-                    key,
-                    jnp.abs(amp_cur) ** 2,
-                    jnp.abs(amp_flip) ** 2,
+                accept = (
+                    jax.random.uniform(accept_key)
+                    < jnp.minimum(1.0, _metropolis_ratio(jnp.abs(amp_cur) ** 2, jnp.abs(amp_flip) ** 2))
                 )
 
                 def _accept(_):
-                    return key_next, n_flip, amp_flip, prefix_flip, mpo_c_flip
+                    return key, n_flip, amp_flip, prefix_flip, mpo_c_flip
 
                 def _reject(_):
                     return (
-                        key_next,
+                        key,
                         n_cur,
                         amp_cur,
                         _update_left_env_1row(
@@ -787,6 +786,7 @@ def _sweep_row_pair(
         )
 
     for c in range(n_cols):
+        key, accept_key = jax.random.split(key)
         n_cur = config[r, c]
         n_flip = 1 - n_cur
         can_flip = _flip_allowed(config, n_rows, n_cols, r, c, n_flip)
@@ -854,15 +854,14 @@ def _sweep_row_pair(
                     bottom_env[c + 1],
                     right_envs[c + 1],
                 )
-                key_next, accept = _metropolis_hastings_accept(
-                    key,
-                    jnp.abs(amp_cur) ** 2,
-                    jnp.abs(amp_flip) ** 2,
+                accept = (
+                    jax.random.uniform(accept_key)
+                    < jnp.minimum(1.0, _metropolis_ratio(jnp.abs(amp_cur) ** 2, jnp.abs(amp_flip) ** 2))
                 )
 
                 def _accept(_):
                     return (
-                        key_next,
+                        key,
                         n_flip,
                         amp_flip,
                         prefix_flip,
@@ -873,7 +872,7 @@ def _sweep_row_pair(
 
                 def _reject(_):
                     return (
-                        key_next,
+                        key,
                         n_cur,
                         amp_cur,
                         _update_left_env_2row(
@@ -943,18 +942,17 @@ def _sweep_row_pair(
                     right_envs[c],
                     optimize=[(0, 1)],
                 )
-                key_next, accept = _metropolis_hastings_accept(
-                    key,
-                    jnp.abs(amp_cur) ** 2,
-                    jnp.abs(amp_flip) ** 2,
+                accept = (
+                    jax.random.uniform(accept_key)
+                    < jnp.minimum(1.0, _metropolis_ratio(jnp.abs(amp_cur) ** 2, jnp.abs(amp_flip) ** 2))
                 )
 
                 def _accept(_):
-                    return key_next, n_flip, amp_flip, prefix_flip, mpo0_c_flip, mpo1_c_flip
+                    return key, n_flip, amp_flip, prefix_flip, mpo0_c_flip, mpo1_c_flip
 
                 def _reject(_):
                     return (
-                        key_next,
+                        key,
                         n_cur,
                         amp_cur,
                         _update_left_env_2row(

@@ -121,6 +121,8 @@ class BlockadePEPS(nnx.Module):
 
         n_rows, n_cols = self.shape
         tensors: list[list[nnx.Param]] = []
+        params_per_site: list[int] = []
+        sliced_dims: list[int] = []
         for r in range(n_rows):
             row = []
             for c in range(n_cols):
@@ -141,8 +143,12 @@ class BlockadePEPS(nnx.Module):
                     self.dtype,
                 )
                 row.append(nnx.Param(tensor_val, dtype=self.dtype))
+                params_per_site.append(mu_u * mu_d * mu_l * mu_r)
+                sliced_dims.append(self.phys_dim * nc)
             tensors.append(row)
         self.tensors = tensors
+        self.params_per_site = tuple(params_per_site)
+        self.sliced_dims = tuple(sliced_dims)
 
     @staticmethod
     def flatten_sample(config: jax.Array) -> jax.Array:
@@ -1021,27 +1027,3 @@ def _contract_1row_1col(
 
 # =============================================================================
 # Dispatches for smallo helpers
-# =============================================================================
-from vmc.utils.smallo import params_per_site, sliced_dims
-
-
-@params_per_site.dispatch
-def _(model: BlockadePEPS) -> list[int]:
-    """Number of parameters per active slice at each BlockadePEPS site."""
-    n_rows, n_cols = model.shape
-    return [
-        int(jnp.asarray(model.tensors[r][c])[0, 0].size)
-        for r in range(n_rows)
-        for c in range(n_cols)
-    ]
-
-
-@sliced_dims.dispatch
-def _(model: BlockadePEPS) -> tuple[int, ...]:
-    """Number of distinct active slices per site (= phys_dim * nc)."""
-    n_rows, n_cols = model.shape
-    return tuple(
-        model.phys_dim * jnp.asarray(model.tensors[r][c]).shape[1]
-        for r in range(n_rows)
-        for c in range(n_cols)
-    )

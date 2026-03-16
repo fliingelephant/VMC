@@ -19,7 +19,7 @@ from vmc.operators import (
     LocalHamiltonian,
     TimeDependentHamiltonian,
 )
-from vmc.peps import NoTruncation, PEPS
+from vmc.peps import BlockadePEPS, BlockadePEPSConfig, NoTruncation, PEPS
 from vmc.peps.gi import GILocalHamiltonian, GIPEPS, GIPEPSConfig
 from vmc.peps.gi.local_terms import build_electric_terms
 from vmc.preconditioners import (
@@ -208,6 +208,28 @@ class TDVPKernelCacheTest(unittest.TestCase):
                 shape=shape,
                 terms=build_electric_terms(shape, coeff=0.1, N=2),
             ),
+            preconditioner=SRPreconditioner(
+                strategy=DirectSolve(solver=solve_cholesky),
+                diag_shift=1e-8,
+            ),
+            dt=0.1,
+            n_samples=4,
+            n_chains=2,
+            full_gradient=False,
+        )
+        driver.run(2 * driver.dt)
+        self.assertEqual(driver.step_count, 2)
+        self.assertAlmostEqual(driver.t, 0.2, places=12)
+
+    def test_blockade_fixed_step_sr_runs_multiple_steps_with_sliced_gradients(self) -> None:
+        model = BlockadePEPS(
+            rngs=nnx.Rngs(0),
+            config=BlockadePEPSConfig(shape=(2, 2), D0=2, D1=2),
+            contraction_strategy=NoTruncation(),
+        )
+        driver = TDVPDriver(
+            model,
+            LocalHamiltonian(shape=(2, 2), terms=()),
             preconditioner=SRPreconditioner(
                 strategy=DirectSolve(solver=solve_cholesky),
                 diag_shift=1e-8,

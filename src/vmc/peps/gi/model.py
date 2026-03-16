@@ -106,6 +106,8 @@ class GIPEPS(nnx.Module):
 
         n_rows, n_cols = self.shape
         tensors: list[list[nnx.Param]] = []
+        params_per_site: list[int] = []
+        sliced_dims: list[int] = []
         for r in range(n_rows):
             row = []
             for c in range(n_cols):
@@ -123,8 +125,12 @@ class GIPEPS(nnx.Module):
                     self.dtype,
                 )
                 row.append(nnx.Param(tensor_val, dtype=self.dtype))
+                params_per_site.append(mu_u * mu_d * mu_l * mu_r)
+                sliced_dims.append(self.phys_dim * nc)
             tensors.append(row)
         self.tensors = tensors
+        self.params_per_site = tuple(params_per_site)
+        self.sliced_dims = tuple(sliced_dims)
 
     @staticmethod
     def flatten_sample(
@@ -997,49 +1003,3 @@ def transition(
     amp = _contract_bottom(top_env)
     return GIPEPS.flatten_sample(sites, h_links, v_links), key, amp, tuple(top_envs_cache)
 
-
-# --------------------------------------------------------------------------- #
-# Dispatches for small-o helpers
-# --------------------------------------------------------------------------- #
-from vmc.utils.smallo import params_per_site, sliced_dims
-
-
-@params_per_site.dispatch
-def _(model: GIPEPS) -> list[int]:
-    """Number of parameters per active slice at each GIPEPS site.
-
-    For GIPEPS, the active slice is determined by (σ, cfg) where cfg encodes
-    the local gauge configuration. Each slice has shape [bond_dims...].
-    """
-    n_rows, n_cols = model.shape
-    dmax = model.dmax
-    return [
-        (dmax if r > 0 else 1)
-        * (dmax if r < n_rows - 1 else 1)
-        * (dmax if c > 0 else 1)
-        * (dmax if c < n_cols - 1 else 1)
-        for r in range(n_rows)
-        for c in range(n_cols)
-    ]
-
-
-@sliced_dims.dispatch
-def _(model: GIPEPS) -> tuple[int, ...]:
-    """Number of distinct active slices per site (= phys_dim * nc for GIPEPS).
-
-    Unlike standard PEPS where only σ ∈ {0,...,d-1} selects the slice,
-    GIPEPS has a combined index: slice_idx = σ * nc + cfg_idx, where cfg_idx
-    encodes the local gauge configuration satisfying Gauss law.
-    """
-    n_rows, n_cols = model.shape
-    n = model.N
-    phys_dim = model.phys_dim
-    return tuple(
-        phys_dim
-        * n ** max(
-            int(r > 0) + int(r < n_rows - 1) + int(c > 0) + int(c < n_cols - 1) - 1,
-            0,
-        )
-        for r in range(n_rows)
-        for c in range(n_cols)
-    )

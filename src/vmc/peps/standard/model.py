@@ -56,6 +56,15 @@ class PEPS(nnx.Module):
         self.strategy = contraction_strategy
 
         n_rows, n_cols = self.shape
+        self.params_per_site = tuple(
+            up * down * left * right
+            for r in range(n_rows)
+            for c in range(n_cols)
+            for up, down, left, right in [
+                self.site_dims(r, c, n_rows, n_cols, self.bond_dim)
+            ]
+        )
+        self.sliced_dims = (self.phys_dim,) * (n_rows * n_cols)
         self.tensors = [
             [
                 nnx.Param(

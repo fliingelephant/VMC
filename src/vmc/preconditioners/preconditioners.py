@@ -18,7 +18,6 @@ from vmc.qgt import QGT, Jacobian, ParameterSpace, SampleSpace, SlicedJacobian
 from vmc.qgt.jacobian import SliceOrdering, SiteOrdering, jacobian_mean
 from vmc.qgt.qgt import _params_per_site
 from vmc.qgt.solvers import solve_cg, solve_cholesky, solve_svd
-from vmc.utils.smallo import params_per_site, sliced_dims
 
 if TYPE_CHECKING:
     from vmc.gauge import GaugeConfig
@@ -360,8 +359,8 @@ class SRPreconditioner:
         dv = grad_factor * dv
 
         params = jax.tree_util.tree_map(jnp.asarray, params)
-        pps = tuple(params_per_site(model)) if p is not None else None
-        sd = sliced_dims(model)
+        pps = model.params_per_site if p is not None else None
+        sd = model.sliced_dims
         Q = None
         if self.gauge_config is not None:
             if isinstance(self.space, SampleSpace):

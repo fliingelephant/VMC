@@ -29,6 +29,7 @@ def build_mc_kernels(
     shape = peps_config.shape
     n_rows, n_cols = shape
     strategy = model.strategy
+    nc_per_site = tuple(sd // model.phys_dim for sd in model.sliced_dims)
 
     all_operators = (operator,) + observables
     terms, coeff_structure = merge_operators(
@@ -126,7 +127,7 @@ def build_mc_kernels(
                     )
                 else:
                     grad_parts.append(env_grad.reshape(-1))
-                    combined_idx = indices[row, col] * jnp.asarray(tensors[row][col]).shape[1] + cfg_idx
+                    combined_idx = indices[row, col] * nc_per_site[row * n_cols + col] + cfg_idx
                     p_parts.append(
                         jnp.full((env_grad.size,), combined_idx, dtype=jnp.int16)
                     )

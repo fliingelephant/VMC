@@ -520,8 +520,6 @@ class GIPEPSTest(unittest.TestCase):
 
     def test_gipeps_sliced_dims(self):
         """Verify sliced_dims dispatch returns correct per-site values."""
-        from vmc.utils.smallo import sliced_dims
-
         config = GIPEPSConfig(
             shape=(3, 3),
             N=2,
@@ -532,7 +530,7 @@ class GIPEPSTest(unittest.TestCase):
         )
         model = GIPEPS(rngs=nnx.Rngs(0), config=config, contraction_strategy=NoTruncation())
 
-        sd = sliced_dims(model)
+        sd = model.sliced_dims
         n_rows, n_cols = config.shape
 
         # Verify we have one sliced_dim per site
@@ -556,7 +554,6 @@ class GIPEPSTest(unittest.TestCase):
     def test_sliced_jacobian_qgt_matches_full(self):
         """Verify SlicedJacobian QGT matches full Jacobian QGT for GIPEPS."""
         from vmc.qgt import QGT, Jacobian, SlicedJacobian, SiteOrdering
-        from vmc.utils.smallo import params_per_site, sliced_dims
 
         config = GIPEPSConfig(
             shape=(2, 2),
@@ -604,10 +601,10 @@ class GIPEPSTest(unittest.TestCase):
         o_full = grads_full / amps[:, None]
         o_sliced = grads_sliced / amps[:, None]
 
-        pps = tuple(params_per_site(model))
+        pps = model.params_per_site
         jac_full = Jacobian(o_full)
         jac_sliced = SlicedJacobian(
-            o_sliced, p, sliced_dims(model), SiteOrdering(pps)
+            o_sliced, p, model.sliced_dims, SiteOrdering(pps)
         )
 
         # Compare QGT dense matrices

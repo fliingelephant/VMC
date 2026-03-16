@@ -12,7 +12,6 @@ from flax import nnx
 from vmc.peps import NoTruncation, PEPS
 from vmc.peps.standard.compat import _value_and_grad
 from vmc.qgt import ParameterSpace, QGT, SlicedJacobian, SiteOrdering
-from vmc.utils.smallo import params_per_site, sliced_dims
 from vmc.utils.vmc_utils import flatten_samples
 
 
@@ -52,8 +51,8 @@ class QGTNetKetParityTest(unittest.TestCase):
 
         amps, grads, p = _value_and_grad(model, samples, full_gradient=False)
         o = grads / amps[:, None]
-        ordering = SiteOrdering(tuple(params_per_site(model)))
-        jac = SlicedJacobian(o, p, sliced_dims(model), ordering)
+        ordering = SiteOrdering(model.params_per_site)
+        jac = SlicedJacobian(o, p, model.sliced_dims, ordering)
         s_ours = QGT(jac, space=ParameterSpace()).to_dense()
 
         err = float(jnp.linalg.norm(s_ours - s_nk) / jnp.linalg.norm(s_nk))

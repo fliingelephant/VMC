@@ -25,7 +25,6 @@ from vmc.qgt import (
     solve_cholesky,
 )
 from vmc.qgt.qgt import _sliced_dense_blocks
-from vmc.utils.smallo import params_per_site, sliced_dims
 
 
 def _sample_with_kernels(
@@ -102,8 +101,8 @@ class QGTTest(unittest.TestCase):
         amps, grads, p = _value_and_grad(model, samples, full_gradient=False)
         o_full = grads_full / amps[:, None]
         o = grads / amps[:, None]
-        sd = sliced_dims(model)
-        pps = tuple(params_per_site(model))
+        sd = model.sliced_dims
+        pps = model.params_per_site
 
         jac_slice = SlicedJacobian(o, p, sd, SliceOrdering())
         o_slice = _sliced_dense_blocks(jac_slice)
@@ -136,8 +135,8 @@ class QGTTest(unittest.TestCase):
         )
         amps, grads, p = _value_and_grad(model, samples, full_gradient=False)
         o = grads / amps[:, None]
-        sd = sliced_dims(model)
-        pps = tuple(params_per_site(model))
+        sd = model.sliced_dims
+        pps = model.params_per_site
         diag_shift = 1e-4
 
         jac_slice = SlicedJacobian(o, p, sd, SliceOrdering())
@@ -174,8 +173,8 @@ class QGTTest(unittest.TestCase):
             config=config,
             contraction_strategy=NoTruncation(),
         )
-        sd = sliced_dims(model)
-        pps = tuple(params_per_site(model))
+        sd = model.sliced_dims
+        pps = model.params_per_site
         key = jax.random.key(123)
         init_cfg = model.random_physical_configuration(key, n_samples=1)
 
@@ -236,8 +235,8 @@ class QGTTest(unittest.TestCase):
             config=config,
             contraction_strategy=NoTruncation(),
         )
-        sd = sliced_dims(model)
-        pps = tuple(params_per_site(model))
+        sd = model.sliced_dims
+        pps = model.params_per_site
         key = jax.random.key(123)
         init_cfg = model.random_physical_configuration(key, n_samples=1)
 

@@ -24,7 +24,6 @@ from vmc.peps.standard.compat import _value
 from vmc.preconditioners import DirectSolve, SRPreconditioner, solve_svd
 from vmc.qgt.jacobian import SiteOrdering, SliceOrdering
 from vmc.qgt.qgt import _iter_sliced_blocks
-from vmc.utils.smallo import params_per_site, sliced_dims
 
 
 def _make_peps(n_rows, n_cols, bond_dim, phys_dim=2, seed=0):
@@ -325,8 +324,8 @@ class TestSlicedJacobianGaugeProjection:
         params_flat, _ = ravel_pytree(params)
         N_p = params_flat.shape[0]
         d = model.phys_dim
-        pps = tuple(params_per_site(model))
-        sd = sliced_dims(model)
+        pps = model.params_per_site
+        sd = model.sliced_dims
 
         # Build full O from params_flat (ground truth, site-major order)
         N_s = 5
@@ -384,8 +383,8 @@ class TestSlicedJacobianGaugeProjection:
         """SliceOrdering expansion has different column order than params_flat."""
         n_rows, n_cols = shape
         model, params = _make_peps(n_rows, n_cols, D)
-        pps = tuple(params_per_site(model))
-        sd = sliced_dims(model)
+        pps = model.params_per_site
+        sd = model.sliced_dims
         d = model.phys_dim
 
         N_s = 5

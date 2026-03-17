@@ -56,7 +56,7 @@ class LocalEstimates(NamedTuple):
 
 def _assemble_log_derivatives(
     tensors: Any,
-    params_per_site: tuple[int, ...],
+    params_per_site: Any,
     total_active_params: int,
     shape: tuple[int, int],
     env_grads: list[list[jax.Array]],
@@ -84,7 +84,7 @@ def _assemble_log_derivatives(
     ]
     active_slice_indices = jnp.repeat(
         config_state.astype(jnp.int8),
-        jnp.asarray(params_per_site, dtype=jnp.int32),
+        params_per_site,
         axis=0,
         total_repeat_length=total_active_params,
     )
@@ -120,6 +120,7 @@ def build_mc_kernels(
     phys_dim = model.phys_dim
     params_per_site = model.params_per_site
     total_active_params = int(sum(params_per_site))
+    params_per_site = jnp.asarray(params_per_site, dtype=jnp.int32)
 
     all_operators = (operator,) + observables
     terms, coeff_structure = merge_operators(

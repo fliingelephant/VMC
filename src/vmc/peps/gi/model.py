@@ -18,6 +18,7 @@ from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from flax import nnx
 
 from vmc.peps.common.contraction import (
@@ -43,6 +44,11 @@ from vmc.operators.local_terms import (
     VerticalTwoSiteOperator,
     support_span,
 )
+from vmc.peps.gi.local_terms import (
+    HorizontalMatterHoppingTerm,
+    LinkDiagonalTerm,
+    VerticalMatterHoppingTerm,
+)
 from vmc.utils.utils import random_tensor, _hastings_ratio, _metropolis_hastings_accept
 
 
@@ -53,24 +59,64 @@ class GIPEPSConfig:
     shape: tuple[int, int]
     N: int
     phys_dim: int
-    Qx: int
+    Qx: Any
     degeneracy_per_charge: tuple[int, ...]
     charge_of_site: tuple[int, ...]
+    particle_number: int | None = None
     dtype: Any = jnp.complex128
-    mask_per_charge: jax.Array | None = field(init=False, repr=False, compare=False)
+    mask_per_charge: Any = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        qx = np.asarray(self.Qx, dtype=np.int32) % self.N
+        if qx.ndim == 0:
+            qx = np.full(self.shape, qx, dtype=np.int32)
+        elif tuple(qx.shape) != self.shape:
+            raise ValueError(f"Qx must be a scalar or have shape {self.shape}.")
+        object.__setattr__(
+            self,
+            "Qx",
+            tuple(tuple(int(q) for q in row) for row in qx.tolist()),
+        )
+
+        if self.is_binary_occupancy_matter:
+            if self.particle_number is None:
+                raise ValueError(
+                    "Z2 hard-core matter requires particle_number; the current sampler is canonical only."
+                )
+            n_sites = self.shape[0] * self.shape[1]
+            if self.particle_number < 0 or self.particle_number > n_sites:
+                raise ValueError("particle_number must satisfy 0 <= particle_number <= n_sites.")
+            required_parity = int(np.sum(qx) % 2)
+            if self.particle_number % 2 != required_parity:
+                raise ValueError(
+                    "particle_number parity must match sum(Qx) mod 2 for Z2 open-boundary GIPEPS."
+                )
+        elif self.particle_number is not None:
+            raise NotImplementedError(
+                "Fixed particle number is currently supported only for Z2 hard-core matter."
+            )
+
         dmax = int(max(self.degeneracy_per_charge))
         if all(d == dmax for d in self.degeneracy_per_charge):
             object.__setattr__(self, "mask_per_charge", None)
             return
-        deg = jnp.asarray(self.degeneracy_per_charge, dtype=jnp.int32)
-        mask = jnp.arange(dmax) < deg[:, None]
+        mask = tuple(
+            tuple(i < d for i in range(dmax))
+            for d in self.degeneracy_per_charge
+        )
         object.__setattr__(self, "mask_per_charge", mask)
 
     @property
     def dmax(self) -> int:
         return int(max(self.degeneracy_per_charge))
+
+    @property
+    def is_binary_occupancy_matter(self) -> bool:
+        return (
+            self.N == 2
+            and self.phys_dim == 2
+            and self.charge_of_site == (0, 1)
+        )
 
 
 class GIPEPS(nnx.Module):
@@ -89,7 +135,10 @@ class GIPEPS(nnx.Module):
         self.shape = config.shape
         self.N = int(config.N)
         self.phys_dim = int(config.phys_dim)
-        self.Qx = int(config.Qx)
+        self.Qx = config.Qx
+        self.particle_number = (
+            None if config.particle_number is None else int(config.particle_number)
+        )
         self.degeneracy_per_charge = tuple(int(d) for d in config.degeneracy_per_charge)
         self.charge_of_site = tuple(int(c) % self.N for c in config.charge_of_site)
         self.charge_to_indices, self.charge_deg = _build_charge_index_map(
@@ -98,7 +147,7 @@ class GIPEPS(nnx.Module):
         # NOTE: charge_deg counts physical-state multiplicity per charge; it is
         # unrelated to degeneracy_per_charge (virtual bond-sector dimension).
         # TODO: rename charge_deg to avoid confusion with virtual degeneracy.
-        if self.phys_dim > 1 and bool(jnp.any(self.charge_deg <= 0)):
+        if self.phys_dim > 1 and any(d <= 0 for d in self.charge_deg):
             raise ValueError("charge_of_site must include all charges 0..N-1.")
         self.dmax = config.dmax
         self.dtype = config.dtype
@@ -163,42 +212,26 @@ class GIPEPS(nnx.Module):
         key: jax.Array,
         n_samples: int = 1,
     ) -> jax.Array:
-        n_rows, n_cols = self.shape
         keys = jax.random.split(key, n_samples)
+        if self.particle_number is not None:
+            return jax.vmap(
+                lambda k: _single_z2_hardcore_configuration_with_particles(
+                    k,
+                    self.Qx,
+                    self.particle_number,
+                )
+            )(keys)
         return jax.vmap(
-            lambda k: self._single_physical_configuration(k, n_rows, n_cols)
-        )(keys)
-
-    @functools.partial(jax.jit, static_argnames=("n_rows", "n_cols"))
-    def _single_physical_configuration(
-        self, key: jax.Array, n_rows: int, n_cols: int
-    ) -> jax.Array:
-        h_links = jnp.zeros((n_rows, n_cols - 1), dtype=jnp.int32)
-        v_links = jnp.zeros((n_rows - 1, n_cols), dtype=jnp.int32)
-        key, site_key = jax.random.split(key)
-        if n_rows > 1 and n_cols > 1:
-            deltas = jax.random.randint(
-                key, (n_rows - 1, n_cols - 1), 0, self.N, dtype=jnp.int32
+            lambda k: _single_physical_configuration(
+                k,
+                self.shape[0],
+                self.shape[1],
+                self.N,
+                self.Qx,
+                self.charge_to_indices,
+                self.charge_deg,
             )
-            h_links = h_links.at[: n_rows - 1, :].add(deltas)
-            h_links = h_links.at[1:, :].add(-deltas)
-            v_links = v_links.at[:, : n_cols - 1].add(deltas)
-            v_links = v_links.at[:, 1:].add(-deltas)
-            h_links = h_links % self.N
-            v_links = v_links % self.N
-        nl = jnp.pad(h_links, ((0, 0), (1, 0)), constant_values=0)
-        nr = jnp.pad(h_links, ((0, 0), (0, 1)), constant_values=0)
-        nu = jnp.pad(v_links, ((1, 0), (0, 0)), constant_values=0)
-        nd = jnp.pad(v_links, ((0, 1), (0, 0)), constant_values=0)
-        div = (nl + nd - nu - nr) % self.N
-        charge = (self.Qx - div) % self.N
-        keys = jax.random.split(site_key, n_rows * n_cols).reshape((n_rows, n_cols))
-        sites = jax.vmap(
-            lambda row_keys, row_charge: jax.vmap(
-                _sample_site_index_for_charge, in_axes=(0, 0, None, None)
-            )(row_keys, row_charge, self.charge_to_indices, self.charge_deg)
-        )(keys, charge)
-        return GIPEPS.flatten_sample(sites, h_links, v_links)
+        )(keys)
 
 
 # ------------------------- helpers -------------------------
@@ -207,17 +240,17 @@ class GIPEPS(nnx.Module):
 def _build_charge_index_map(
     charge_of_site: tuple[int, ...],
     N: int,
-) -> tuple[jax.Array, jax.Array]:
-    charges = jnp.asarray(charge_of_site, dtype=jnp.int32) % N
-    charge_deg = jnp.bincount(charges, length=N)
-    max_deg = int(jnp.max(charge_deg))
-    padded = jnp.full((N, max_deg), -1, dtype=jnp.int32)
-
-    def fill_charge(c, buf):
-        idx = jnp.where(charges == c, size=max_deg, fill_value=-1)[0].astype(jnp.int32)
-        return buf.at[c].set(idx)
-
-    charge_to_indices = jax.lax.fori_loop(0, N, lambda c, buf: fill_charge(c, buf), padded)
+) -> tuple[tuple[tuple[int, ...], ...], tuple[int, ...]]:
+    charges = tuple(int(charge) % N for charge in charge_of_site)
+    charge_deg = tuple(sum(charge == c for charge in charges) for c in range(N))
+    max_deg = max(charge_deg, default=0)
+    charge_to_indices = tuple(
+        tuple(
+            [idx for idx, charge in enumerate(charges) if charge == c]
+            + [-1] * (max_deg - charge_deg[c])
+        )
+        for c in range(N)
+    )
     return charge_to_indices, charge_deg
 
 
@@ -230,6 +263,121 @@ def _sample_site_index_for_charge(
     count = charge_deg[charge]
     k = jnp.floor(jax.random.uniform(key) * count).astype(jnp.int32)
     return charge_to_indices[charge, k]
+
+
+def _random_plaquette_background(
+    key: jax.Array,
+    n_rows: int,
+    n_cols: int,
+    N: int,
+) -> tuple[jax.Array, jax.Array]:
+    h_links = jnp.zeros((n_rows, n_cols - 1), dtype=jnp.int32)
+    v_links = jnp.zeros((n_rows - 1, n_cols), dtype=jnp.int32)
+    if n_rows <= 1 or n_cols <= 1:
+        return h_links, v_links
+    deltas = jax.random.randint(
+        key, (n_rows - 1, n_cols - 1), 0, N, dtype=jnp.int32
+    )
+    h_links = h_links.at[: n_rows - 1, :].add(deltas)
+    h_links = h_links.at[1:, :].add(-deltas)
+    v_links = v_links.at[:, : n_cols - 1].add(deltas)
+    v_links = v_links.at[:, 1:].add(-deltas)
+    return h_links % N, v_links % N
+
+
+def _flip_path_masks(
+    shape: tuple[int, int],
+    start_flat: jax.Array,
+    end_flat: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    n_rows, n_cols = shape
+    r0, c0 = start_flat // n_cols, start_flat % n_cols
+    r1, c1 = end_flat // n_cols, end_flat % n_cols
+    c_min, c_max = jnp.minimum(c0, c1), jnp.maximum(c0, c1)
+    r_min, r_max = jnp.minimum(r0, r1), jnp.maximum(r0, r1)
+    h_mask = (
+        (jnp.arange(n_rows)[:, None] == r0)
+        & (jnp.arange(n_cols - 1)[None, :] >= c_min)
+        & (jnp.arange(n_cols - 1)[None, :] < c_max)
+    )
+    v_mask = (
+        (jnp.arange(n_rows - 1)[:, None] >= r_min)
+        & (jnp.arange(n_rows - 1)[:, None] < r_max)
+        & (jnp.arange(n_cols)[None, :] == c1)
+    )
+    return h_mask.astype(jnp.int32), v_mask.astype(jnp.int32)
+
+
+def _single_z2_hardcore_configuration_with_particles(
+    key: jax.Array,
+    Qx: Any,
+    particle_number: int,
+) -> jax.Array:
+    Qx = jnp.asarray(Qx, dtype=jnp.int32)
+    n_rows, n_cols = Qx.shape
+    n_sites = n_rows * n_cols
+    n_pairs_max = (n_sites + 1) // 2
+    key_sites, key_bg, key_pair = jax.random.split(key, 3)
+    permutation = jax.random.permutation(key_sites, n_sites)
+    occupied = permutation[:particle_number]
+    sites = jnp.zeros((n_sites,), dtype=jnp.int32).at[occupied].set(1).reshape((n_rows, n_cols))
+
+    h_links, v_links = _random_plaquette_background(key_bg, n_rows, n_cols, 2)
+    defects = (Qx - sites) % 2
+    defect_flat = jnp.where(defects.reshape(-1) == 1, size=2 * n_pairs_max, fill_value=-1)[0]
+    priorities = jax.random.uniform(key_pair, (2 * n_pairs_max,))
+    order = jnp.argsort(jnp.where(defect_flat >= 0, priorities, 2.0))
+    defect_flat = defect_flat[order]
+    pairs = defect_flat.reshape(n_pairs_max, 2)
+
+    def flip_pair(carry, pair):
+        h_cur, v_cur = carry
+        valid = jnp.all(pair >= 0)
+
+        def apply_pair(_):
+            h_mask, v_mask = _flip_path_masks((n_rows, n_cols), pair[0], pair[1])
+            return (
+                jnp.bitwise_xor(h_cur, h_mask),
+                jnp.bitwise_xor(v_cur, v_mask),
+            )
+
+        return jax.lax.cond(valid, apply_pair, lambda _: (h_cur, v_cur), operand=None), None
+
+    (h_links, v_links), _ = jax.lax.scan(flip_pair, (h_links, v_links), pairs)
+    return GIPEPS.flatten_sample(sites, h_links, v_links)
+
+
+@functools.partial(
+    jax.jit,
+    static_argnames=("n_rows", "n_cols", "N", "Qx", "charge_to_indices", "charge_deg"),
+)
+def _single_physical_configuration(
+    key: jax.Array,
+    n_rows: int,
+    n_cols: int,
+    N: int,
+    Qx: Any,
+    charge_to_indices: Any,
+    charge_deg: Any,
+) -> jax.Array:
+    Qx = jnp.asarray(Qx, dtype=jnp.int32)
+    charge_to_indices = jnp.asarray(charge_to_indices, dtype=jnp.int32)
+    charge_deg = jnp.asarray(charge_deg, dtype=jnp.int32)
+    field_key, site_key = jax.random.split(key)
+    h_links, v_links = _random_plaquette_background(field_key, n_rows, n_cols, N)
+    nl = jnp.pad(h_links, ((0, 0), (1, 0)), constant_values=0)
+    nr = jnp.pad(h_links, ((0, 0), (0, 1)), constant_values=0)
+    nu = jnp.pad(v_links, ((1, 0), (0, 0)), constant_values=0)
+    nd = jnp.pad(v_links, ((0, 1), (0, 0)), constant_values=0)
+    div = (nl + nd - nu - nr) % N
+    charge = (Qx - div) % N
+    keys = jax.random.split(site_key, n_rows * n_cols).reshape((n_rows, n_cols))
+    sites = jax.vmap(
+        lambda row_keys, row_charge: jax.vmap(
+            _sample_site_index_for_charge, in_axes=(0, 0, None, None)
+        )(row_keys, row_charge, charge_to_indices, charge_deg)
+    )(keys, charge)
+    return GIPEPS.flatten_sample(sites, h_links, v_links)
 
 
 @functools.partial(jax.jit, static_argnames=("direction",))
@@ -277,13 +425,14 @@ def assemble_tensors(
     h_links: jax.Array,
     v_links: jax.Array,
     config: GIPEPSConfig,
+    mask_per_charge: jax.Array | None = None,
 ) -> list[list[jax.Array]]:
     n_rows, n_cols = config.shape
     eff = []
     for r in range(n_rows):
         row = []
         for c in range(n_cols):
-            row.append(_assemble_site(tensors, h_links, v_links, config, r, c))
+            row.append(_assemble_site(tensors, h_links, v_links, config, r, c, mask_per_charge))
         eff.append(row)
     return eff
 
@@ -295,6 +444,7 @@ def _assemble_site(
     config: GIPEPSConfig,
     r: int,
     c: int,
+    mask_per_charge: jax.Array | None = None,
 ) -> jax.Array:
     k_l = _link_value_or_zero(h_links, v_links, r, c, direction="left")
     k_r = _link_value_or_zero(h_links, v_links, r, c, direction="right")
@@ -304,7 +454,10 @@ def _assemble_site(
         config, k_l=k_l, k_u=k_u, k_r=k_r, k_d=k_d, r=r, c=c
     )
     tensor = tensors[r][c][:, cfg_idx, :, :, :, :]
-    mask_per_charge = config.mask_per_charge
+    if mask_per_charge is None:
+        if config.mask_per_charge is None:
+            return tensor
+        mask_per_charge = jnp.asarray(config.mask_per_charge, dtype=tensor.dtype)
     if mask_per_charge is None:
         return tensor
     mask_u = mask_per_charge[k_u][: tensor.shape[1]]
@@ -370,11 +523,20 @@ def _build_row_mpo_gi(
     config: GIPEPSConfig,
     row: int,
     n_cols: int,
+    mask_per_charge: jax.Array | None = None,
 ) -> tuple:
     """Build row-MPO for GI-PEPS contraction."""
     return tuple(
         jnp.transpose(
-            _assemble_site(tensors, h_links, v_links, config, row, c)[sites[row, c]],
+            _assemble_site(
+                tensors,
+                h_links,
+                v_links,
+                config,
+                row,
+                c,
+                mask_per_charge,
+            )[sites[row, c]],
             (2, 3, 0, 1),
         )
         for c in range(n_cols)
@@ -399,6 +561,40 @@ def _plaquette_flip(
     return h_links, v_links
 
 
+def _horizontal_hardcore_hop(
+    sites: jax.Array,
+    h_links: jax.Array,
+    r: int,
+    c: int,
+) -> tuple[jax.Array, jax.Array]:
+    allowed = sites[r, c] != sites[r, c + 1]
+    left = jnp.where(allowed, sites[r, c + 1], sites[r, c])
+    right = jnp.where(allowed, sites[r, c], sites[r, c + 1])
+    sites_prop = sites.at[r, c].set(left)
+    sites_prop = sites_prop.at[r, c + 1].set(right)
+    h_prop = h_links.at[r, c].set(
+        jnp.where(allowed, 1 - h_links[r, c], h_links[r, c])
+    )
+    return sites_prop, h_prop
+
+
+def _vertical_hardcore_hop(
+    sites: jax.Array,
+    v_links: jax.Array,
+    r: int,
+    c: int,
+) -> tuple[jax.Array, jax.Array]:
+    allowed = sites[r, c] != sites[r + 1, c]
+    top = jnp.where(allowed, sites[r + 1, c], sites[r, c])
+    bottom = jnp.where(allowed, sites[r, c], sites[r + 1, c])
+    sites_prop = sites.at[r, c].set(top)
+    sites_prop = sites_prop.at[r + 1, c].set(bottom)
+    v_prop = v_links.at[r, c].set(
+        jnp.where(allowed, 1 - v_links[r, c], v_links[r, c])
+    )
+    return sites_prop, v_prop
+
+
 # =============================================================================
 # Runtime Internals for GIPEPS Kernels
 # =============================================================================
@@ -415,6 +611,16 @@ class GITwoRowEnvs(NamedTuple):
     h_links: jax.Array
     v_links: jax.Array
     config: Any
+    mask_per_charge: jax.Array | None = None
+
+
+class GIRowEnvConfig(NamedTuple):
+    """Row-local GI context for dr=1 evaluation."""
+
+    h_links: jax.Array
+    v_links: jax.Array
+    peps_config: Any
+    mask_per_charge: jax.Array | None = None
 
 
 @_eval_term.dispatch
@@ -443,6 +649,62 @@ def _eval_term(
 
 @_eval_term.dispatch
 def _eval_term(
+    term: HorizontalMatterHoppingTerm,
+    envs: RowEnvs,
+    tensors: Any,
+    row: int,
+    col: int,
+    spins: jax.Array,
+    phys_dim: int,
+) -> jax.Array:
+    del phys_dim
+    allowed = spins[row, col] != spins[row, col + 1]
+
+    def eval_hop(_):
+        sites_prop, h_prop = _horizontal_hardcore_hop(spins, envs.config.h_links, row, col)
+        eff0 = _assemble_site(
+            tensors,
+            h_prop,
+            envs.config.v_links,
+            envs.config.peps_config,
+            row,
+            col,
+            envs.config.mask_per_charge,
+        )
+        eff1 = _assemble_site(
+            tensors,
+            h_prop,
+            envs.config.v_links,
+            envs.config.peps_config,
+            row,
+            col + 1,
+            envs.config.mask_per_charge,
+        )
+        mpo0 = jnp.transpose(eff0[sites_prop[row, col]], (2, 3, 0, 1))
+        mpo1 = jnp.transpose(eff1[sites_prop[row, col + 1]], (2, 3, 0, 1))
+        return term.coeff * jnp.einsum(
+            "ace,aub,cduv,evf,bgh,digw,fwj,hij->",
+            envs.left_env,
+            envs.top_env[col],
+            mpo0,
+            envs.bottom_env[col],
+            envs.top_env[col + 1],
+            mpo1,
+            envs.bottom_env[col + 1],
+            envs.right_envs[col + 1],
+            optimize=[(0, 1), (0, 6), (0, 5), (0, 3), (1, 2), (1, 2), (0, 1)],
+        )
+
+    return jax.lax.cond(
+        allowed,
+        eval_hop,
+        lambda _: jnp.zeros((), dtype=envs.left_env.dtype),
+        operand=None,
+    )
+
+
+@_eval_term.dispatch
+def _eval_term(
     term: PlaquetteOperator,
     envs: GITwoRowEnvs,
     tensors: Any,
@@ -455,13 +717,73 @@ def _eval_term(
         h_f, v_f = _plaquette_flip(envs.h_links, envs.v_links, row, col, delta=delta, N=envs.config.N)
         mpos = []
         for dr, dc in ((0, 0), (0, 1), (1, 0), (1, 1)):
-            eff = _assemble_site(tensors, h_f, v_f, envs.config, row + dr, col + dc)
+            eff = _assemble_site(
+                tensors,
+                h_f,
+                v_f,
+                envs.config,
+                row + dr,
+                col + dc,
+                envs.mask_per_charge,
+            )
             mpos.append(jnp.transpose(eff[spins[row + dr, col + dc]], (2, 3, 0, 1)))
         return _contract_2row_2col(
             envs.left_env, envs.top_env, mpos[0], mpos[2],
             mpos[1], mpos[3], envs.bottom_env_next, envs.right_envs[col + 1], col,
         )
     return term.coeff * (_flip_amp(1) + _flip_amp(-1))
+
+
+@_eval_term.dispatch
+def _eval_term(
+    term: VerticalMatterHoppingTerm,
+    envs: GITwoRowEnvs,
+    tensors: Any,
+    row: int,
+    col: int,
+    spins: jax.Array,
+    phys_dim: int,
+) -> jax.Array:
+    del phys_dim
+    allowed = spins[row, col] != spins[row + 1, col]
+
+    def eval_hop(_):
+        sites_prop, v_prop = _vertical_hardcore_hop(spins, envs.v_links, row, col)
+        eff0 = _assemble_site(
+            tensors,
+            envs.h_links,
+            v_prop,
+            envs.config,
+            row,
+            col,
+            envs.mask_per_charge,
+        )
+        eff1 = _assemble_site(
+            tensors,
+            envs.h_links,
+            v_prop,
+            envs.config,
+            row + 1,
+            col,
+            envs.mask_per_charge,
+        )
+        mpo0 = jnp.transpose(eff0[sites_prop[row, col]], (2, 3, 0, 1))
+        mpo1 = jnp.transpose(eff1[sites_prop[row + 1, col]], (2, 3, 0, 1))
+        return term.coeff * _contract_2row_1col(
+            envs.left_env,
+            envs.top_env[col],
+            mpo0,
+            mpo1,
+            envs.bottom_env_next[col],
+            envs.right_envs[col],
+        )
+
+    return jax.lax.cond(
+        allowed,
+        eval_hop,
+        lambda _: jnp.zeros((), dtype=envs.left_env.dtype),
+        operand=None,
+    )
 
 
 def estimate(
@@ -471,13 +793,12 @@ def estimate(
     config: GIPEPSConfig,
     strategy: Any,
     top_envs: list[tuple],
+    mask_per_charge: jax.Array | None = None,
     *,
     terms: BucketedOperators,
     coeffs: jax.Array | None = None,
 ) -> tuple[list[list[jax.Array]], jax.Array, list[tuple]]:
     """Compute environment gradients and local energy for GI-PEPS."""
-    from vmc.peps.gi.local_terms import LinkDiagonalTerm
-
     sites, h_links, v_links = GIPEPS.unflatten_sample(sample, config.shape)
     n_rows, n_cols = config.shape
     dtype = tensors[0][0].dtype
@@ -507,7 +828,9 @@ def estimate(
     for row in range(n_rows - 1, -1, -1):
         bottom_envs_cache[row] = bottom_env
         top_env = top_envs[row]
-        row_mpo = _build_row_mpo_gi(tensors, sites, h_links, v_links, config, row, n_cols)
+        row_mpo = _build_row_mpo_gi(
+            tensors, sites, h_links, v_links, config, row, n_cols, mask_per_charge
+        )
         row_passes = terms.rows[row]
         if not any(dr == 1 for dr, _ in row_passes):
             row_passes = ((1, empty_cols),) + row_passes
@@ -520,19 +843,34 @@ def estimate(
             col_terms: tuple,
         ) -> tuple[jax.Array, list[jax.Array] | None]:
             right_envs = _compute_right_envs(top_env, row_mpo, bottom_env, dtype)
-            has_terms = any(col_terms[c] for c in range(n_cols))
-            if has_terms:
-                eff_row_acc = [
-                    _assemble_site(tensors, h_links, v_links, config, row, c)
-                    for c in range(n_cols)
-                ]
+            for terms_at_col in col_terms:
+                if any(
+                    not isinstance(term, HorizontalMatterHoppingTerm)
+                    for term, _contribs in terms_at_col
+                ):
+                    eff_row_acc = [
+                        _assemble_site(
+                            tensors, h_links, v_links, config, row, c, mask_per_charge
+                        )
+                        for c in range(n_cols)
+                    ]
+                    break
+            row_env_config = GIRowEnvConfig(h_links, v_links, config, mask_per_charge)
             left_env = jnp.ones((1, 1, 1), dtype=dtype)
             for col in range(n_cols):
                 env_grad = _compute_single_gradient(
                     left_env, right_envs[col], top_env[col], bottom_env[col]
                 )
                 env_grads[row][col] = env_grad
-                envs = RowEnvs(left_env, right_envs, top_env, bottom_env, env_grad, eff_row_acc)
+                envs = RowEnvs(
+                    left_env,
+                    right_envs,
+                    top_env,
+                    bottom_env,
+                    env_grad,
+                    eff_row_acc,
+                    config=row_env_config,
+                )
                 for term, contributions in col_terms[col]:
                     val = _eval_term(
                         term, envs, tensors, row, col, sites, phys_dim,
@@ -540,7 +878,9 @@ def estimate(
                     for op_idx, coeff_idx in contributions:
                         coeff = 1.0 if coeffs is None else coeffs[coeff_idx]
                         energies_acc = energies_acc.at[op_idx].add(coeff * val)
-                left_env = _update_left_env_1row(left_env, top_env[col], row_mpo[col], bottom_env[col])
+                left_env = _update_left_env_1row(
+                    left_env, top_env[col], row_mpo[col], bottom_env[col]
+                )
             return energies_acc, eff_row_acc
 
         def _eval_dr2(
@@ -557,27 +897,31 @@ def estimate(
             right_envs_2row = _compute_right_envs_2row(
                 top_env, row_mpo, row_mpo_next, bottom_env_next, dtype
             )
-            has_vertical = any(
-                isinstance(term, VerticalTwoSiteOperator)
-                for terms_at_col in col_terms
-                for term, _contribs in terms_at_col
-            )
             eff_row_next = None
-            if has_vertical:
-                if eff_row_acc is None:
-                    eff_row_acc = [
-                        _assemble_site(tensors, h_links, v_links, config, row, c)
+            for terms_at_col in col_terms:
+                if any(
+                    not isinstance(term, (PlaquetteOperator, VerticalMatterHoppingTerm))
+                    for term, _contribs in terms_at_col
+                ):
+                    if eff_row_acc is None:
+                        eff_row_acc = [
+                            _assemble_site(
+                                tensors, h_links, v_links, config, row, c, mask_per_charge
+                            )
+                            for c in range(n_cols)
+                        ]
+                    eff_row_next = [
+                        _assemble_site(
+                            tensors, h_links, v_links, config, row + 1, c, mask_per_charge
+                        )
                         for c in range(n_cols)
                     ]
-                eff_row_next = [
-                    _assemble_site(tensors, h_links, v_links, config, row + 1, c)
-                    for c in range(n_cols)
-                ]
+                    break
             left_env_2row = jnp.ones((1, 1, 1, 1), dtype=dtype)
             for col in range(n_cols):
                 envs = GITwoRowEnvs(
                     left_env_2row, right_envs_2row, top_env, bottom_env_next,
-                    eff_row_acc, eff_row_next, h_links, v_links, config,
+                    eff_row_acc, eff_row_next, h_links, v_links, config, mask_per_charge,
                 )
                 for term, contributions in col_terms[col]:
                     val = _eval_term(
@@ -586,20 +930,25 @@ def estimate(
                     for op_idx, coeff_idx in contributions:
                         coeff = 1.0 if coeffs is None else coeffs[coeff_idx]
                         energies_acc = energies_acc.at[op_idx].add(coeff * val)
-                left_env_2row = _update_left_env_2row(left_env_2row, top_env[col], row_mpo[col], row_mpo_next[col], bottom_env_next[col])
+                left_env_2row = _update_left_env_2row(
+                    left_env_2row,
+                    top_env[col],
+                    row_mpo[col],
+                    row_mpo_next[col],
+                    bottom_env_next[col],
+                )
             return energies_acc, eff_row_acc
 
-        pass_evaluators = {
-            1: _eval_dr1,
-            2: _eval_dr2,
-        }
         for dr, col_terms in row_passes:
-            evaluator = pass_evaluators.get(dr)
-            if evaluator is None:
-                raise NotImplementedError(
-                    f"GI transition evaluation for dr={dr} is not implemented."
-                )
-            energies, eff_row = evaluator(energies, eff_row, col_terms)
+            if dr == 1:
+                energies, eff_row = _eval_dr1(energies, eff_row, col_terms)
+                continue
+            if dr == 2:
+                energies, eff_row = _eval_dr2(energies, eff_row, col_terms)
+                continue
+            raise NotImplementedError(
+                f"GI transition evaluation for dr={dr} is not implemented."
+            )
 
         bottom_env = _apply_mpo_from_below(bottom_env, row_mpo, strategy)
         next_row_mpo = row_mpo
@@ -709,7 +1058,6 @@ def _horizontal_link_sweep_row(
             top_env[c + 1], row_mpo[c + 1], bottom_env[c + 1], right_envs[c + 1],
             optimize=[(0, 1), (0, 6), (0, 5), (0, 3), (1, 2), (1, 2), (0, 1)],
         )
-
         h_prop = h_links.at[r, c].set((h_links[r, c] + delta) % n)
         q_left = charge_of_site[sites[r, c]]
         q_right = charge_of_site[sites[r, c + 1]]
@@ -725,6 +1073,10 @@ def _horizontal_link_sweep_row(
         )
         sites_prop = sites.at[r, c].set(site_left)
         sites_prop = sites_prop.at[r, c + 1].set(site_right)
+        proposal_ratio = _hastings_ratio(
+            forward_prob=1.0 / (charge_deg[q_left_new] * charge_deg[q_right_new]),
+            backward_prob=1.0 / (charge_deg[q_left] * charge_deg[q_right]),
+        )
 
         eff0 = _assemble_site(tensors, h_prop, v_links, config, r, c)
         eff1 = _assemble_site(tensors, h_prop, v_links, config, r, c + 1)
@@ -736,10 +1088,6 @@ def _horizontal_link_sweep_row(
             left_env, top_env[c], mpo0, bottom_env[c],
             top_env[c + 1], mpo1, bottom_env[c + 1], right_envs[c + 1],
             optimize=[(0, 1), (0, 6), (0, 5), (0, 3), (1, 2), (1, 2), (0, 1)],
-        )
-        proposal_ratio = _hastings_ratio(
-            forward_prob=1.0 / (charge_deg[q_left_new] * charge_deg[q_right_new]),
-            backward_prob=1.0 / (charge_deg[q_left] * charge_deg[q_right]),
         )
         key, accept = _metropolis_hastings_accept(
             key,
@@ -806,16 +1154,16 @@ def _vertical_link_sweep_row_pair(
         )
         sites_prop = sites.at[r, c].set(site_top)
         sites_prop = sites_prop.at[r + 1, c].set(site_bottom)
+        proposal_ratio = _hastings_ratio(
+            forward_prob=1.0 / (charge_deg[q_top_new] * charge_deg[q_bottom_new]),
+            backward_prob=1.0 / (charge_deg[q_top] * charge_deg[q_bottom]),
+        )
         eff0 = _assemble_site(tensors, h_links, v_prop, config, r, c)
         eff1 = _assemble_site(tensors, h_links, v_prop, config, r + 1, c)
         mpo0_prop = jnp.transpose(eff0[sites_prop[r, c]], (2, 3, 0, 1))
         mpo1_prop = jnp.transpose(eff1[sites_prop[r + 1, c]], (2, 3, 0, 1))
         amp_prop = _contract_2row_1col(
             left_env, top_env[c], mpo0_prop, mpo1_prop, bottom_env[c], right_envs[c],
-        )
-        proposal_ratio = _hastings_ratio(
-            forward_prob=1.0 / (charge_deg[q_top_new] * charge_deg[q_bottom_new]),
-            backward_prob=1.0 / (charge_deg[q_top] * charge_deg[q_bottom]),
         )
         key, accept = _metropolis_hastings_accept(
             key,
@@ -839,6 +1187,206 @@ def _vertical_link_sweep_row_pair(
     return key, row_mpo0, row_mpo1, sites, v_links
 
 
+def _horizontal_hardcore_hop_sweep_row(
+    key: jax.Array,
+    tensors: list[list[jax.Array]],
+    sites: jax.Array,
+    h_links: jax.Array,
+    v_links: jax.Array,
+    config: GIPEPSConfig,
+    top_env: tuple,
+    bottom_env: tuple,
+    row_mpo: tuple,
+    mask_per_charge: jax.Array | None,
+    r: int,
+) -> tuple[jax.Array, tuple, jax.Array, jax.Array]:
+    """Sweep number-conserving Z2 hard-core hops on a row."""
+    n_cols = config.shape[1]
+    if n_cols <= 1:
+        return key, row_mpo, sites, h_links
+    dtype = row_mpo[0].dtype
+    right_envs = _compute_right_envs(top_env, row_mpo, bottom_env, dtype)
+    mpo = list(row_mpo)
+    left_env = jnp.ones((1, 1, 1), dtype=dtype)
+    amp_cur = jnp.einsum(
+        "ace,aub,cduv,evf,bgh,digw,fwj,hij->",
+        left_env, top_env[0], mpo[0], bottom_env[0],
+        top_env[1], mpo[1], bottom_env[1], right_envs[1],
+        optimize=[(0, 1), (0, 6), (0, 5), (0, 3), (1, 2), (1, 2), (0, 1)],
+    )
+
+    for c in range(n_cols - 1):
+        allowed = sites[r, c] != sites[r, c + 1]
+        mpo_c = mpo[c]
+        mpo_cp1 = mpo[c + 1]
+        right_env = right_envs[c + 1]
+
+        def keep(_):
+            return (
+                key,
+                amp_cur,
+                _update_left_env_1row(left_env, top_env[c], mpo_c, bottom_env[c]),
+                mpo_c,
+                mpo_cp1,
+                sites,
+                h_links,
+            )
+
+        def propose(_):
+            sites_prop, h_prop = _horizontal_hardcore_hop(sites, h_links, r, c)
+            eff0 = _assemble_site(
+                tensors, h_prop, v_links, config, r, c, mask_per_charge
+            )
+            eff1 = _assemble_site(
+                tensors, h_prop, v_links, config, r, c + 1, mask_per_charge
+            )
+            mpo0 = jnp.transpose(eff0[sites_prop[r, c]], (2, 3, 0, 1))
+            mpo1 = jnp.transpose(eff1[sites_prop[r, c + 1]], (2, 3, 0, 1))
+            prefix_prop = _update_left_env_1row(
+                left_env, top_env[c], mpo0, bottom_env[c]
+            )
+            amp_prop = jnp.einsum(
+                "bdf,bgh,digw,fwj,hij->",
+                prefix_prop, top_env[c + 1], mpo1, bottom_env[c + 1], right_env,
+                optimize=[(0, 1), (0, 3), (0, 2), (0, 1)],
+            )
+            key_next, accept = _metropolis_hastings_accept(
+                key,
+                jnp.abs(amp_cur) ** 2,
+                jnp.abs(amp_prop) ** 2,
+            )
+            return jax.lax.cond(
+                accept,
+                lambda _: (
+                    key_next,
+                    amp_prop,
+                    prefix_prop,
+                    mpo0,
+                    mpo1,
+                    sites_prop,
+                    h_prop,
+                ),
+                lambda _: (
+                    key_next,
+                    amp_cur,
+                    _update_left_env_1row(left_env, top_env[c], mpo_c, bottom_env[c]),
+                    mpo_c,
+                    mpo_cp1,
+                    sites,
+                    h_links,
+                ),
+                operand=None,
+            )
+
+        key, amp_cur, left_env, mpo[c], mpo[c + 1], sites, h_links = jax.lax.cond(
+            allowed,
+            propose,
+            keep,
+            operand=None,
+        )
+
+    return key, tuple(mpo), sites, h_links
+
+
+def _vertical_hardcore_hop_sweep_row_pair(
+    key: jax.Array,
+    tensors: list[list[jax.Array]],
+    sites: jax.Array,
+    h_links: jax.Array,
+    v_links: jax.Array,
+    config: GIPEPSConfig,
+    top_env: tuple,
+    bottom_env: tuple,
+    row_mpo0: tuple,
+    row_mpo1: tuple,
+    mask_per_charge: jax.Array | None,
+    r: int,
+) -> tuple[jax.Array, tuple, tuple, jax.Array, jax.Array]:
+    """Sweep number-conserving Z2 hard-core hops on a row pair."""
+    n_cols = config.shape[1]
+    dtype = row_mpo0[0].dtype
+    right_envs = _compute_right_envs_2row(top_env, row_mpo0, row_mpo1, bottom_env, dtype)
+    mpo0 = list(row_mpo0)
+    mpo1 = list(row_mpo1)
+    left_env = jnp.ones((1, 1, 1, 1), dtype=dtype)
+    amp_cur = _contract_2row_1col(
+        left_env, top_env[0], mpo0[0], mpo1[0], bottom_env[0], right_envs[0],
+    )
+
+    for c in range(n_cols):
+        allowed = sites[r, c] != sites[r + 1, c]
+        mpo0_c = mpo0[c]
+        mpo1_c = mpo1[c]
+        right_env = right_envs[c]
+
+        def keep(_):
+            return (
+                key,
+                amp_cur,
+                _update_left_env_2row(left_env, top_env[c], mpo0_c, mpo1_c, bottom_env[c]),
+                mpo0_c,
+                mpo1_c,
+                sites,
+                v_links,
+            )
+
+        def propose(_):
+            sites_prop, v_prop = _vertical_hardcore_hop(sites, v_links, r, c)
+            eff0 = _assemble_site(
+                tensors, h_links, v_prop, config, r, c, mask_per_charge
+            )
+            eff1 = _assemble_site(
+                tensors, h_links, v_prop, config, r + 1, c, mask_per_charge
+            )
+            mpo0_prop = jnp.transpose(eff0[sites_prop[r, c]], (2, 3, 0, 1))
+            mpo1_prop = jnp.transpose(eff1[sites_prop[r + 1, c]], (2, 3, 0, 1))
+            prefix_prop = _update_left_env_2row(
+                left_env, top_env[c], mpo0_prop, mpo1_prop, bottom_env[c]
+            )
+            amp_prop = jnp.einsum(
+                "bryf,bryf->",
+                prefix_prop,
+                right_env,
+                optimize=[(0, 1)],
+            )
+            key_next, accept = _metropolis_hastings_accept(
+                key,
+                jnp.abs(amp_cur) ** 2,
+                jnp.abs(amp_prop) ** 2,
+            )
+            return jax.lax.cond(
+                accept,
+                lambda _: (
+                    key_next,
+                    amp_prop,
+                    prefix_prop,
+                    mpo0_prop,
+                    mpo1_prop,
+                    sites_prop,
+                    v_prop,
+                ),
+                lambda _: (
+                    key_next,
+                    amp_cur,
+                    _update_left_env_2row(left_env, top_env[c], mpo0_c, mpo1_c, bottom_env[c]),
+                    mpo0_c,
+                    mpo1_c,
+                    sites,
+                    v_links,
+                ),
+                operand=None,
+            )
+
+        key, amp_cur, left_env, mpo0[c], mpo1[c], sites, v_links = jax.lax.cond(
+            allowed,
+            propose,
+            keep,
+            operand=None,
+        )
+
+    return key, tuple(mpo0), tuple(mpo1), sites, v_links
+
+
 def _compute_bottom_envs(
     tensors: list[list[jax.Array]],
     sites: jax.Array,
@@ -846,6 +1394,7 @@ def _compute_bottom_envs(
     v_links: jax.Array,
     config: GIPEPSConfig,
     strategy: Any,
+    mask_per_charge: jax.Array | None = None,
 ) -> list[tuple]:
     """Compute bottom boundary environments (internal helper for sweep)."""
     n_rows, n_cols = config.shape
@@ -854,7 +1403,9 @@ def _compute_bottom_envs(
     env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
     for row in range(n_rows - 1, -1, -1):
         envs[row] = env
-        row_mpo = _build_row_mpo_gi(tensors, sites, h_links, v_links, config, row, n_cols)
+        row_mpo = _build_row_mpo_gi(
+            tensors, sites, h_links, v_links, config, row, n_cols, mask_per_charge
+        )
         env = _apply_mpo_from_below(env, row_mpo, strategy)
     return envs
 
@@ -867,6 +1418,7 @@ def transition(
     shape: tuple[int, int],
     config: GIPEPSConfig,
     strategy: Any,
+    mask_per_charge: jax.Array | None,
     charge_of_site: jax.Array,
     charge_to_indices: jax.Array,
     charge_deg: jax.Array,
@@ -876,6 +1428,7 @@ def transition(
     n_rows, n_cols = config.shape
     dtype = tensors[0][0].dtype
     top_envs_cache = [None] * n_rows
+    hardcore = config.is_binary_occupancy_matter
 
     # 1. Plaquette sweep over the full lattice (row pairs)
     top_env_plaquettes = None
@@ -884,10 +1437,10 @@ def transition(
             jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols)
         )
         row_mpo0 = _build_row_mpo_gi(
-            tensors, sites, h_links, v_links, config, 0, n_cols
+            tensors, sites, h_links, v_links, config, 0, n_cols, mask_per_charge
         )
         row_mpo1 = _build_row_mpo_gi(
-            tensors, sites, h_links, v_links, config, 1, n_cols
+            tensors, sites, h_links, v_links, config, 1, n_cols, mask_per_charge
         )
         for r in range(n_rows - 1):
             if config.phys_dim == 1:
@@ -909,7 +1462,7 @@ def transition(
             if r + 2 < n_rows:
                 row_mpo0 = row_mpo1
                 row_mpo1 = _build_row_mpo_gi(
-                    tensors, sites, h_links, v_links, config, r + 2, n_cols
+                    tensors, sites, h_links, v_links, config, r + 2, n_cols, mask_per_charge
                 )
         if config.phys_dim == 1:
             top_envs_cache[n_rows - 1] = top_env_plaquettes
@@ -924,7 +1477,7 @@ def transition(
             for row in range(n_rows):
                 top_envs_cache[row] = top_env_plaquettes
                 row_mpo = _build_row_mpo_gi(
-                    tensors, sites, h_links, v_links, config, row, n_cols
+                    tensors, sites, h_links, v_links, config, row, n_cols, mask_per_charge
                 )
                 top_env_plaquettes = strategy.apply(top_env_plaquettes, row_mpo)
         amp = _contract_bottom(top_env_plaquettes)
@@ -933,7 +1486,7 @@ def transition(
     # 2. Horizontal link sweeps for all rows
     # Recompute bottom_envs after plaquette changes
     bottom_envs_h = _compute_bottom_envs(
-        tensors, sites, h_links, v_links, config, strategy
+        tensors, sites, h_links, v_links, config, strategy, mask_per_charge
     )
 
     top_env_h = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
@@ -941,23 +1494,38 @@ def transition(
         if n_rows == 1:
             top_envs_cache[row] = top_env_h
         row_mpo = _build_row_mpo_gi(
-            tensors, sites, h_links, v_links, config, row, n_cols
+            tensors, sites, h_links, v_links, config, row, n_cols, mask_per_charge
         )
-        key, row_mpo, sites, h_links = _horizontal_link_sweep_row(
-            key,
-            tensors,
-            sites,
-            h_links,
-            v_links,
-            config,
-            top_env_h,
-            bottom_envs_h[row],
-            row_mpo,
-            row,
-            charge_of_site,
-            charge_to_indices,
-            charge_deg,
-        )
+        if hardcore:
+            key, row_mpo, sites, h_links = _horizontal_hardcore_hop_sweep_row(
+                key,
+                tensors,
+                sites,
+                h_links,
+                v_links,
+                config,
+                top_env_h,
+                bottom_envs_h[row],
+                row_mpo,
+                mask_per_charge,
+                row,
+            )
+        else:
+            key, row_mpo, sites, h_links = _horizontal_link_sweep_row(
+                key,
+                tensors,
+                sites,
+                h_links,
+                v_links,
+                config,
+                top_env_h,
+                bottom_envs_h[row],
+                row_mpo,
+                row,
+                charge_of_site,
+                charge_to_indices,
+                charge_deg,
+            )
         top_env_h = strategy.apply(top_env_h, row_mpo)
 
     if n_rows == 1:
@@ -967,39 +1535,58 @@ def transition(
     # 3. Vertical link sweeps for all row pairs
     # Recompute bottom_envs after horizontal changes
     bottom_envs_v = _compute_bottom_envs(
-        tensors, sites, h_links, v_links, config, strategy
+        tensors, sites, h_links, v_links, config, strategy, mask_per_charge
     )
 
     top_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
-    row_mpo0 = _build_row_mpo_gi(tensors, sites, h_links, v_links, config, 0, n_cols)
-    row_mpo1 = _build_row_mpo_gi(tensors, sites, h_links, v_links, config, 1, n_cols)
+    row_mpo0 = _build_row_mpo_gi(
+        tensors, sites, h_links, v_links, config, 0, n_cols, mask_per_charge
+    )
+    row_mpo1 = _build_row_mpo_gi(
+        tensors, sites, h_links, v_links, config, 1, n_cols, mask_per_charge
+    )
     for r in range(n_rows - 1):
         top_envs_cache[r] = top_env
-        key, row_mpo0, row_mpo1, sites, v_links = _vertical_link_sweep_row_pair(
-            key,
-            tensors,
-            sites,
-            h_links,
-            v_links,
-            config,
-            top_env,
-            bottom_envs_v[r + 1],
-            row_mpo0,
-            row_mpo1,
-            r,
-            charge_of_site,
-            charge_to_indices,
-            charge_deg,
-        )
+        if hardcore:
+            key, row_mpo0, row_mpo1, sites, v_links = _vertical_hardcore_hop_sweep_row_pair(
+                key,
+                tensors,
+                sites,
+                h_links,
+                v_links,
+                config,
+                top_env,
+                bottom_envs_v[r + 1],
+                row_mpo0,
+                row_mpo1,
+                mask_per_charge,
+                r,
+            )
+        else:
+            key, row_mpo0, row_mpo1, sites, v_links = _vertical_link_sweep_row_pair(
+                key,
+                tensors,
+                sites,
+                h_links,
+                v_links,
+                config,
+                top_env,
+                bottom_envs_v[r + 1],
+                row_mpo0,
+                row_mpo1,
+                r,
+                charge_of_site,
+                charge_to_indices,
+                charge_deg,
+            )
         top_env = strategy.apply(top_env, row_mpo0)
         if r + 2 < n_rows:
             row_mpo0 = row_mpo1
             row_mpo1 = _build_row_mpo_gi(
-                tensors, sites, h_links, v_links, config, r + 2, n_cols
+                tensors, sites, h_links, v_links, config, r + 2, n_cols, mask_per_charge
             )
     top_envs_cache[n_rows - 1] = top_env
     top_env = strategy.apply(top_env, row_mpo1)
 
     amp = _contract_bottom(top_env)
     return GIPEPS.flatten_sample(sites, h_links, v_links), key, amp, tuple(top_envs_cache)
-

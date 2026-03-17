@@ -28,8 +28,13 @@ def build_mc_kernels(
     config = model.config
     strategy = model.strategy
     charge_of_site = jnp.asarray(model.charge_of_site, dtype=jnp.int32)
-    charge_to_indices = model.charge_to_indices
-    charge_deg = model.charge_deg
+    charge_to_indices = jnp.asarray(model.charge_to_indices, dtype=jnp.int32)
+    charge_deg = jnp.asarray(model.charge_deg, dtype=jnp.int32)
+    mask_per_charge = (
+        None
+        if config.mask_per_charge is None
+        else jnp.asarray(config.mask_per_charge, dtype=jnp.bool_)
+    )
     nc_per_site = tuple(sd // model.phys_dim for sd in model.sliced_dims)
     all_operators = (operator,) + observables
     bucketed_terms, coeff_structure = merge_operators(
@@ -52,7 +57,7 @@ def build_mc_kernels(
             for row in range(n_rows - 1, -1, -1):
                 envs[row] = env
                 row_mpo = gi_model._build_row_mpo_gi(
-                    tensors, sites, h_links, v_links, config, row, n_cols
+                    tensors, sites, h_links, v_links, config, row, n_cols, mask_per_charge
                 )
                 env = gi_model._apply_mpo_from_below(env, row_mpo, strategy)
             return tuple(envs)
@@ -83,6 +88,7 @@ def build_mc_kernels(
             shape,
             config,
             strategy,
+            mask_per_charge,
             charge_of_site,
             charge_to_indices,
             charge_deg,
@@ -105,44 +111,37 @@ def build_mc_kernels(
             config,
             strategy,
             context.top_envs,
+            mask_per_charge,
             terms=bucketed_terms,
             coeffs=context.coeffs,
         )
         sites, h_links, v_links = GIPEPS.unflatten_sample(config_state_next, shape)
-        if full_gradient:
-            grad_parts = []
-            for r in range(n_rows):
-                for c in range(n_cols):
-                    k_l = _link_value_or_zero(h_links, v_links, r, c, direction="left")
-                    k_r = _link_value_or_zero(h_links, v_links, r, c, direction="right")
-                    k_u = _link_value_or_zero(h_links, v_links, r, c, direction="up")
-                    k_d = _link_value_or_zero(h_links, v_links, r, c, direction="down")
-                    cfg_idx = _site_cfg_index(
-                        config, k_l=k_l, k_u=k_u, k_r=k_r, k_d=k_d, r=r, c=c
-                    )
+        grad_parts = []
+        p_parts = [] if not full_gradient else None
+        for r in range(n_rows):
+            for c in range(n_cols):
+                site = sites[r, c]
+                env_grad = env_grads[r][c]
+                k_l = _link_value_or_zero(h_links, v_links, r, c, direction="left")
+                k_r = _link_value_or_zero(h_links, v_links, r, c, direction="right")
+                k_u = _link_value_or_zero(h_links, v_links, r, c, direction="up")
+                k_d = _link_value_or_zero(h_links, v_links, r, c, direction="down")
+                cfg_idx = _site_cfg_index(
+                    config, k_l=k_l, k_u=k_u, k_r=k_r, k_d=k_d, r=r, c=c
+                )
+                if full_gradient:
                     grad_full = jnp.zeros_like(jnp.asarray(tensors[r][c]))
-                    grad_full = grad_full.at[sites[r, c], cfg_idx].set(env_grads[r][c])
+                    grad_full = grad_full.at[site, cfg_idx].set(env_grad)
                     grad_parts.append(grad_full.reshape(-1))
-            local_log_derivatives = jnp.concatenate(grad_parts) / context.amp
-            active_slice_indices = None
-        else:
-            grad_parts = []
-            p_parts = []
-            for r in range(n_rows):
-                for c in range(n_cols):
-                    grad_parts.append(env_grads[r][c].reshape(-1))
-                    params_per_site = env_grads[r][c].size
-                    k_l = _link_value_or_zero(h_links, v_links, r, c, direction="left")
-                    k_r = _link_value_or_zero(h_links, v_links, r, c, direction="right")
-                    k_u = _link_value_or_zero(h_links, v_links, r, c, direction="up")
-                    k_d = _link_value_or_zero(h_links, v_links, r, c, direction="down")
-                    cfg_idx = _site_cfg_index(
-                        config, k_l=k_l, k_u=k_u, k_r=k_r, k_d=k_d, r=r, c=c
-                    )
-                    combined_idx = sites[r, c] * nc_per_site[r * n_cols + c] + cfg_idx
-                    p_parts.append(jnp.full((params_per_site,), combined_idx, dtype=jnp.int16))
-            local_log_derivatives = jnp.concatenate(grad_parts) / context.amp
-            active_slice_indices = jnp.concatenate(p_parts)
+                    continue
+                grad_parts.append(env_grad.reshape(-1))
+                combined_idx = site * nc_per_site[r * n_cols + c] + cfg_idx
+                p_parts.append(
+                    jnp.full((env_grad.size,), combined_idx, dtype=jnp.int16)
+                )
+
+        local_log_derivatives = jnp.concatenate(grad_parts) / context.amp
+        active_slice_indices = None if full_gradient else jnp.concatenate(p_parts)
         return Cache(bottom_envs=tuple(envs_next), coeffs=context.coeffs), LocalEstimates(
             local_log_derivatives=local_log_derivatives,
             local_estimate=local_energy,

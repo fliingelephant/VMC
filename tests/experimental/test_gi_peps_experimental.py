@@ -6,9 +6,11 @@ from flax import nnx
 
 from vmc.core import _sample_counts, _trim_samples, make_mc_sampler
 from vmc.operators import PlaquetteOperator
+from vmc.peps.common.contraction import _forward_with_cache
 from vmc.peps import DensityMatrix, NoTruncation, ZipUp, build_mc_kernels
 from vmc.peps.gi import GILocalHamiltonian, GIPEPS, GIPEPSConfig
 from vmc.peps.gi.local_terms import build_electric_terms
+from vmc.peps.gi.model import assemble_tensors
 
 
 def _sample_with_kernels(
@@ -66,7 +68,9 @@ class GIPEPSTest(unittest.TestCase):
         nr = jnp.pad(h_links, ((0, 0), (0, 1)), constant_values=0)
         nu = jnp.pad(v_links, ((1, 0), (0, 0)), constant_values=0)
         nd = jnp.pad(v_links, ((0, 1), (0, 0)), constant_values=0)
-        gauss = (nl + nu - nr - nd + charge - config.Qx) % config.N
+        gauss = (
+            nl + nu - nr - nd + charge - jnp.asarray(config.Qx, dtype=charge.dtype)
+        ) % config.N
         ok = jax.device_get(jnp.all(gauss == 0))
         self.assertTrue(bool(ok))
 
@@ -97,6 +101,7 @@ class GIPEPSTest(unittest.TestCase):
             Qx=0,
             degeneracy_per_charge=(2, 2),
             charge_of_site=(0, 1),
+            particle_number=2,
         )
         strategy = NoTruncation()
         model = GIPEPS(rngs=nnx.Rngs(0), config=config, contraction_strategy=strategy)
@@ -108,6 +113,34 @@ class GIPEPSTest(unittest.TestCase):
         tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
         amp_bad = GIPEPS.apply(tensors, bad_sample, config.shape, config, strategy)
         self.assertTrue(bool(jax.device_get(amp_bad == 0)))
+
+    def test_apply_respects_masked_sector_degeneracy(self):
+        config = GIPEPSConfig(
+            shape=(2, 2),
+            N=2,
+            phys_dim=1,
+            Qx=0,
+            degeneracy_per_charge=(2, 1),
+            charge_of_site=(0,),
+        )
+        strategy = NoTruncation()
+        model = GIPEPS(rngs=nnx.Rngs(0), config=config, contraction_strategy=strategy)
+        key = jax.random.key(2)
+        sample = model.random_physical_configuration(key, n_samples=1)[0]
+        sites, h_links, v_links = GIPEPS.unflatten_sample(sample, config.shape)
+        tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
+
+        amp_apply = GIPEPS.apply(tensors, sample, config.shape, config, strategy)
+        mask_per_charge = jnp.asarray(config.mask_per_charge, dtype=tensors[0][0].dtype)
+        eff_tensors = assemble_tensors(
+            tensors,
+            h_links,
+            v_links,
+            config,
+            mask_per_charge=mask_per_charge,
+        )
+        amp_masked, _ = _forward_with_cache(eff_tensors, sites, config.shape, strategy)
+        self.assertTrue(bool(jax.device_get(jnp.allclose(amp_apply, amp_masked))))
 
     def test_sampler_shapes(self):
         strategies = [
@@ -124,6 +157,7 @@ class GIPEPSTest(unittest.TestCase):
                 Qx=0,
                 degeneracy_per_charge=(2, 2),
                 charge_of_site=charge_of_site,
+                particle_number=(2 if phys_dim == 2 else None),
             )
             electric_terms = build_electric_terms(config.shape, coeff=0.1, N=config.N)
             plaquette_terms = self._plaquette_terms(config.shape, coeff=0.2)
@@ -190,6 +224,7 @@ class GIPEPSTest(unittest.TestCase):
             Qx=0,
             degeneracy_per_charge=(2, 2),
             charge_of_site=(0, 1),
+            particle_number=2,
         )
         strategy = NoTruncation()
         model = GIPEPS(rngs=nnx.Rngs(0), config=config, contraction_strategy=strategy)
@@ -299,6 +334,7 @@ class GIPEPSTest(unittest.TestCase):
             Qx=0,
             degeneracy_per_charge=(2, 2),
             charge_of_site=(0, 1),
+            particle_number=2,
         )
         strategy = NoTruncation()
         model = GIPEPS(rngs=nnx.Rngs(42), config=config, contraction_strategy=strategy)
@@ -427,6 +463,7 @@ class GIPEPSTest(unittest.TestCase):
             Qx=0,
             degeneracy_per_charge=(2, 2),
             charge_of_site=(0, 1),
+            particle_number=2,
         )
         strategy = NoTruncation()
         model = GIPEPS(rngs=nnx.Rngs(42), config=config, contraction_strategy=strategy)
@@ -527,6 +564,7 @@ class GIPEPSTest(unittest.TestCase):
             Qx=0,
             degeneracy_per_charge=(2, 2),
             charge_of_site=(0, 1),
+            particle_number=2,
         )
         model = GIPEPS(rngs=nnx.Rngs(0), config=config, contraction_strategy=NoTruncation())
 
@@ -562,6 +600,7 @@ class GIPEPSTest(unittest.TestCase):
             Qx=0,
             degeneracy_per_charge=(2, 2),
             charge_of_site=(0, 1),
+            particle_number=2,
         )
         model = GIPEPS(rngs=nnx.Rngs(123), config=config, contraction_strategy=NoTruncation())
         electric_terms = build_electric_terms(config.shape, coeff=0.1, N=config.N)

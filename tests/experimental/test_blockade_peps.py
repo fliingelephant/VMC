@@ -32,13 +32,18 @@ def _forward_with_cache_blockade(
 ) -> tuple[jax.Array, tuple]:
     n_rows, n_cols = peps_config.shape
     dtype = tensors[0][0].dtype
+    mask_per_charge = (
+        None
+        if peps_config.mask_per_charge is None
+        else jnp.asarray(peps_config.mask_per_charge, dtype=jnp.bool_)
+    )
     top_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
     top_envs = [None] * n_rows
     for row in range(n_rows):
         top_envs[row] = top_env
         top_env = strategy.apply(
             top_env,
-            blockade_model._build_row_mpo(tensors, config, peps_config, row),
+            blockade_model._build_row_mpo(tensors, config, peps_config, mask_per_charge, row),
         )
     return _contract_bottom(top_env), tuple(top_envs)
 
@@ -142,13 +147,18 @@ class CfgIdxTest(unittest.TestCase):
             contraction_strategy=NoTruncation(),
         )
         tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
+        mask_per_charge = (
+            None
+            if config.mask_per_charge is None
+            else jnp.asarray(config.mask_per_charge, dtype=jnp.bool_)
+        )
 
         # Test different incoming configurations at bulk site (1, 1)
         # kL=0, kU=0 -> cfg_idx=0
         n_config = jnp.array([[0, 0, 0], [0, 0, 0], [0, 0, 0]], dtype=jnp.int32)
         tensor = _assemble_site(
             tensors,
-            config,
+            mask_per_charge,
             1,
             1,
             n_config[1, 1],
@@ -162,7 +172,7 @@ class CfgIdxTest(unittest.TestCase):
         n_config = jnp.array([[0, 1, 0], [0, 0, 0], [0, 0, 0]], dtype=jnp.int32)
         tensor = _assemble_site(
             tensors,
-            config,
+            mask_per_charge,
             1,
             1,
             n_config[1, 1],
@@ -176,7 +186,7 @@ class CfgIdxTest(unittest.TestCase):
         n_config = jnp.array([[0, 0, 0], [1, 0, 0], [0, 0, 0]], dtype=jnp.int32)
         tensor = _assemble_site(
             tensors,
-            config,
+            mask_per_charge,
             1,
             1,
             n_config[1, 1],
@@ -190,7 +200,7 @@ class CfgIdxTest(unittest.TestCase):
         n_config = jnp.array([[0, 1, 0], [1, 0, 0], [0, 0, 0]], dtype=jnp.int32)
         tensor = _assemble_site(
             tensors,
-            config,
+            mask_per_charge,
             1,
             1,
             n_config[1, 1],
@@ -211,12 +221,17 @@ class CfgIdxTest(unittest.TestCase):
             contraction_strategy=NoTruncation(),
         )
         tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
+        mask_per_charge = (
+            None
+            if config.mask_per_charge is None
+            else jnp.asarray(config.mask_per_charge, dtype=jnp.bool_)
+        )
 
         # When n=1, cfg_idx should always be 0 (regardless of neighbors)
         n_config = jnp.array([[0, 0, 0], [0, 1, 0], [0, 0, 0]], dtype=jnp.int32)
         tensor = _assemble_site(
             tensors,
-            config,
+            mask_per_charge,
             1,
             1,
             n_config[1, 1],

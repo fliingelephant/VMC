@@ -66,6 +66,25 @@ class GIPepsGaussLawTest(unittest.TestCase):
         for i in range(samples_hist.shape[0]):
             self.assertTrue(self._gauss_law_satisfied(samples_hist[i, 0], config))
 
+    def test_gauss_law_preserved_z3_pure_gauge(self):
+        config = GIPEPSConfig(
+            shape=(3, 3),
+            N=3,
+            phys_dim=1,
+            Qx=0,
+            degeneracy_per_charge=(1, 1, 1),
+            charge_of_site=(0,),
+        )
+        model = GIPEPS(
+            rngs=nnx.Rngs(0),
+            config=config,
+            contraction_strategy=NoTruncation(),
+        )
+
+        key = jax.random.key(1)
+        sample = model.random_physical_configuration(key, n_samples=1)[0]
+        self.assertTrue(self._gauss_law_satisfied(sample, config))
+
 
 if __name__ == "__main__":
     unittest.main()

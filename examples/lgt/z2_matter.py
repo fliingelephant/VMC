@@ -38,7 +38,13 @@ from flax import nnx
 from vmc.drivers import TDVPDriver, ImaginaryTimeUnit
 from vmc.operators import PlaquetteOperator
 from vmc.peps import ZipUp
-from vmc.peps.gi.local_terms import GILocalHamiltonian, build_electric_terms
+from vmc.peps.gi.local_terms import (
+    GILocalHamiltonian,
+    HorizontalMatterHoppingTerm,
+    MatterMassTerm,
+    VerticalMatterHoppingTerm,
+    build_electric_terms,
+)
 from vmc.peps.gi.model import GIPEPS, GIPEPSConfig
 from vmc.preconditioners import SRPreconditioner
 
@@ -55,32 +61,46 @@ def build_z2_matter_hamiltonian(
     m: float = 0.0,
 ) -> GILocalHamiltonian:
     """Build Z2 gauge + matter Hamiltonian.
-    
+
     Args:
         shape: Lattice shape.
         h: Magnetic (plaquette) coupling.
         g: Electric field coupling.
         J: Hopping strength.
         m: Chemical potential.
-    
+
     Returns:
         GILocalHamiltonian for Z2 gauge + hard-core bosons.
     """
     n_rows, n_cols = shape
-    
     plaquette_terms = tuple(
         PlaquetteOperator(row=r, col=c, coeff=-h)
         for r in range(n_rows - 1)
         for c in range(n_cols - 1)
     )
-    
     electric_terms = build_electric_terms(shape, coeff=g, N=2)
-    
-    # TODO: Add hopping terms c†_x U_{x,α} c_{x+e_α}
-    # This requires implementing HorizontalHoppingTerm and VerticalHoppingTerm
-    # For now, only plaquette + electric terms are included
-    
-    return GILocalHamiltonian(shape=shape, terms=electric_terms + plaquette_terms)
+    mass_terms = tuple(
+        MatterMassTerm(
+            row=r,
+            col=c,
+            coeff=m,
+            charge_of_site=(0, 1),
+        )
+        for r in range(n_rows)
+        for c in range(n_cols)
+    )
+    horizontal_hops = tuple(
+        HorizontalMatterHoppingTerm(row=r, col=c, coeff=J)
+        for r in range(n_rows)
+        for c in range(n_cols - 1)
+    )
+    vertical_hops = tuple(
+        VerticalMatterHoppingTerm(row=r, col=c, coeff=J)
+        for r in range(n_rows - 1)
+        for c in range(n_cols)
+    )
+    terms = electric_terms + plaquette_terms + mass_terms + horizontal_hops + vertical_hops
+    return GILocalHamiltonian(shape=shape, terms=terms)
 
 
 def run_optimization(
@@ -103,7 +123,7 @@ def run_optimization(
         time_unit=ImaginaryTimeUnit(),
         sampler_key=jax.random.key(seed),
         n_samples=n_samples,
-        full_gradient=True,
+        full_gradient=False,
     )
 
     k = 5
@@ -141,67 +161,75 @@ def main(
     g: float = 0.33,
     h: float = 1.0,
     J: float = 0.5,
+    m: float = 0.0,
     bond_dim: int = 4,
+    particle_number: int | None = None,
     n_samples: int = 5000,
     n_steps: int = 500,
     dt: float = 0.01,
     output_dir: str | None = None,
 ):
     """Run Z2 gauge + matter ground state optimization.
-    
+
     Args:
         size: Lattice size (size x size). Paper uses up to 16×16.
         g: Electric field coupling.
         h: Magnetic (plaquette) coupling.
         J: Hopping strength.
+        m: Chemical potential.
         bond_dim: Bond dimension per charge sector (D_k). Paper needs D=12 for convergence.
+        particle_number: Fixed boson number sector. Defaults to half filling.
         n_samples: MC samples per step. Paper uses 10^5 for matter coupling.
         n_steps: Optimization steps.
         dt: Imaginary time step.
         output_dir: Directory to save output data (JSON). None to skip saving.
     """
     shape = (size, size)
-    
+    if particle_number is None:
+        particle_number = shape[0] * shape[1] // 2
+
     logger.info("=" * 60)
     logger.info("Z2 Gauge Theory + Hard-Core Bosons")
     logger.info("=" * 60)
-    logger.info(f"Lattice: {size}x{size}, h={h}, g={g}, J={J}")
+    logger.info(f"Lattice: {size}x{size}, h={h}, g={g}, J={J}, m={m}")
     logger.info(f"Bond dimension per charge: D_k={bond_dim} (total D={2*bond_dim})")
-    
-    # Matter: phys_dim=2 (empty/occupied), charges 0 and 1
+    logger.info(f"Fixed boson number: N_b={particle_number}")
+
     cfg = GIPEPSConfig(
         shape=shape,
         N=2,
         phys_dim=2,
         Qx=0,
         degeneracy_per_charge=(bond_dim, bond_dim),
-        charge_of_site=(0, 1),  # Empty → charge 0, Occupied → charge 1
+        charge_of_site=(0, 1),
+        particle_number=particle_number,
     )
-    
     model = GIPEPS(
         rngs=nnx.Rngs(42),
         config=cfg,
         contraction_strategy=ZipUp(truncate_bond_dimension=3 * bond_dim),
     )
-    
-    operator = build_z2_matter_hamiltonian(shape, h=h, g=g, J=J)
-    
-    logger.info("Note: Hopping terms not yet implemented. Only H_B + H_E included.")
-    
-    # Setup data logging
+    operator = build_z2_matter_hamiltonian(shape, h=h, g=g, J=J, m=m)
     data = SimulationData(
         model_type="Z2_matter",
         lattice_size=shape,
-        parameters={"h": h, "g": g, "J": J, "bond_dim": bond_dim, "n_samples": n_samples},
+        parameters={
+            "h": h,
+            "g": g,
+            "J": J,
+            "m": m,
+            "bond_dim": bond_dim,
+            "particle_number": particle_number,
+            "n_samples": n_samples,
+        },
     )
-    
+
     run_optimization(model, operator, n_samples=n_samples, n_steps=n_steps, dt=dt, data=data)
-    
-    # Save data if output_dir specified
+
     if output_dir:
         path = Path(output_dir) / f"z2_matter_L{size}_g{g:.3f}_J{J:.2f}.json"
         data.save(path)
-    
+
     return data
 
 
@@ -216,7 +244,7 @@ def scan_bond_dim(
     output_dir: str = "output/z2_matter_Dscan",
 ):
     """Scan over bond dimensions to check convergence (replicates Fig 4a).
-    
+
     The paper finds that D=12 (D_k=6) is needed for convergence with matter.
     """
     logger.info("=" * 60)
@@ -224,24 +252,28 @@ def scan_bond_dim(
     logger.info(f"Lattice: {size}x{size}, g={g}, J={J}")
     logger.info(f"Bond dims: {bond_dims}")
     logger.info("=" * 60)
-    
+
     results = []
     for bond_dim in bond_dims:
         logger.info(f"\n{'='*40}\nRunning D_k = {bond_dim}\n{'='*40}")
         data = main(
-            size=size, g=g, J=J, bond_dim=bond_dim,
-            n_samples=n_samples, n_steps=n_steps, dt=dt,
+            size=size,
+            g=g,
+            J=J,
+            bond_dim=bond_dim,
+            n_samples=n_samples,
+            n_steps=n_steps,
+            dt=dt,
             output_dir=output_dir,
         )
         results.append(data)
-    
-    # Summary
+
     logger.info("\n" + "=" * 60)
     logger.info("SCAN SUMMARY")
     logger.info("=" * 60)
     for data in results:
         D_k = data.parameters["bond_dim"]
-        e = data.energies[-1] if data.energies else float('nan')
+        e = data.energies[-1] if data.energies else float("nan")
         logger.info(f"D_k = {D_k} (D = {2*D_k}): E = {e:.6f}")
 
 

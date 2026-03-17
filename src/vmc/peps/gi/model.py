@@ -46,6 +46,7 @@ from vmc.operators.local_terms import (
 )
 from vmc.peps.gi.local_terms import (
     HorizontalMatterHoppingTerm,
+    LinkDiagonalTerm,
     VerticalMatterHoppingTerm,
 )
 from vmc.utils.utils import random_tensor, _hastings_ratio, _metropolis_hastings_accept
@@ -798,8 +799,6 @@ def estimate(
     coeffs: jax.Array | None = None,
 ) -> tuple[list[list[jax.Array]], jax.Array, list[tuple]]:
     """Compute environment gradients and local energy for GI-PEPS."""
-    from vmc.peps.gi.local_terms import LinkDiagonalTerm
-
     sites, h_links, v_links = GIPEPS.unflatten_sample(sample, config.shape)
     n_rows, n_cols = config.shape
     dtype = tensors[0][0].dtype

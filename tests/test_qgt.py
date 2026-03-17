@@ -167,6 +167,7 @@ class QGTTest(unittest.TestCase):
             Qx=0,
             degeneracy_per_charge=(2, 2),
             charge_of_site=(0, 1),
+            particle_number=2,
         )
         model = GIPEPS(
             rngs=nnx.Rngs(123),
@@ -229,6 +230,7 @@ class QGTTest(unittest.TestCase):
             Qx=0,
             degeneracy_per_charge=(2, 2),
             charge_of_site=(0, 1),
+            particle_number=2,
         )
         model = GIPEPS(
             rngs=nnx.Rngs(123),

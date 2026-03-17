@@ -99,6 +99,7 @@ class GIPEPSTest(unittest.TestCase):
             Qx=0,
             degeneracy_per_charge=(2, 2),
             charge_of_site=(0, 1),
+            particle_number=2,
         )
         strategy = NoTruncation()
         model = GIPEPS(rngs=nnx.Rngs(0), config=config, contraction_strategy=strategy)
@@ -126,6 +127,7 @@ class GIPEPSTest(unittest.TestCase):
                 Qx=0,
                 degeneracy_per_charge=(2, 2),
                 charge_of_site=charge_of_site,
+                particle_number=(2 if phys_dim == 2 else None),
             )
             electric_terms = build_electric_terms(config.shape, coeff=0.1, N=config.N)
             plaquette_terms = self._plaquette_terms(config.shape, coeff=0.2)
@@ -192,6 +194,7 @@ class GIPEPSTest(unittest.TestCase):
             Qx=0,
             degeneracy_per_charge=(2, 2),
             charge_of_site=(0, 1),
+            particle_number=2,
         )
         strategy = NoTruncation()
         model = GIPEPS(rngs=nnx.Rngs(0), config=config, contraction_strategy=strategy)
@@ -301,6 +304,7 @@ class GIPEPSTest(unittest.TestCase):
             Qx=0,
             degeneracy_per_charge=(2, 2),
             charge_of_site=(0, 1),
+            particle_number=2,
         )
         strategy = NoTruncation()
         model = GIPEPS(rngs=nnx.Rngs(42), config=config, contraction_strategy=strategy)
@@ -429,6 +433,7 @@ class GIPEPSTest(unittest.TestCase):
             Qx=0,
             degeneracy_per_charge=(2, 2),
             charge_of_site=(0, 1),
+            particle_number=2,
         )
         strategy = NoTruncation()
         model = GIPEPS(rngs=nnx.Rngs(42), config=config, contraction_strategy=strategy)
@@ -529,6 +534,7 @@ class GIPEPSTest(unittest.TestCase):
             Qx=0,
             degeneracy_per_charge=(2, 2),
             charge_of_site=(0, 1),
+            particle_number=2,
         )
         model = GIPEPS(rngs=nnx.Rngs(0), config=config, contraction_strategy=NoTruncation())
 
@@ -564,6 +570,7 @@ class GIPEPSTest(unittest.TestCase):
             Qx=0,
             degeneracy_per_charge=(2, 2),
             charge_of_site=(0, 1),
+            particle_number=2,
         )
         model = GIPEPS(rngs=nnx.Rngs(123), config=config, contraction_strategy=NoTruncation())
         electric_terms = build_electric_terms(config.shape, coeff=0.1, N=config.N)

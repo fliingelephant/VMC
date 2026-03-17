@@ -26,7 +26,7 @@ class GIMatterTest(unittest.TestCase):
         self,
         *,
         Qx: int | jax.Array = 0,
-        particle_number: int | None = None,
+        particle_number: int | None = 2,
     ) -> GIPEPS:
         cfg = GIPEPSConfig(
             shape=(2, 2),

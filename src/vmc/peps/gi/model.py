@@ -77,19 +77,23 @@ class GIPEPSConfig:
             tuple(tuple(int(q) for q in row) for row in qx.tolist()),
         )
 
-        if self.particle_number is not None:
+        if _is_z2_hardcore_matter(self):
+            if self.particle_number is None:
+                raise ValueError(
+                    "Z2 hard-core matter requires particle_number; the current sampler is canonical only."
+                )
             n_sites = self.shape[0] * self.shape[1]
             if self.particle_number < 0 or self.particle_number > n_sites:
                 raise ValueError("particle_number must satisfy 0 <= particle_number <= n_sites.")
-            if not _is_z2_hardcore_matter(self):
-                raise NotImplementedError(
-                    "Fixed particle number is currently supported only for Z2 hard-core matter."
-                )
             required_parity = int(np.sum(qx) % 2)
             if self.particle_number % 2 != required_parity:
                 raise ValueError(
                     "particle_number parity must match sum(Qx) mod 2 for Z2 open-boundary GIPEPS."
                 )
+        elif self.particle_number is not None:
+            raise NotImplementedError(
+                "Fixed particle number is currently supported only for Z2 hard-core matter."
+            )
 
         dmax = int(max(self.degeneracy_per_charge))
         if all(d == dmax for d in self.degeneracy_per_charge):

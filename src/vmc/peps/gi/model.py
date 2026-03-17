@@ -63,7 +63,7 @@ class GIPEPSConfig:
     charge_of_site: tuple[int, ...]
     particle_number: int | None = None
     dtype: Any = jnp.complex128
-    mask_per_charge: jax.Array | None = field(init=False, repr=False, compare=False)
+    mask_per_charge: Any = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         qx = np.asarray(self.Qx, dtype=np.int32) % self.N
@@ -95,8 +95,10 @@ class GIPEPSConfig:
         if all(d == dmax for d in self.degeneracy_per_charge):
             object.__setattr__(self, "mask_per_charge", None)
             return
-        deg = jnp.asarray(self.degeneracy_per_charge, dtype=jnp.int32)
-        mask = jnp.arange(dmax) < deg[:, None]
+        mask = tuple(
+            tuple(i < d for i in range(dmax))
+            for d in self.degeneracy_per_charge
+        )
         object.__setattr__(self, "mask_per_charge", mask)
 
     @property
@@ -449,6 +451,7 @@ def _assemble_site(
     mask_per_charge = config.mask_per_charge
     if mask_per_charge is None:
         return tensor
+    mask_per_charge = jnp.asarray(mask_per_charge, dtype=tensor.dtype)
     mask_u = mask_per_charge[k_u][: tensor.shape[1]]
     mask_d = mask_per_charge[k_d][: tensor.shape[2]]
     mask_l = mask_per_charge[k_l][: tensor.shape[3]]

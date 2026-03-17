@@ -70,7 +70,7 @@ class BlockadePEPSConfig:
     D1: int  # Degeneracy for sector k=1
     phys_dim: int = 2  # Must be 2 for blockade
     dtype: Any = jnp.complex128
-    mask_per_charge: jax.Array | None = field(init=False, repr=False, compare=False)
+    mask_per_charge: Any = field(init=False, repr=False, compare=False)
 
     def __post_init__(self):
         if self.phys_dim != 2:
@@ -79,8 +79,10 @@ class BlockadePEPSConfig:
         if self.D0 == dmax and self.D1 == dmax:
             object.__setattr__(self, "mask_per_charge", None)
             return
-        deg = jnp.asarray((self.D0, self.D1), dtype=jnp.int32)
-        mask = jnp.arange(dmax) < deg[:, None]
+        mask = tuple(
+            tuple(i < d for i in range(dmax))
+            for d in (self.D0, self.D1)
+        )
         object.__setattr__(self, "mask_per_charge", mask)
 
     @property
@@ -197,6 +199,7 @@ def _assemble_site(
     mask_per_charge = peps_config.mask_per_charge
     if mask_per_charge is None:
         return tensor
+    mask_per_charge = jnp.asarray(mask_per_charge, dtype=tensor.dtype)
     mask_u = mask_per_charge[kU][: tensor.shape[1]]
     tensor = tensor * mask_u[None, :, None, None, None]
     mask_d = mask_per_charge[n][: tensor.shape[2]]

@@ -66,7 +66,9 @@ class GIPEPSTest(unittest.TestCase):
         nr = jnp.pad(h_links, ((0, 0), (0, 1)), constant_values=0)
         nu = jnp.pad(v_links, ((1, 0), (0, 0)), constant_values=0)
         nd = jnp.pad(v_links, ((0, 1), (0, 0)), constant_values=0)
-        gauss = (nl + nu - nr - nd + charge - config.Qx) % config.N
+        gauss = (
+            nl + nu - nr - nd + charge - jnp.asarray(config.Qx, dtype=charge.dtype)
+        ) % config.N
         ok = jax.device_get(jnp.all(gauss == 0))
         self.assertTrue(bool(ok))
 

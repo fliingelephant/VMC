@@ -18,6 +18,7 @@ from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from flax import nnx
 
 from vmc.peps.common.contraction import (
@@ -65,12 +66,16 @@ class GIPEPSConfig:
     mask_per_charge: jax.Array | None = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        qx = jnp.asarray(self.Qx, dtype=jnp.int32) % self.N
+        qx = np.asarray(self.Qx, dtype=np.int32) % self.N
         if qx.ndim == 0:
-            qx = jnp.full(self.shape, qx, dtype=jnp.int32)
-        elif qx.shape != self.shape:
+            qx = np.full(self.shape, qx, dtype=np.int32)
+        elif tuple(qx.shape) != self.shape:
             raise ValueError(f"Qx must be a scalar or have shape {self.shape}.")
-        object.__setattr__(self, "Qx", qx)
+        object.__setattr__(
+            self,
+            "Qx",
+            tuple(tuple(int(q) for q in row) for row in qx.tolist()),
+        )
 
         if self.particle_number is not None:
             n_sites = self.shape[0] * self.shape[1]
@@ -80,7 +85,7 @@ class GIPEPSConfig:
                 raise NotImplementedError(
                     "Fixed particle number is currently supported only for Z2 hard-core matter."
                 )
-            required_parity = int(jnp.sum(qx) % 2)
+            required_parity = int(np.sum(qx) % 2)
             if self.particle_number % 2 != required_parity:
                 raise ValueError(
                     "particle_number parity must match sum(Qx) mod 2 for Z2 open-boundary GIPEPS."
@@ -115,7 +120,7 @@ class GIPEPS(nnx.Module):
         self.shape = config.shape
         self.N = int(config.N)
         self.phys_dim = int(config.phys_dim)
-        self.Qx = jnp.asarray(config.Qx, dtype=jnp.int32)
+        self.Qx = config.Qx
         self.particle_number = (
             None if config.particle_number is None else int(config.particle_number)
         )
@@ -127,7 +132,7 @@ class GIPEPS(nnx.Module):
         # NOTE: charge_deg counts physical-state multiplicity per charge; it is
         # unrelated to degeneracy_per_charge (virtual bond-sector dimension).
         # TODO: rename charge_deg to avoid confusion with virtual degeneracy.
-        if self.phys_dim > 1 and bool(jnp.any(self.charge_deg <= 0)):
+        if self.phys_dim > 1 and any(d <= 0 for d in self.charge_deg):
             raise ValueError("charge_of_site must include all charges 0..N-1.")
         self.dmax = config.dmax
         self.dtype = config.dtype
@@ -220,17 +225,17 @@ class GIPEPS(nnx.Module):
 def _build_charge_index_map(
     charge_of_site: tuple[int, ...],
     N: int,
-) -> tuple[jax.Array, jax.Array]:
-    charges = jnp.asarray(charge_of_site, dtype=jnp.int32) % N
-    charge_deg = jnp.bincount(charges, length=N)
-    max_deg = int(jnp.max(charge_deg))
-    padded = jnp.full((N, max_deg), -1, dtype=jnp.int32)
-
-    def fill_charge(c, buf):
-        idx = jnp.where(charges == c, size=max_deg, fill_value=-1)[0].astype(jnp.int32)
-        return buf.at[c].set(idx)
-
-    charge_to_indices = jax.lax.fori_loop(0, N, lambda c, buf: fill_charge(c, buf), padded)
+) -> tuple[tuple[tuple[int, ...], ...], tuple[int, ...]]:
+    charges = tuple(int(charge) % N for charge in charge_of_site)
+    charge_deg = tuple(sum(charge == c for charge in charges) for c in range(N))
+    max_deg = max(charge_deg, default=0)
+    charge_to_indices = tuple(
+        tuple(
+            [idx for idx, charge in enumerate(charges) if charge == c]
+            + [-1] * (max_deg - charge_deg[c])
+        )
+        for c in range(N)
+    )
     return charge_to_indices, charge_deg
 
 
@@ -297,9 +302,10 @@ def _flip_path_masks(
 
 def _single_z2_hardcore_configuration_with_particles(
     key: jax.Array,
-    Qx: jax.Array,
+    Qx: Any,
     particle_number: int,
 ) -> jax.Array:
+    Qx = jnp.asarray(Qx, dtype=jnp.int32)
     n_rows, n_cols = Qx.shape
     n_sites = n_rows * n_cols
     n_pairs_max = (n_sites + 1) // 2
@@ -333,16 +339,22 @@ def _single_z2_hardcore_configuration_with_particles(
     return GIPEPS.flatten_sample(sites, h_links, v_links)
 
 
-@functools.partial(jax.jit, static_argnames=("n_rows", "n_cols", "N"))
+@functools.partial(
+    jax.jit,
+    static_argnames=("n_rows", "n_cols", "N", "Qx", "charge_to_indices", "charge_deg"),
+)
 def _single_physical_configuration(
     key: jax.Array,
     n_rows: int,
     n_cols: int,
     N: int,
-    Qx: jax.Array,
-    charge_to_indices: jax.Array,
-    charge_deg: jax.Array,
+    Qx: Any,
+    charge_to_indices: Any,
+    charge_deg: Any,
 ) -> jax.Array:
+    Qx = jnp.asarray(Qx, dtype=jnp.int32)
+    charge_to_indices = jnp.asarray(charge_to_indices, dtype=jnp.int32)
+    charge_deg = jnp.asarray(charge_deg, dtype=jnp.int32)
     field_key, site_key = jax.random.split(key)
     h_links, v_links = _random_plaquette_background(field_key, n_rows, n_cols)
     h_links = h_links % N
@@ -955,6 +967,8 @@ def _horizontal_link_sweep_row(
     """Sweep horizontal links in a single row using direct einsum."""
     n_cols = config.shape[1]
     n = jnp.asarray(config.N, dtype=jnp.int32)
+    charge_to_indices = jnp.asarray(charge_to_indices, dtype=jnp.int32)
+    charge_deg = jnp.asarray(charge_deg, dtype=jnp.int32)
     dtype = row_mpo[0].dtype
     right_envs = _compute_right_envs(top_env, row_mpo, bottom_env, dtype)
     left_env = jnp.ones((1, 1, 1), dtype=dtype)
@@ -1042,6 +1056,8 @@ def _vertical_link_sweep_row_pair(
     """Sweep vertical links in a row pair using direct einsum."""
     n_cols = config.shape[1]
     n = jnp.asarray(config.N, dtype=jnp.int32)
+    charge_to_indices = jnp.asarray(charge_to_indices, dtype=jnp.int32)
+    charge_deg = jnp.asarray(charge_deg, dtype=jnp.int32)
     dtype = row_mpo0[0].dtype
     right_envs = _compute_right_envs_2row(top_env, row_mpo0, row_mpo1, bottom_env, dtype)
     left_env = jnp.ones((1, 1, 1, 1), dtype=dtype)

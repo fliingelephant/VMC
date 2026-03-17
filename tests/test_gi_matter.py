@@ -51,7 +51,7 @@ class GIMatterTest(unittest.TestCase):
         nu = jnp.pad(v_links, ((1, 0), (0, 0)), constant_values=0)
         nd = jnp.pad(v_links, ((0, 1), (0, 0)), constant_values=0)
         charge = jnp.asarray(cfg.charge_of_site, dtype=sites.dtype)[sites]
-        valid = (nl + nd - nu - nr + charge) % n == cfg.Qx
+        valid = (nl + nd - nu - nr + charge) % n == jnp.asarray(cfg.Qx, dtype=n.dtype)
         self.assertTrue(bool(jax.device_get(jnp.all(valid))))
 
     def test_fixed_particle_number_initialization_and_transition(self) -> None:

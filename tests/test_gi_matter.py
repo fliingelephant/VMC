@@ -113,7 +113,9 @@ class GIMatterTest(unittest.TestCase):
         eff_tensors = assemble_tensors(tensors, h_links, v_links, cfg)
         amp, top_envs = _forward_with_cache(eff_tensors, sites, cfg.shape, model.strategy)
 
-        _, coeff_structure = merge_operators((operator,), cfg.shape, eval_span=type(model).eval_span)
+        terms, coeff_structure = merge_operators(
+            (operator,), cfg.shape, eval_span=type(model).eval_span
+        )
         env_grads, energies, _ = estimate(
             tensors,
             sample,
@@ -121,7 +123,7 @@ class GIMatterTest(unittest.TestCase):
             cfg,
             model.strategy,
             top_envs,
-            terms=merge_operators((operator,), cfg.shape, eval_span=type(model).eval_span)[0],
+            terms=terms,
             coeffs=coeff_structure.build_coeffs(0.0),
         )
         del env_grads
@@ -153,7 +155,9 @@ class GIMatterTest(unittest.TestCase):
         eff_tensors = assemble_tensors(tensors, h_links, v_links, cfg)
         amp, top_envs = _forward_with_cache(eff_tensors, sites, cfg.shape, model.strategy)
 
-        _, coeff_structure = merge_operators((operator,), cfg.shape, eval_span=type(model).eval_span)
+        terms, coeff_structure = merge_operators(
+            (operator,), cfg.shape, eval_span=type(model).eval_span
+        )
         env_grads, energies, _ = estimate(
             tensors,
             sample,
@@ -161,7 +165,7 @@ class GIMatterTest(unittest.TestCase):
             cfg,
             model.strategy,
             top_envs,
-            terms=merge_operators((operator,), cfg.shape, eval_span=type(model).eval_span)[0],
+            terms=terms,
             coeffs=coeff_structure.build_coeffs(0.0),
         )
         del env_grads

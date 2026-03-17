@@ -844,8 +844,11 @@ def estimate(
             col_terms: tuple,
         ) -> tuple[jax.Array, list[jax.Array] | None]:
             right_envs = _compute_right_envs(top_env, row_mpo, bottom_env, dtype)
-            has_terms = any(col_terms[c] for c in range(n_cols))
-            if has_terms:
+            if any(
+                not isinstance(term, HorizontalMatterHoppingTerm)
+                for terms_at_col in col_terms
+                for term, _contribs in terms_at_col
+            ):
                 eff_row_acc = [
                     _assemble_site(tensors, h_links, v_links, config, row, c, mask_per_charge)
                     for c in range(n_cols)
@@ -889,13 +892,12 @@ def estimate(
             right_envs_2row = _compute_right_envs_2row(
                 top_env, row_mpo, row_mpo_next, bottom_env_next, dtype
             )
-            has_vertical = any(
-                isinstance(term, (VerticalTwoSiteOperator, VerticalMatterHoppingTerm))
+            eff_row_next = None
+            if any(
+                not isinstance(term, (PlaquetteOperator, VerticalMatterHoppingTerm))
                 for terms_at_col in col_terms
                 for term, _contribs in terms_at_col
-            )
-            eff_row_next = None
-            if has_vertical:
+            ):
                 if eff_row_acc is None:
                     eff_row_acc = [
                         _assemble_site(tensors, h_links, v_links, config, row, c, mask_per_charge)
@@ -1184,18 +1186,35 @@ def _horizontal_hardcore_hop_sweep_row(
 ) -> tuple[jax.Array, tuple, jax.Array, jax.Array]:
     """Sweep number-conserving Z2 hard-core hops on a row."""
     n_cols = config.shape[1]
+    if n_cols <= 1:
+        return key, row_mpo, sites, h_links
     dtype = row_mpo[0].dtype
     right_envs = _compute_right_envs(top_env, row_mpo, bottom_env, dtype)
+    mpo = list(row_mpo)
     left_env = jnp.ones((1, 1, 1), dtype=dtype)
+    amp_cur = jnp.einsum(
+        "ace,aub,cduv,evf,bgh,digw,fwj,hij->",
+        left_env, top_env[0], mpo[0], bottom_env[0],
+        top_env[1], mpo[1], bottom_env[1], right_envs[1],
+        optimize=[(0, 1), (0, 6), (0, 5), (0, 3), (1, 2), (1, 2), (0, 1)],
+    )
 
     for c in range(n_cols - 1):
-        amp_cur = jnp.einsum(
-            "ace,aub,cduv,evf,bgh,digw,fwj,hij->",
-            left_env, top_env[c], row_mpo[c], bottom_env[c],
-            top_env[c + 1], row_mpo[c + 1], bottom_env[c + 1], right_envs[c + 1],
-            optimize=[(0, 1), (0, 6), (0, 5), (0, 3), (1, 2), (1, 2), (0, 1)],
-        )
         allowed = sites[r, c] != sites[r, c + 1]
+        mpo_c = mpo[c]
+        mpo_cp1 = mpo[c + 1]
+        right_env = right_envs[c + 1]
+
+        def keep(_):
+            return (
+                key,
+                amp_cur,
+                _update_left_env_1row(left_env, top_env[c], mpo_c, bottom_env[c]),
+                mpo_c,
+                mpo_cp1,
+                sites,
+                h_links,
+            )
 
         def propose(_):
             sites_prop, h_prop = _horizontal_hardcore_hop(sites, h_links, r, c)
@@ -1203,39 +1222,50 @@ def _horizontal_hardcore_hop_sweep_row(
             eff1 = _assemble_site(tensors, h_prop, v_links, config, r, c + 1)
             mpo0 = jnp.transpose(eff0[sites_prop[r, c]], (2, 3, 0, 1))
             mpo1 = jnp.transpose(eff1[sites_prop[r, c + 1]], (2, 3, 0, 1))
+            prefix_prop = _update_left_env_1row(
+                left_env, top_env[c], mpo0, bottom_env[c]
+            )
             amp_prop = jnp.einsum(
-                "ace,aub,cduv,evf,bgh,digw,fwj,hij->",
-                left_env, top_env[c], mpo0, bottom_env[c],
-                top_env[c + 1], mpo1, bottom_env[c + 1], right_envs[c + 1],
-                optimize=[(0, 1), (0, 6), (0, 5), (0, 3), (1, 2), (1, 2), (0, 1)],
+                "bdf,bgh,digw,fwj,hij->",
+                prefix_prop, top_env[c + 1], mpo1, bottom_env[c + 1], right_env,
+                optimize=[(0, 1), (0, 3), (0, 2), (0, 1)],
             )
             key_next, accept = _metropolis_hastings_accept(
                 key,
                 jnp.abs(amp_cur) ** 2,
                 jnp.abs(amp_prop) ** 2,
             )
-            return (
-                key_next,
-                jnp.where(accept, mpo0, row_mpo[c]),
-                jnp.where(accept, mpo1, row_mpo[c + 1]),
-                jnp.where(accept, sites_prop, sites),
-                jnp.where(accept, h_prop, h_links),
+            return jax.lax.cond(
+                accept,
+                lambda _: (
+                    key_next,
+                    amp_prop,
+                    prefix_prop,
+                    mpo0,
+                    mpo1,
+                    sites_prop,
+                    h_prop,
+                ),
+                lambda _: (
+                    key_next,
+                    amp_cur,
+                    _update_left_env_1row(left_env, top_env[c], mpo_c, bottom_env[c]),
+                    mpo_c,
+                    mpo_cp1,
+                    sites,
+                    h_links,
+                ),
+                operand=None,
             )
 
-        key, mpo_c, mpo_cp1, sites, h_links = jax.lax.cond(
+        key, amp_cur, left_env, mpo[c], mpo[c + 1], sites, h_links = jax.lax.cond(
             allowed,
             propose,
-            lambda _: (key, row_mpo[c], row_mpo[c + 1], sites, h_links),
+            keep,
             operand=None,
         )
 
-        row_mpo_list = list(row_mpo)
-        row_mpo_list[c] = mpo_c
-        row_mpo_list[c + 1] = mpo_cp1
-        row_mpo = tuple(row_mpo_list)
-        left_env = _update_left_env_1row(left_env, top_env[c], row_mpo[c], bottom_env[c])
-
-    return key, row_mpo, sites, h_links
+    return key, tuple(mpo), sites, h_links
 
 
 def _vertical_hardcore_hop_sweep_row_pair(
@@ -1255,13 +1285,29 @@ def _vertical_hardcore_hop_sweep_row_pair(
     n_cols = config.shape[1]
     dtype = row_mpo0[0].dtype
     right_envs = _compute_right_envs_2row(top_env, row_mpo0, row_mpo1, bottom_env, dtype)
+    mpo0 = list(row_mpo0)
+    mpo1 = list(row_mpo1)
     left_env = jnp.ones((1, 1, 1, 1), dtype=dtype)
+    amp_cur = _contract_2row_1col(
+        left_env, top_env[0], mpo0[0], mpo1[0], bottom_env[0], right_envs[0],
+    )
 
     for c in range(n_cols):
-        amp_cur = _contract_2row_1col(
-            left_env, top_env[c], row_mpo0[c], row_mpo1[c], bottom_env[c], right_envs[c],
-        )
         allowed = sites[r, c] != sites[r + 1, c]
+        mpo0_c = mpo0[c]
+        mpo1_c = mpo1[c]
+        right_env = right_envs[c]
+
+        def keep(_):
+            return (
+                key,
+                amp_cur,
+                _update_left_env_2row(left_env, top_env[c], mpo0_c, mpo1_c, bottom_env[c]),
+                mpo0_c,
+                mpo1_c,
+                sites,
+                v_links,
+            )
 
         def propose(_):
             sites_prop, v_prop = _vertical_hardcore_hop(sites, v_links, r, c)
@@ -1269,38 +1315,51 @@ def _vertical_hardcore_hop_sweep_row_pair(
             eff1 = _assemble_site(tensors, h_links, v_prop, config, r + 1, c)
             mpo0_prop = jnp.transpose(eff0[sites_prop[r, c]], (2, 3, 0, 1))
             mpo1_prop = jnp.transpose(eff1[sites_prop[r + 1, c]], (2, 3, 0, 1))
-            amp_prop = _contract_2row_1col(
-                left_env, top_env[c], mpo0_prop, mpo1_prop, bottom_env[c], right_envs[c],
+            prefix_prop = _update_left_env_2row(
+                left_env, top_env[c], mpo0_prop, mpo1_prop, bottom_env[c]
+            )
+            amp_prop = jnp.einsum(
+                "bryf,bryf->",
+                prefix_prop,
+                right_env,
+                optimize=[(0, 1)],
             )
             key_next, accept = _metropolis_hastings_accept(
                 key,
                 jnp.abs(amp_cur) ** 2,
                 jnp.abs(amp_prop) ** 2,
             )
-            return (
-                key_next,
-                jnp.where(accept, mpo0_prop, row_mpo0[c]),
-                jnp.where(accept, mpo1_prop, row_mpo1[c]),
-                jnp.where(accept, sites_prop, sites),
-                jnp.where(accept, v_prop, v_links),
+            return jax.lax.cond(
+                accept,
+                lambda _: (
+                    key_next,
+                    amp_prop,
+                    prefix_prop,
+                    mpo0_prop,
+                    mpo1_prop,
+                    sites_prop,
+                    v_prop,
+                ),
+                lambda _: (
+                    key_next,
+                    amp_cur,
+                    _update_left_env_2row(left_env, top_env[c], mpo0_c, mpo1_c, bottom_env[c]),
+                    mpo0_c,
+                    mpo1_c,
+                    sites,
+                    v_links,
+                ),
+                operand=None,
             )
 
-        key, mpo0_c, mpo1_c, sites, v_links = jax.lax.cond(
+        key, amp_cur, left_env, mpo0[c], mpo1[c], sites, v_links = jax.lax.cond(
             allowed,
             propose,
-            lambda _: (key, row_mpo0[c], row_mpo1[c], sites, v_links),
+            keep,
             operand=None,
         )
 
-        row_mpo0_list = list(row_mpo0)
-        row_mpo1_list = list(row_mpo1)
-        row_mpo0_list[c] = mpo0_c
-        row_mpo1_list[c] = mpo1_c
-        row_mpo0 = tuple(row_mpo0_list)
-        row_mpo1 = tuple(row_mpo1_list)
-        left_env = _update_left_env_2row(left_env, top_env[c], row_mpo0[c], row_mpo1[c], bottom_env[c])
-
-    return key, row_mpo0, row_mpo1, sites, v_links
+    return key, tuple(mpo0), tuple(mpo1), sites, v_links
 
 
 def _compute_bottom_envs(

@@ -343,19 +343,10 @@ def _single_physical_configuration(
     charge_to_indices: jax.Array,
     charge_deg: jax.Array,
 ) -> jax.Array:
-    h_links = jnp.zeros((n_rows, n_cols - 1), dtype=jnp.int32)
-    v_links = jnp.zeros((n_rows - 1, n_cols), dtype=jnp.int32)
-    key, site_key = jax.random.split(key)
-    if n_rows > 1 and n_cols > 1:
-        deltas = jax.random.randint(
-            key, (n_rows - 1, n_cols - 1), 0, N, dtype=jnp.int32
-        )
-        h_links = h_links.at[: n_rows - 1, :].add(deltas)
-        h_links = h_links.at[1:, :].add(-deltas)
-        v_links = v_links.at[:, : n_cols - 1].add(deltas)
-        v_links = v_links.at[:, 1:].add(-deltas)
-        h_links = h_links % N
-        v_links = v_links % N
+    field_key, site_key = jax.random.split(key)
+    h_links, v_links = _random_plaquette_background(field_key, n_rows, n_cols)
+    h_links = h_links % N
+    v_links = v_links % N
     nl = jnp.pad(h_links, ((0, 0), (1, 0)), constant_values=0)
     nr = jnp.pad(h_links, ((0, 0), (0, 1)), constant_values=0)
     nu = jnp.pad(v_links, ((1, 0), (0, 0)), constant_values=0)
@@ -595,7 +586,7 @@ class GIRowEnvConfig(NamedTuple):
 
     h_links: jax.Array
     v_links: jax.Array
-    config: Any
+    peps_config: Any
 
 
 @_eval_term.dispatch
@@ -637,12 +628,12 @@ def _eval_term(
 
     def eval_hop(_):
         sites_prop, h_prop = _horizontal_hardcore_hop(spins, envs.config.h_links, row, col)
-        eff0 = _assemble_site(tensors, h_prop, envs.config.v_links, envs.config.config, row, col)
+        eff0 = _assemble_site(tensors, h_prop, envs.config.v_links, envs.config.peps_config, row, col)
         eff1 = _assemble_site(
             tensors,
             h_prop,
             envs.config.v_links,
-            envs.config.config,
+            envs.config.peps_config,
             row,
             col + 1,
         )
@@ -1135,41 +1126,44 @@ def _horizontal_hardcore_hop_sweep_row(
             top_env[c + 1], row_mpo[c + 1], bottom_env[c + 1], right_envs[c + 1],
             optimize=[(0, 1), (0, 6), (0, 5), (0, 3), (1, 2), (1, 2), (0, 1)],
         )
-        sites_prop, h_prop = _horizontal_hardcore_hop(sites, h_links, r, c)
-        eff0 = _assemble_site(tensors, h_prop, v_links, config, r, c)
-        eff1 = _assemble_site(tensors, h_prop, v_links, config, r, c + 1)
-        mpo0 = jnp.transpose(eff0[sites_prop[r, c]], (2, 3, 0, 1))
-        mpo1 = jnp.transpose(eff1[sites_prop[r, c + 1]], (2, 3, 0, 1))
-
         allowed = sites[r, c] != sites[r, c + 1]
 
-        def accepted_proposal(_):
+        def propose(_):
+            sites_prop, h_prop = _horizontal_hardcore_hop(sites, h_links, r, c)
+            eff0 = _assemble_site(tensors, h_prop, v_links, config, r, c)
+            eff1 = _assemble_site(tensors, h_prop, v_links, config, r, c + 1)
+            mpo0 = jnp.transpose(eff0[sites_prop[r, c]], (2, 3, 0, 1))
+            mpo1 = jnp.transpose(eff1[sites_prop[r, c + 1]], (2, 3, 0, 1))
             amp_prop = jnp.einsum(
                 "ace,aub,cduv,evf,bgh,digw,fwj,hij->",
                 left_env, top_env[c], mpo0, bottom_env[c],
                 top_env[c + 1], mpo1, bottom_env[c + 1], right_envs[c + 1],
                 optimize=[(0, 1), (0, 6), (0, 5), (0, 3), (1, 2), (1, 2), (0, 1)],
             )
-            return _metropolis_hastings_accept(
+            key_next, accept = _metropolis_hastings_accept(
                 key,
                 jnp.abs(amp_cur) ** 2,
                 jnp.abs(amp_prop) ** 2,
-            ) + (amp_prop,)
+            )
+            return (
+                key_next,
+                jnp.where(accept, mpo0, row_mpo[c]),
+                jnp.where(accept, mpo1, row_mpo[c + 1]),
+                jnp.where(accept, sites_prop, sites),
+                jnp.where(accept, h_prop, h_links),
+            )
 
-        key_next, accept, amp_prop = jax.lax.cond(
+        key, mpo_c, mpo_cp1, sites, h_links = jax.lax.cond(
             allowed,
-            accepted_proposal,
-            lambda _: (key, jnp.asarray(False), amp_cur),
+            propose,
+            lambda _: (key, row_mpo[c], row_mpo[c + 1], sites, h_links),
             operand=None,
         )
-        key = key_next
 
         row_mpo_list = list(row_mpo)
-        row_mpo_list[c] = jnp.where(accept, mpo0, row_mpo[c])
-        row_mpo_list[c + 1] = jnp.where(accept, mpo1, row_mpo[c + 1])
+        row_mpo_list[c] = mpo_c
+        row_mpo_list[c + 1] = mpo_cp1
         row_mpo = tuple(row_mpo_list)
-        h_links = jnp.where(accept, h_prop, h_links)
-        sites = jnp.where(accept, sites_prop, sites)
         left_env = _update_left_env_1row(left_env, top_env[c], row_mpo[c], bottom_env[c])
 
     return key, row_mpo, sites, h_links
@@ -1198,40 +1192,43 @@ def _vertical_hardcore_hop_sweep_row_pair(
         amp_cur = _contract_2row_1col(
             left_env, top_env[c], row_mpo0[c], row_mpo1[c], bottom_env[c], right_envs[c],
         )
-        sites_prop, v_prop = _vertical_hardcore_hop(sites, v_links, r, c)
-        eff0 = _assemble_site(tensors, h_links, v_prop, config, r, c)
-        eff1 = _assemble_site(tensors, h_links, v_prop, config, r + 1, c)
-        mpo0_prop = jnp.transpose(eff0[sites_prop[r, c]], (2, 3, 0, 1))
-        mpo1_prop = jnp.transpose(eff1[sites_prop[r + 1, c]], (2, 3, 0, 1))
-
         allowed = sites[r, c] != sites[r + 1, c]
 
-        def accepted_proposal(_):
+        def propose(_):
+            sites_prop, v_prop = _vertical_hardcore_hop(sites, v_links, r, c)
+            eff0 = _assemble_site(tensors, h_links, v_prop, config, r, c)
+            eff1 = _assemble_site(tensors, h_links, v_prop, config, r + 1, c)
+            mpo0_prop = jnp.transpose(eff0[sites_prop[r, c]], (2, 3, 0, 1))
+            mpo1_prop = jnp.transpose(eff1[sites_prop[r + 1, c]], (2, 3, 0, 1))
             amp_prop = _contract_2row_1col(
                 left_env, top_env[c], mpo0_prop, mpo1_prop, bottom_env[c], right_envs[c],
             )
-            return _metropolis_hastings_accept(
+            key_next, accept = _metropolis_hastings_accept(
                 key,
                 jnp.abs(amp_cur) ** 2,
                 jnp.abs(amp_prop) ** 2,
-            ) + (amp_prop,)
+            )
+            return (
+                key_next,
+                jnp.where(accept, mpo0_prop, row_mpo0[c]),
+                jnp.where(accept, mpo1_prop, row_mpo1[c]),
+                jnp.where(accept, sites_prop, sites),
+                jnp.where(accept, v_prop, v_links),
+            )
 
-        key_next, accept, amp_prop = jax.lax.cond(
+        key, mpo0_c, mpo1_c, sites, v_links = jax.lax.cond(
             allowed,
-            accepted_proposal,
-            lambda _: (key, jnp.asarray(False), amp_cur),
+            propose,
+            lambda _: (key, row_mpo0[c], row_mpo1[c], sites, v_links),
             operand=None,
         )
-        key = key_next
 
         row_mpo0_list = list(row_mpo0)
         row_mpo1_list = list(row_mpo1)
-        row_mpo0_list[c] = jnp.where(accept, mpo0_prop, row_mpo0[c])
-        row_mpo1_list[c] = jnp.where(accept, mpo1_prop, row_mpo1[c])
+        row_mpo0_list[c] = mpo0_c
+        row_mpo1_list[c] = mpo1_c
         row_mpo0 = tuple(row_mpo0_list)
         row_mpo1 = tuple(row_mpo1_list)
-        v_links = jnp.where(accept, v_prop, v_links)
-        sites = jnp.where(accept, sites_prop, sites)
         left_env = _update_left_env_2row(left_env, top_env[c], row_mpo0[c], row_mpo1[c], bottom_env[c])
 
     return key, row_mpo0, row_mpo1, sites, v_links

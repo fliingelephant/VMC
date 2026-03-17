@@ -28,8 +28,13 @@ def build_mc_kernels(
     config = model.config
     strategy = model.strategy
     charge_of_site = jnp.asarray(model.charge_of_site, dtype=jnp.int32)
-    charge_to_indices = model.charge_to_indices
-    charge_deg = model.charge_deg
+    charge_to_indices = jnp.asarray(model.charge_to_indices, dtype=jnp.int32)
+    charge_deg = jnp.asarray(model.charge_deg, dtype=jnp.int32)
+    mask_per_charge = (
+        None
+        if config.mask_per_charge is None
+        else jnp.asarray(config.mask_per_charge, dtype=jnp.bool_)
+    )
     nc_per_site = tuple(sd // model.phys_dim for sd in model.sliced_dims)
     all_operators = (operator,) + observables
     bucketed_terms, coeff_structure = merge_operators(
@@ -52,7 +57,7 @@ def build_mc_kernels(
             for row in range(n_rows - 1, -1, -1):
                 envs[row] = env
                 row_mpo = gi_model._build_row_mpo_gi(
-                    tensors, sites, h_links, v_links, config, row, n_cols
+                    tensors, sites, h_links, v_links, config, row, n_cols, mask_per_charge
                 )
                 env = gi_model._apply_mpo_from_below(env, row_mpo, strategy)
             return tuple(envs)
@@ -83,6 +88,7 @@ def build_mc_kernels(
             shape,
             config,
             strategy,
+            mask_per_charge,
             charge_of_site,
             charge_to_indices,
             charge_deg,
@@ -105,6 +111,7 @@ def build_mc_kernels(
             config,
             strategy,
             context.top_envs,
+            mask_per_charge,
             terms=bucketed_terms,
             coeffs=context.coeffs,
         )

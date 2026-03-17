@@ -179,6 +179,7 @@ class BlockadePEPS(nnx.Module):
 def _assemble_site(
     tensors: list[list[jax.Array]],
     peps_config: BlockadePEPSConfig,
+    mask_per_charge: jax.Array | None,
     r: int,
     c: int,
     n: jax.Array,
@@ -196,10 +197,8 @@ def _assemble_site(
     cfg_idx = jnp.where(n == 0, cfg_idx_n0, 0)
 
     tensor = tensors[r][c][:, cfg_idx, :, :, :, :]
-    mask_per_charge = peps_config.mask_per_charge
     if mask_per_charge is None:
         return tensor
-    mask_per_charge = jnp.asarray(mask_per_charge, dtype=tensor.dtype)
     mask_u = mask_per_charge[kU][: tensor.shape[1]]
     tensor = tensor * mask_u[None, :, None, None, None]
     mask_d = mask_per_charge[n][: tensor.shape[2]]
@@ -213,6 +212,7 @@ def _assemble_site(
 def _assemble_mpo_site(
     tensors: list[list[jax.Array]],
     peps_config: BlockadePEPSConfig,
+    mask_per_charge: jax.Array | None,
     config: jax.Array,
     r: int,
     c: int,
@@ -235,6 +235,7 @@ def _assemble_mpo_site(
         _assemble_site(
             tensors,
             peps_config,
+            mask_per_charge,
             r,
             c,
             n_val,
@@ -320,6 +321,7 @@ def _build_row_mpo(
     tensors: list[list[jax.Array]],
     config: jax.Array,
     peps_config: BlockadePEPSConfig,
+    mask_per_charge: jax.Array | None,
     row: int,
 ) -> tuple:
     """Build row-MPO for PEPS contraction."""
@@ -328,6 +330,7 @@ def _build_row_mpo(
         _assemble_mpo_site(
             tensors,
             peps_config,
+            mask_per_charge,
             config,
             row,
             c,
@@ -337,13 +340,17 @@ def _build_row_mpo(
 
 
 def _blockade_flip_amplitude_1row(
-    tensors, peps_config, config, row, c, n_flip, n_cols,
+    tensors, peps_config, mask_per_charge, config, row, c, n_flip, n_cols,
     left_env, top_env, bottom_env, right_envs, dtype,
 ):
     """Compute 1-row flipped amplitude for blockade OneSiteOperator at (row, c)."""
-    mpo_c_flip = _assemble_mpo_site(tensors, peps_config, config, row, c, n=n_flip)
+    mpo_c_flip = _assemble_mpo_site(
+        tensors, peps_config, mask_per_charge, config, row, c, n=n_flip
+    )
     if c + 1 < n_cols:
-        mpo_c1_flip = _assemble_mpo_site(tensors, peps_config, config, row, c + 1, k_l=n_flip)
+        mpo_c1_flip = _assemble_mpo_site(
+            tensors, peps_config, mask_per_charge, config, row, c + 1, k_l=n_flip
+        )
         return _contract_1row_2col(
             left_env, top_env, mpo_c_flip, mpo_c1_flip, bottom_env, right_envs[c + 1], c,
         )
@@ -353,14 +360,20 @@ def _blockade_flip_amplitude_1row(
 
 
 def _blockade_flip_amplitude_2row(
-    tensors, peps_config, config, row, c, n_flip, n_cols,
+    tensors, peps_config, mask_per_charge, config, row, c, n_flip, n_cols,
     left_env_2row, top_env, mpo_next, bottom_env_pair, right_envs_2row, dtype,
 ):
     """Compute 2-row flipped amplitude for blockade OneSiteOperator at (row, c)."""
-    mpo0_c_flip = _assemble_mpo_site(tensors, peps_config, config, row, c, n=n_flip)
-    mpo1_c_flip = _assemble_mpo_site(tensors, peps_config, config, row + 1, c, k_u=n_flip)
+    mpo0_c_flip = _assemble_mpo_site(
+        tensors, peps_config, mask_per_charge, config, row, c, n=n_flip
+    )
+    mpo1_c_flip = _assemble_mpo_site(
+        tensors, peps_config, mask_per_charge, config, row + 1, c, k_u=n_flip
+    )
     if c + 1 < n_cols:
-        mpo0_c1_flip = _assemble_mpo_site(tensors, peps_config, config, row, c + 1, k_l=n_flip)
+        mpo0_c1_flip = _assemble_mpo_site(
+            tensors, peps_config, mask_per_charge, config, row, c + 1, k_l=n_flip
+        )
         return _contract_2row_2col(
             left_env_2row, top_env, mpo0_c_flip, mpo1_c_flip,
             mpo0_c1_flip, mpo_next[c + 1], bottom_env_pair, right_envs_2row[c + 1], c,
@@ -390,6 +403,8 @@ def _eval_blockade_term(
     col: int,
     sample: jax.Array,
     phys_dim: int,
+    peps_config: BlockadePEPSConfig,
+    mask_per_charge: jax.Array | None,
 ) -> jax.Array:
     del phys_dim
     n_rows = sample.shape[0]
@@ -401,7 +416,8 @@ def _eval_blockade_term(
         _flip_allowed(sample, n_rows, n_cols, row, col, n_flip),
         lambda _: _blockade_flip_amplitude_1row(
             tensors,
-            envs.config,
+            peps_config,
+            mask_per_charge,
             sample,
             row,
             col,
@@ -428,6 +444,8 @@ def _eval_blockade_term(
     col: int,
     sample: jax.Array,
     phys_dim: int,
+    peps_config: BlockadePEPSConfig,
+    mask_per_charge: jax.Array | None,
 ) -> jax.Array:
     del phys_dim
     n_rows = sample.shape[0]
@@ -439,7 +457,8 @@ def _eval_blockade_term(
         _flip_allowed(sample, n_rows, n_cols, row, col, n_flip),
         lambda _: _blockade_flip_amplitude_2row(
             tensors,
-            envs.config,
+            peps_config,
+            mask_per_charge,
             sample,
             row,
             col,
@@ -463,6 +482,7 @@ def transition(
     key: jax.Array,
     envs: list[tuple],
     peps_config: BlockadePEPSConfig,
+    mask_per_charge: jax.Array | None,
     strategy: ContractionStrategy,
 ) -> tuple[jax.Array, jax.Array, jax.Array, tuple]:
     """2-row Metropolis sweep for BlockadePEPS.
@@ -480,16 +500,16 @@ def transition(
     if n_rows == 1:
         top_envs_cache[0] = top_env
         # Single row: standard 1-row sweep
-        row_mpo = _build_row_mpo(tensors, config, peps_config, 0)
+        row_mpo = _build_row_mpo(tensors, config, peps_config, mask_per_charge, 0)
         key, config, row_mpo = _sweep_single_row(
-            key, tensors, config, peps_config, 0, top_env, envs[0], row_mpo
+            key, tensors, config, peps_config, mask_per_charge, 0, top_env, envs[0], row_mpo
         )
         top_env = strategy.apply(top_env, row_mpo)
     else:
         # Multi-row: 2-row sweep over overlapping pairs
         # This sweeps rows 0, 1, ..., n_rows-2 (each row r is swept in pair (r, r+1))
-        row_mpo0 = _build_row_mpo(tensors, config, peps_config, 0)
-        row_mpo1 = _build_row_mpo(tensors, config, peps_config, 1)
+        row_mpo0 = _build_row_mpo(tensors, config, peps_config, mask_per_charge, 0)
+        row_mpo1 = _build_row_mpo(tensors, config, peps_config, mask_per_charge, 1)
         for r in range(n_rows - 1):
             top_envs_cache[r] = top_env
             bottom_env_pair = envs[r + 1] if r + 1 < n_rows else tuple(
@@ -500,6 +520,7 @@ def transition(
                 tensors,
                 config,
                 peps_config,
+                mask_per_charge,
                 r,
                 top_env,
                 bottom_env_pair,
@@ -510,7 +531,7 @@ def transition(
             top_env = strategy.apply(top_env, row_mpo0)
             if r + 2 < n_rows:
                 row_mpo0 = row_mpo1
-                row_mpo1 = _build_row_mpo(tensors, config, peps_config, r + 2)
+                row_mpo1 = _build_row_mpo(tensors, config, peps_config, mask_per_charge, r + 2)
 
         # Sweep the last row (n_rows-1) with single-row sweep
         # This row wasn't swept in the pair loop above
@@ -523,6 +544,7 @@ def transition(
             tensors,
             config,
             peps_config,
+            mask_per_charge,
             n_rows - 1,
             top_env,
             bottom_env_last,
@@ -541,6 +563,7 @@ def _sweep_single_row(
     tensors: list[list[jax.Array]],
     config: jax.Array,
     peps_config: BlockadePEPSConfig,
+    mask_per_charge: jax.Array | None,
     r: int,
     top_env: tuple,
     bottom_env: tuple,
@@ -606,6 +629,7 @@ def _sweep_single_row(
                 mpo_c_flip = _assemble_mpo_site(
                     tensors,
                     peps_config,
+                    mask_per_charge,
                     config,
                     r,
                     c,
@@ -614,6 +638,7 @@ def _sweep_single_row(
                 mpo_c1_flip = _assemble_mpo_site(
                     tensors,
                     peps_config,
+                    mask_per_charge,
                     config,
                     r,
                     c + 1,
@@ -684,6 +709,7 @@ def _sweep_single_row(
                 mpo_c_flip = _assemble_mpo_site(
                     tensors,
                     peps_config,
+                    mask_per_charge,
                     config,
                     r,
                     c,
@@ -742,6 +768,7 @@ def _sweep_row_pair(
     tensors: list[list[jax.Array]],
     config: jax.Array,
     peps_config: BlockadePEPSConfig,
+    mask_per_charge: jax.Array | None,
     r: int,
     top_env: tuple,
     bottom_env: tuple,
@@ -821,6 +848,7 @@ def _sweep_row_pair(
                 mpo0_c_flip = _assemble_mpo_site(
                     tensors,
                     peps_config,
+                    mask_per_charge,
                     config,
                     r,
                     c,
@@ -829,6 +857,7 @@ def _sweep_row_pair(
                 mpo1_c_flip = _assemble_mpo_site(
                     tensors,
                     peps_config,
+                    mask_per_charge,
                     config,
                     r + 1,
                     c,
@@ -837,6 +866,7 @@ def _sweep_row_pair(
                 mpo0_c1_flip = _assemble_mpo_site(
                     tensors,
                     peps_config,
+                    mask_per_charge,
                     config,
                     r,
                     c + 1,
@@ -919,6 +949,7 @@ def _sweep_row_pair(
                 mpo0_c_flip = _assemble_mpo_site(
                     tensors,
                     peps_config,
+                    mask_per_charge,
                     config,
                     r,
                     c,
@@ -927,6 +958,7 @@ def _sweep_row_pair(
                 mpo1_c_flip = _assemble_mpo_site(
                     tensors,
                     peps_config,
+                    mask_per_charge,
                     config,
                     r + 1,
                     c,

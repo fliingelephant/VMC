@@ -25,6 +25,11 @@ def blockade_apply(
     shape = peps_config.shape
     n_rows, n_cols = shape
     n_config = sample.reshape(shape)
+    mask_per_charge = (
+        None
+        if peps_config.mask_per_charge is None
+        else jnp.asarray(peps_config.mask_per_charge, dtype=jnp.bool_)
+    )
     invalid_h = jnp.any(n_config[:, 1:] * n_config[:, :-1])
     invalid_v = jnp.any(n_config[1:, :] * n_config[:-1, :])
     invalid = invalid_h | invalid_v
@@ -35,7 +40,7 @@ def blockade_apply(
         for row in range(n_rows):
             boundary = strategy.apply(
                 boundary,
-                _build_row_mpo(tensors, n_config, peps_config, row),
+                _build_row_mpo(tensors, n_config, peps_config, mask_per_charge, row),
             )
         return _contract_bottom(boundary)
 

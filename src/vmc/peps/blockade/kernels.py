@@ -30,6 +30,11 @@ def build_mc_kernels(
     n_rows, n_cols = shape
     strategy = model.strategy
     nc_per_site = tuple(sd // model.phys_dim for sd in model.sliced_dims)
+    mask_per_charge = (
+        None
+        if peps_config.mask_per_charge is None
+        else jnp.asarray(peps_config.mask_per_charge, dtype=jnp.bool_)
+    )
 
     all_operators = (operator,) + observables
     terms, coeff_structure = merge_operators(
@@ -51,7 +56,9 @@ def build_mc_kernels(
             env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
             for row in range(n_rows - 1, -1, -1):
                 envs[row] = env
-                row_mpo = blockade_model._build_row_mpo(tensors, indices, peps_config, row)
+                row_mpo = blockade_model._build_row_mpo(
+                    tensors, indices, peps_config, mask_per_charge, row
+                )
                 env = _apply_mpo_from_below(env, row_mpo, strategy)
             return tuple(envs)
 
@@ -79,6 +86,7 @@ def build_mc_kernels(
             key,
             cache.bottom_envs,
             peps_config,
+            mask_per_charge,
             strategy,
         )
         return config_state_next, key_next, Context(amp=amp, top_envs=top_envs, coeffs=cache.coeffs)
@@ -95,7 +103,30 @@ def build_mc_kernels(
             sample,
             row,
         ):
-            return blockade_model._build_row_mpo(tensors, sample, peps_config, row)
+            return blockade_model._build_row_mpo(
+                tensors, sample, peps_config, mask_per_charge, row
+            )
+
+        def eval_term(
+            term,
+            envs,
+            tensors,
+            row,
+            col,
+            sample,
+            phys_dim,
+        ):
+            return blockade_model._eval_blockade_term(
+                term,
+                envs,
+                tensors,
+                row,
+                col,
+                sample,
+                phys_dim,
+                peps_config,
+                mask_per_charge,
+            )
 
         env_grads, local_energy, envs_next = _estimate_sweep(
             tensors,
@@ -105,8 +136,7 @@ def build_mc_kernels(
             strategy=strategy,
             terms=terms,
             build_row_mpo=build_row_mpo,
-            eval_term=blockade_model._eval_blockade_term,
-            env_config=peps_config,
+            eval_term=eval_term,
             coeffs=context.coeffs,
             collect_grads=True,
         )

@@ -844,15 +844,19 @@ def estimate(
             col_terms: tuple,
         ) -> tuple[jax.Array, list[jax.Array] | None]:
             right_envs = _compute_right_envs(top_env, row_mpo, bottom_env, dtype)
-            if any(
-                not isinstance(term, HorizontalMatterHoppingTerm)
-                for terms_at_col in col_terms
-                for term, _contribs in terms_at_col
-            ):
-                eff_row_acc = [
-                    _assemble_site(tensors, h_links, v_links, config, row, c, mask_per_charge)
-                    for c in range(n_cols)
-                ]
+            for terms_at_col in col_terms:
+                if any(
+                    not isinstance(term, HorizontalMatterHoppingTerm)
+                    for term, _contribs in terms_at_col
+                ):
+                    eff_row_acc = [
+                        _assemble_site(
+                            tensors, h_links, v_links, config, row, c, mask_per_charge
+                        )
+                        for c in range(n_cols)
+                    ]
+                    break
+            row_env_config = GIRowEnvConfig(h_links, v_links, config, mask_per_charge)
             left_env = jnp.ones((1, 1, 1), dtype=dtype)
             for col in range(n_cols):
                 env_grad = _compute_single_gradient(
@@ -866,7 +870,7 @@ def estimate(
                     bottom_env,
                     env_grad,
                     eff_row_acc,
-                    config=GIRowEnvConfig(h_links, v_links, config, mask_per_charge),
+                    config=row_env_config,
                 )
                 for term, contributions in col_terms[col]:
                     val = _eval_term(
@@ -875,7 +879,9 @@ def estimate(
                     for op_idx, coeff_idx in contributions:
                         coeff = 1.0 if coeffs is None else coeffs[coeff_idx]
                         energies_acc = energies_acc.at[op_idx].add(coeff * val)
-                left_env = _update_left_env_1row(left_env, top_env[col], row_mpo[col], bottom_env[col])
+                left_env = _update_left_env_1row(
+                    left_env, top_env[col], row_mpo[col], bottom_env[col]
+                )
             return energies_acc, eff_row_acc
 
         def _eval_dr2(
@@ -893,20 +899,25 @@ def estimate(
                 top_env, row_mpo, row_mpo_next, bottom_env_next, dtype
             )
             eff_row_next = None
-            if any(
-                not isinstance(term, (PlaquetteOperator, VerticalMatterHoppingTerm))
-                for terms_at_col in col_terms
-                for term, _contribs in terms_at_col
-            ):
-                if eff_row_acc is None:
-                    eff_row_acc = [
-                        _assemble_site(tensors, h_links, v_links, config, row, c, mask_per_charge)
+            for terms_at_col in col_terms:
+                if any(
+                    not isinstance(term, (PlaquetteOperator, VerticalMatterHoppingTerm))
+                    for term, _contribs in terms_at_col
+                ):
+                    if eff_row_acc is None:
+                        eff_row_acc = [
+                            _assemble_site(
+                                tensors, h_links, v_links, config, row, c, mask_per_charge
+                            )
+                            for c in range(n_cols)
+                        ]
+                    eff_row_next = [
+                        _assemble_site(
+                            tensors, h_links, v_links, config, row + 1, c, mask_per_charge
+                        )
                         for c in range(n_cols)
                     ]
-                eff_row_next = [
-                    _assemble_site(tensors, h_links, v_links, config, row + 1, c, mask_per_charge)
-                    for c in range(n_cols)
-                ]
+                    break
             left_env_2row = jnp.ones((1, 1, 1, 1), dtype=dtype)
             for col in range(n_cols):
                 envs = GITwoRowEnvs(
@@ -920,20 +931,25 @@ def estimate(
                     for op_idx, coeff_idx in contributions:
                         coeff = 1.0 if coeffs is None else coeffs[coeff_idx]
                         energies_acc = energies_acc.at[op_idx].add(coeff * val)
-                left_env_2row = _update_left_env_2row(left_env_2row, top_env[col], row_mpo[col], row_mpo_next[col], bottom_env_next[col])
+                left_env_2row = _update_left_env_2row(
+                    left_env_2row,
+                    top_env[col],
+                    row_mpo[col],
+                    row_mpo_next[col],
+                    bottom_env_next[col],
+                )
             return energies_acc, eff_row_acc
 
-        pass_evaluators = {
-            1: _eval_dr1,
-            2: _eval_dr2,
-        }
         for dr, col_terms in row_passes:
-            evaluator = pass_evaluators.get(dr)
-            if evaluator is None:
-                raise NotImplementedError(
-                    f"GI transition evaluation for dr={dr} is not implemented."
-                )
-            energies, eff_row = evaluator(energies, eff_row, col_terms)
+            if dr == 1:
+                energies, eff_row = _eval_dr1(energies, eff_row, col_terms)
+                continue
+            if dr == 2:
+                energies, eff_row = _eval_dr2(energies, eff_row, col_terms)
+                continue
+            raise NotImplementedError(
+                f"GI transition evaluation for dr={dr} is not implemented."
+            )
 
         bottom_env = _apply_mpo_from_below(bottom_env, row_mpo, strategy)
         next_row_mpo = row_mpo
@@ -1182,6 +1198,7 @@ def _horizontal_hardcore_hop_sweep_row(
     top_env: tuple,
     bottom_env: tuple,
     row_mpo: tuple,
+    mask_per_charge: jax.Array | None,
     r: int,
 ) -> tuple[jax.Array, tuple, jax.Array, jax.Array]:
     """Sweep number-conserving Z2 hard-core hops on a row."""
@@ -1218,8 +1235,12 @@ def _horizontal_hardcore_hop_sweep_row(
 
         def propose(_):
             sites_prop, h_prop = _horizontal_hardcore_hop(sites, h_links, r, c)
-            eff0 = _assemble_site(tensors, h_prop, v_links, config, r, c)
-            eff1 = _assemble_site(tensors, h_prop, v_links, config, r, c + 1)
+            eff0 = _assemble_site(
+                tensors, h_prop, v_links, config, r, c, mask_per_charge
+            )
+            eff1 = _assemble_site(
+                tensors, h_prop, v_links, config, r, c + 1, mask_per_charge
+            )
             mpo0 = jnp.transpose(eff0[sites_prop[r, c]], (2, 3, 0, 1))
             mpo1 = jnp.transpose(eff1[sites_prop[r, c + 1]], (2, 3, 0, 1))
             prefix_prop = _update_left_env_1row(
@@ -1279,6 +1300,7 @@ def _vertical_hardcore_hop_sweep_row_pair(
     bottom_env: tuple,
     row_mpo0: tuple,
     row_mpo1: tuple,
+    mask_per_charge: jax.Array | None,
     r: int,
 ) -> tuple[jax.Array, tuple, tuple, jax.Array, jax.Array]:
     """Sweep number-conserving Z2 hard-core hops on a row pair."""
@@ -1311,8 +1333,12 @@ def _vertical_hardcore_hop_sweep_row_pair(
 
         def propose(_):
             sites_prop, v_prop = _vertical_hardcore_hop(sites, v_links, r, c)
-            eff0 = _assemble_site(tensors, h_links, v_prop, config, r, c)
-            eff1 = _assemble_site(tensors, h_links, v_prop, config, r + 1, c)
+            eff0 = _assemble_site(
+                tensors, h_links, v_prop, config, r, c, mask_per_charge
+            )
+            eff1 = _assemble_site(
+                tensors, h_links, v_prop, config, r + 1, c, mask_per_charge
+            )
             mpo0_prop = jnp.transpose(eff0[sites_prop[r, c]], (2, 3, 0, 1))
             mpo1_prop = jnp.transpose(eff1[sites_prop[r + 1, c]], (2, 3, 0, 1))
             prefix_prop = _update_left_env_2row(
@@ -1482,6 +1508,7 @@ def transition(
                 top_env_h,
                 bottom_envs_h[row],
                 row_mpo,
+                mask_per_charge,
                 row,
             )
         else:
@@ -1533,6 +1560,7 @@ def transition(
                 bottom_envs_v[r + 1],
                 row_mpo0,
                 row_mpo1,
+                mask_per_charge,
                 r,
             )
         else:

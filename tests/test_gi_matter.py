@@ -54,6 +54,34 @@ class GIMatterTest(unittest.TestCase):
         valid = (nl + nd - nu - nr + charge) % n == jnp.asarray(cfg.Qx, dtype=n.dtype)
         self.assertTrue(bool(jax.device_get(jnp.all(valid))))
 
+    def _local_energy_for_sample(
+        self,
+        model: GIPEPS,
+        operator: GILocalHamiltonian,
+        sites: jax.Array,
+        h_links: jax.Array,
+        v_links: jax.Array,
+    ) -> tuple[jax.Array, jax.Array]:
+        cfg = model.config
+        tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
+        sample = GIPEPS.flatten_sample(sites, h_links, v_links)
+        eff_tensors = assemble_tensors(tensors, h_links, v_links, cfg)
+        amp, top_envs = _forward_with_cache(eff_tensors, sites, cfg.shape, model.strategy)
+        terms, coeff_structure = merge_operators(
+            (operator,), cfg.shape, eval_span=type(model).eval_span
+        )
+        _, energies, _ = estimate(
+            tensors,
+            sample,
+            amp,
+            cfg,
+            model.strategy,
+            top_envs,
+            terms=terms,
+            coeffs=coeff_structure.build_coeffs(0.0),
+        )
+        return amp, energies
+
     def test_fixed_particle_number_initialization_and_transition(self) -> None:
         model = self._make_model(particle_number=2)
         cfg = model.config
@@ -103,30 +131,14 @@ class GIMatterTest(unittest.TestCase):
         cfg = model.config
         term = HorizontalMatterHoppingTerm(row=0, col=0, coeff=0.7)
         operator = GILocalHamiltonian(shape=cfg.shape, terms=(term,))
-        tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
 
         sites = jnp.asarray([[1, 0], [0, 1]], dtype=jnp.int32)
         h_links = jnp.asarray([[0], [1]], dtype=jnp.int32)
         v_links = jnp.asarray([[1, 0]], dtype=jnp.int32)
-        sample = GIPEPS.flatten_sample(sites, h_links, v_links)
-
-        eff_tensors = assemble_tensors(tensors, h_links, v_links, cfg)
-        amp, top_envs = _forward_with_cache(eff_tensors, sites, cfg.shape, model.strategy)
-
-        terms, coeff_structure = merge_operators(
-            (operator,), cfg.shape, eval_span=type(model).eval_span
+        tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
+        amp, energies = self._local_energy_for_sample(
+            model, operator, sites, h_links, v_links
         )
-        env_grads, energies, _ = estimate(
-            tensors,
-            sample,
-            amp,
-            cfg,
-            model.strategy,
-            top_envs,
-            terms=terms,
-            coeffs=coeff_structure.build_coeffs(0.0),
-        )
-        del env_grads
 
         sites_prop = sites.at[0, 0].set(0).at[0, 1].set(1)
         h_prop = h_links.at[0, 0].set(1)
@@ -145,30 +157,14 @@ class GIMatterTest(unittest.TestCase):
         cfg = model.config
         term = VerticalMatterHoppingTerm(row=0, col=0, coeff=-0.3)
         operator = GILocalHamiltonian(shape=cfg.shape, terms=(term,))
-        tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
 
         sites = jnp.asarray([[1, 0], [0, 1]], dtype=jnp.int32)
         h_links = jnp.asarray([[0], [1]], dtype=jnp.int32)
         v_links = jnp.asarray([[1, 0]], dtype=jnp.int32)
-        sample = GIPEPS.flatten_sample(sites, h_links, v_links)
-
-        eff_tensors = assemble_tensors(tensors, h_links, v_links, cfg)
-        amp, top_envs = _forward_with_cache(eff_tensors, sites, cfg.shape, model.strategy)
-
-        terms, coeff_structure = merge_operators(
-            (operator,), cfg.shape, eval_span=type(model).eval_span
+        tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
+        amp, energies = self._local_energy_for_sample(
+            model, operator, sites, h_links, v_links
         )
-        env_grads, energies, _ = estimate(
-            tensors,
-            sample,
-            amp,
-            cfg,
-            model.strategy,
-            top_envs,
-            terms=terms,
-            coeffs=coeff_structure.build_coeffs(0.0),
-        )
-        del env_grads
 
         sites_prop = sites.at[0, 0].set(0).at[1, 0].set(1)
         v_prop = v_links.at[0, 0].set(0)

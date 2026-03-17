@@ -178,7 +178,6 @@ class BlockadePEPS(nnx.Module):
 
 def _assemble_site(
     tensors: list[list[jax.Array]],
-    peps_config: BlockadePEPSConfig,
     mask_per_charge: jax.Array | None,
     r: int,
     c: int,
@@ -211,7 +210,6 @@ def _assemble_site(
 
 def _assemble_mpo_site(
     tensors: list[list[jax.Array]],
-    peps_config: BlockadePEPSConfig,
     mask_per_charge: jax.Array | None,
     config: jax.Array,
     r: int,
@@ -234,7 +232,6 @@ def _assemble_mpo_site(
     return jnp.transpose(
         _assemble_site(
             tensors,
-            peps_config,
             mask_per_charge,
             r,
             c,
@@ -329,7 +326,6 @@ def _build_row_mpo(
     return tuple(
         _assemble_mpo_site(
             tensors,
-            peps_config,
             mask_per_charge,
             config,
             row,
@@ -345,11 +341,11 @@ def _blockade_flip_amplitude_1row(
 ):
     """Compute 1-row flipped amplitude for blockade OneSiteOperator at (row, c)."""
     mpo_c_flip = _assemble_mpo_site(
-        tensors, peps_config, mask_per_charge, config, row, c, n=n_flip
+        tensors, mask_per_charge, config, row, c, n=n_flip
     )
     if c + 1 < n_cols:
         mpo_c1_flip = _assemble_mpo_site(
-            tensors, peps_config, mask_per_charge, config, row, c + 1, k_l=n_flip
+            tensors, mask_per_charge, config, row, c + 1, k_l=n_flip
         )
         return _contract_1row_2col(
             left_env, top_env, mpo_c_flip, mpo_c1_flip, bottom_env, right_envs[c + 1], c,
@@ -365,14 +361,14 @@ def _blockade_flip_amplitude_2row(
 ):
     """Compute 2-row flipped amplitude for blockade OneSiteOperator at (row, c)."""
     mpo0_c_flip = _assemble_mpo_site(
-        tensors, peps_config, mask_per_charge, config, row, c, n=n_flip
+        tensors, mask_per_charge, config, row, c, n=n_flip
     )
     mpo1_c_flip = _assemble_mpo_site(
-        tensors, peps_config, mask_per_charge, config, row + 1, c, k_u=n_flip
+        tensors, mask_per_charge, config, row + 1, c, k_u=n_flip
     )
     if c + 1 < n_cols:
         mpo0_c1_flip = _assemble_mpo_site(
-            tensors, peps_config, mask_per_charge, config, row, c + 1, k_l=n_flip
+            tensors, mask_per_charge, config, row, c + 1, k_l=n_flip
         )
         return _contract_2row_2col(
             left_env_2row, top_env, mpo0_c_flip, mpo1_c_flip,
@@ -628,7 +624,6 @@ def _sweep_single_row(
             def _attempt_flip(_):
                 mpo_c_flip = _assemble_mpo_site(
                     tensors,
-                    peps_config,
                     mask_per_charge,
                     config,
                     r,
@@ -637,7 +632,6 @@ def _sweep_single_row(
                 )
                 mpo_c1_flip = _assemble_mpo_site(
                     tensors,
-                    peps_config,
                     mask_per_charge,
                     config,
                     r,
@@ -708,7 +702,6 @@ def _sweep_single_row(
             def _attempt_flip(_):
                 mpo_c_flip = _assemble_mpo_site(
                     tensors,
-                    peps_config,
                     mask_per_charge,
                     config,
                     r,
@@ -847,7 +840,6 @@ def _sweep_row_pair(
             def _attempt_flip(_):
                 mpo0_c_flip = _assemble_mpo_site(
                     tensors,
-                    peps_config,
                     mask_per_charge,
                     config,
                     r,
@@ -856,7 +848,6 @@ def _sweep_row_pair(
                 )
                 mpo1_c_flip = _assemble_mpo_site(
                     tensors,
-                    peps_config,
                     mask_per_charge,
                     config,
                     r + 1,
@@ -865,7 +856,6 @@ def _sweep_row_pair(
                 )
                 mpo0_c1_flip = _assemble_mpo_site(
                     tensors,
-                    peps_config,
                     mask_per_charge,
                     config,
                     r,
@@ -948,7 +938,6 @@ def _sweep_row_pair(
             def _attempt_flip(_):
                 mpo0_c_flip = _assemble_mpo_site(
                     tensors,
-                    peps_config,
                     mask_per_charge,
                     config,
                     r,
@@ -957,7 +946,6 @@ def _sweep_row_pair(
                 )
                 mpo1_c_flip = _assemble_mpo_site(
                     tensors,
-                    peps_config,
                     mask_per_charge,
                     config,
                     r + 1,

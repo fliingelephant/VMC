@@ -158,7 +158,6 @@ class CfgIdxTest(unittest.TestCase):
         n_config = jnp.array([[0, 0, 0], [0, 0, 0], [0, 0, 0]], dtype=jnp.int32)
         tensor = _assemble_site(
             tensors,
-            config,
             mask_per_charge,
             1,
             1,
@@ -173,7 +172,6 @@ class CfgIdxTest(unittest.TestCase):
         n_config = jnp.array([[0, 1, 0], [0, 0, 0], [0, 0, 0]], dtype=jnp.int32)
         tensor = _assemble_site(
             tensors,
-            config,
             mask_per_charge,
             1,
             1,
@@ -188,7 +186,6 @@ class CfgIdxTest(unittest.TestCase):
         n_config = jnp.array([[0, 0, 0], [1, 0, 0], [0, 0, 0]], dtype=jnp.int32)
         tensor = _assemble_site(
             tensors,
-            config,
             mask_per_charge,
             1,
             1,
@@ -203,7 +200,6 @@ class CfgIdxTest(unittest.TestCase):
         n_config = jnp.array([[0, 1, 0], [1, 0, 0], [0, 0, 0]], dtype=jnp.int32)
         tensor = _assemble_site(
             tensors,
-            config,
             mask_per_charge,
             1,
             1,
@@ -235,7 +231,6 @@ class CfgIdxTest(unittest.TestCase):
         n_config = jnp.array([[0, 0, 0], [0, 1, 0], [0, 0, 0]], dtype=jnp.int32)
         tensor = _assemble_site(
             tensors,
-            config,
             mask_per_charge,
             1,
             1,

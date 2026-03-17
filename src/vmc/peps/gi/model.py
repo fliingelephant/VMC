@@ -268,19 +268,20 @@ def _random_plaquette_background(
     key: jax.Array,
     n_rows: int,
     n_cols: int,
+    N: int,
 ) -> tuple[jax.Array, jax.Array]:
     h_links = jnp.zeros((n_rows, n_cols - 1), dtype=jnp.int32)
     v_links = jnp.zeros((n_rows - 1, n_cols), dtype=jnp.int32)
     if n_rows <= 1 or n_cols <= 1:
         return h_links, v_links
     deltas = jax.random.randint(
-        key, (n_rows - 1, n_cols - 1), 0, 2, dtype=jnp.int32
+        key, (n_rows - 1, n_cols - 1), 0, N, dtype=jnp.int32
     )
     h_links = h_links.at[: n_rows - 1, :].add(deltas)
-    h_links = h_links.at[1:, :].add(deltas)
+    h_links = h_links.at[1:, :].add(-deltas)
     v_links = v_links.at[:, : n_cols - 1].add(deltas)
-    v_links = v_links.at[:, 1:].add(deltas)
-    return h_links % 2, v_links % 2
+    v_links = v_links.at[:, 1:].add(-deltas)
+    return h_links % N, v_links % N
 
 
 def _flip_path_masks(
@@ -320,7 +321,7 @@ def _single_z2_hardcore_configuration_with_particles(
     occupied = permutation[:particle_number]
     sites = jnp.zeros((n_sites,), dtype=jnp.int32).at[occupied].set(1).reshape((n_rows, n_cols))
 
-    h_links, v_links = _random_plaquette_background(key_bg, n_rows, n_cols)
+    h_links, v_links = _random_plaquette_background(key_bg, n_rows, n_cols, 2)
     defects = (Qx - sites) % 2
     defect_flat = jnp.where(defects.reshape(-1) == 1, size=2 * n_pairs_max, fill_value=-1)[0]
     priorities = jax.random.uniform(key_pair, (2 * n_pairs_max,))
@@ -362,9 +363,7 @@ def _single_physical_configuration(
     charge_to_indices = jnp.asarray(charge_to_indices, dtype=jnp.int32)
     charge_deg = jnp.asarray(charge_deg, dtype=jnp.int32)
     field_key, site_key = jax.random.split(key)
-    h_links, v_links = _random_plaquette_background(field_key, n_rows, n_cols)
-    h_links = h_links % N
-    v_links = v_links % N
+    h_links, v_links = _random_plaquette_background(field_key, n_rows, n_cols, N)
     nl = jnp.pad(h_links, ((0, 0), (1, 0)), constant_values=0)
     nr = jnp.pad(h_links, ((0, 0), (0, 1)), constant_values=0)
     nu = jnp.pad(v_links, ((1, 0), (0, 0)), constant_values=0)
@@ -454,6 +453,10 @@ def _assemble_site(
         config, k_l=k_l, k_u=k_u, k_r=k_r, k_d=k_d, r=r, c=c
     )
     tensor = tensors[r][c][:, cfg_idx, :, :, :, :]
+    if mask_per_charge is None:
+        if config.mask_per_charge is None:
+            return tensor
+        mask_per_charge = jnp.asarray(config.mask_per_charge, dtype=tensor.dtype)
     if mask_per_charge is None:
         return tensor
     mask_u = mask_per_charge[k_u][: tensor.shape[1]]

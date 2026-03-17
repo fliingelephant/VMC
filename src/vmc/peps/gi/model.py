@@ -77,7 +77,7 @@ class GIPEPSConfig:
             tuple(tuple(int(q) for q in row) for row in qx.tolist()),
         )
 
-        if _is_z2_hardcore_matter(self):
+        if self.is_binary_occupancy_matter:
             if self.particle_number is None:
                 raise ValueError(
                     "Z2 hard-core matter requires particle_number; the current sampler is canonical only."
@@ -108,6 +108,14 @@ class GIPEPSConfig:
     @property
     def dmax(self) -> int:
         return int(max(self.degeneracy_per_charge))
+
+    @property
+    def is_binary_occupancy_matter(self) -> bool:
+        return (
+            self.N == 2
+            and self.phys_dim == 2
+            and self.charge_of_site == (0, 1)
+        )
 
 
 class GIPEPS(nnx.Module):
@@ -254,14 +262,6 @@ def _sample_site_index_for_charge(
     count = charge_deg[charge]
     k = jnp.floor(jax.random.uniform(key) * count).astype(jnp.int32)
     return charge_to_indices[charge, k]
-
-
-def _is_z2_hardcore_matter(config: GIPEPSConfig) -> bool:
-    return (
-        config.N == 2
-        and config.phys_dim == 2
-        and tuple(int(c) for c in config.charge_of_site) == (0, 1)
-    )
 
 
 def _random_plaquette_background(
@@ -1344,7 +1344,7 @@ def transition(
     n_rows, n_cols = config.shape
     dtype = tensors[0][0].dtype
     top_envs_cache = [None] * n_rows
-    hardcore = _is_z2_hardcore_matter(config)
+    hardcore = config.is_binary_occupancy_matter
 
     # 1. Plaquette sweep over the full lattice (row pairs)
     top_env_plaquettes = None

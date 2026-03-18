@@ -36,31 +36,31 @@ from vmc.qgt.jacobian import SliceOrdering
 from vmc.utils import _tree_add_scaled
 
 
-L = 4
+L = 10
 SHAPE = (L, L)
 J = -1.0
 H_FIELD = 3.04433
 
-BOND_DIM = 3
-BOUNDARY_DIM = 9
+BOND_DIM = 4
+BOUNDARY_DIM = 16
 
-N_SAMPLES = 4096
-N_CHAINS = 128
+N_SAMPLES = 10240
+N_CHAINS = 512
 SEED = 42
 
-SR_FIXED_STEPS = 140
-SR_FIXED_DT = 0.01
-SR_DIAG_SHIFT = 1e-8
+SR_FIXED_STEPS = 200
+SR_FIXED_DT = 0.02
+SR_DIAG_SHIFT = 1e-4
 
 ADAM_STEPS = SR_FIXED_STEPS
-ADAM_LEARNING_RATE = 0.01
+ADAM_LEARNING_RATE = 0.02
 ADAM_BETA1 = 0.9
 ADAM_BETA2 = 0.999
-ADAM_EPS = 1e-8
+ADAM_EPS = 1e-4
 
 SR_ADAPTIVE_TARGET_FS_NORM = SR_FIXED_DT
 SR_ADAPTIVE_DT_MIN = 1e-4
-SR_ADAPTIVE_DT_MAX = SR_FIXED_DT
+SR_ADAPTIVE_DT_MAX = 1.5 * SR_FIXED_DT
 SR_ADAPTIVE_MAX_STEPS = 1000
 
 SR_METRICS_CONFIG = MetricsConfig(
@@ -131,6 +131,7 @@ def build_problem() -> tuple[LocalHamiltonian, tuple[LocalHamiltonian, ...], flo
     """Build the Hamiltonian, observables, and exact energy."""
     graph = nk.graph.Grid(extent=SHAPE, pbc=False)
     hilbert = nk.hilbert.Spin(s=0.5, N=SHAPE[0] * SHAPE[1])
+    """
     exact_energy = float(
         nk.exact.lanczos_ed(
             nk.operator.Ising(
@@ -143,6 +144,9 @@ def build_problem() -> tuple[LocalHamiltonian, tuple[LocalHamiltonian, ...], flo
             k=1,
         )[0].real
     )
+    """
+    exact_energy = -321.09280324595295 # 10x10 h=3.04433
+    # exact_energy = -79.72684325109283 # 5x5 h=3.04433
     return (
         build_ising_2d(SHAPE, J, H_FIELD),
         (build_mx_observable(SHAPE), build_nn_zz_observable(SHAPE)),
@@ -223,6 +227,7 @@ def plot_observables_vs_step(
     plt,
     outputs: dict[str, dict],
     output_path: Path,
+    exact_energy: float,
 ) -> None:
     """Plot energy, m_x, and zz against optimization step."""
     colors = {
@@ -231,7 +236,6 @@ def plot_observables_vs_step(
         "sr_adaptive": "#7a3e9d",
         "exact": "#b22222",
     }
-    exact_energy = outputs["sr_fixed"]["problem"]["exact_energy"]
     fig, axes = plt.subplots(3, 1, figsize=(9, 10.5), sharex=True)
     specs = (
         ("energy_mean", "energy_error", "Energy"),
@@ -264,6 +268,51 @@ def plot_observables_vs_step(
                 linewidth=1.2,
                 label=f"Exact E = {exact_energy:.6f}",
             )
+            # Add inset to zoom in on the last steps for ADAM and SR fixed
+            ax_ins = ax.inset_axes([0.45, 0.45, 0.5, 0.4])
+            for name in ("sr_fixed", "adam"):
+                series = outputs[name]["series"]
+                ax_ins.errorbar(
+                    series["step"],
+                    series[y_key],
+                    yerr=series[err_key],
+                    color=colors[name],
+                    linewidth=1.4,
+                    elinewidth=0.8,
+                    capsize=2,
+                    alpha=0.95,
+                )
+            ax_ins.axhline(exact_energy, color=colors["exact"], linestyle="--", linewidth=1.2)
+            
+            max_step = max(outputs["sr_fixed"]["series"]["step"])
+            min_step_ins = max(1, max_step - 50)
+            ax_ins.set_xlim(min_step_ins, max_step)
+            
+            y_vals = []
+            for name in ("sr_fixed", "adam"):
+                series = outputs[name]["series"]
+                idxs = [i for i, s in enumerate(series["step"]) if s >= min_step_ins]
+                if idxs:
+                    y_vals.extend([series[y_key][i] for i in idxs])
+            
+            if y_vals:
+                min_y = min(y_vals)
+                max_y = max(y_vals)
+                
+                # Use data bounds for the inset
+                bottom = min(min_y, exact_energy) if exact_energy < max_y else min_y
+                top = max_y
+                
+                y_range = top - bottom
+                if y_range <= 0:
+                    y_range = abs(max_y) * 0.01 if max_y != 0 else 1.0
+                    
+                ax_ins.set_ylim(bottom - y_range * 0.1, top + y_range * 0.1)
+                
+            ax_ins.grid(alpha=0.25)
+            ax_ins.tick_params(axis='both', which='major', labelsize=8)
+            ax.indicate_inset_zoom(ax_ins, edgecolor="black")
+
         ax.set_ylabel(ylabel)
         ax.grid(alpha=0.25)
         ax.legend(fontsize=9)
@@ -278,10 +327,10 @@ def plot_observables_vs_imaginary_time(
     plt,
     outputs: dict[str, dict],
     output_path: Path,
+    exact_energy: float,
 ) -> None:
     """Plot energy, m_x, and zz against imaginary time for SR runs."""
     colors = {"sr_fixed": "#1f4e79", "sr_adaptive": "#7a3e9d", "exact": "#b22222"}
-    exact_energy = outputs["sr_fixed"]["problem"]["exact_energy"]
     fig, axes = plt.subplots(3, 1, figsize=(9, 10.5), sharex=True)
     specs = (
         ("energy_mean", "energy_error", "Energy"),
@@ -320,7 +369,7 @@ def plot_observables_vs_imaginary_time(
     print(f"Saved {output_path}", flush=True)
 
 
-def write_figures(output_dir: Path) -> None:
+def write_figures(output_dir: Path, exact_energy: float) -> None:
     """Write benchmark figures next to the JSON outputs."""
     try:
         import matplotlib.pyplot as plt
@@ -336,11 +385,13 @@ def write_figures(output_dir: Path) -> None:
         plt,
         outputs,
         output_dir / "observables_vs_step_errorbars.png",
+        exact_energy,
     )
     plot_observables_vs_imaginary_time(
         plt,
         outputs,
         output_dir / "observables_vs_imaginary_time_errorbars.png",
+        exact_energy,
     )
 
 
@@ -700,7 +751,7 @@ def main() -> None:
         output_dir / "sr_adaptive.json",
         target_time=SR_FIXED_STEPS * SR_FIXED_DT,
     )
-    write_figures(output_dir)
+    write_figures(output_dir, exact_energy)
 
 
 if __name__ == "__main__":

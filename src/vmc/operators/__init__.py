@@ -17,6 +17,7 @@ from vmc.operators.local_terms import (
 )
 from vmc.operators.time_dependent import (
     AffineSchedule,
+    CubicSchedule,
     TermCoefficientSchedule,
     TimeDependentHamiltonian,
     coeffs_at,
@@ -38,6 +39,7 @@ __all__ = [
     "support_span",
     "TermCoefficientSchedule",
     "AffineSchedule",
+    "CubicSchedule",
     "TimeDependentHamiltonian",
     "coeffs_at",
     "operator_schedule",

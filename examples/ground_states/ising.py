@@ -77,8 +77,8 @@ def build_ising_2d(
     field: float,
 ) -> LocalHamiltonian:
     """Build the 2D transverse-field Ising Hamiltonian."""
-    diag_zz = coupling * jnp.array([1, -1, -1, 1], dtype=jnp.complex128)
-    sigma_x = -field * jnp.array([[0, 1], [1, 0]], dtype=jnp.complex128)
+    diag_zz = coupling * jnp.array([1, -1, -1, 1], dtype=jnp.float64)
+    sigma_x = -field * jnp.array([[0, 1], [1, 0]], dtype=jnp.float64)
     terms = []
     for row in range(shape[0]):
         for col in range(shape[1]):
@@ -96,7 +96,7 @@ def build_ising_2d(
 
 def build_mx_observable(shape: tuple[int, int]) -> LocalHamiltonian:
     """Build average transverse magnetization."""
-    sigma_x = jnp.array([[0, 1], [1, 0]], dtype=jnp.complex128) / (
+    sigma_x = jnp.array([[0, 1], [1, 0]], dtype=jnp.float64) / (
         shape[0] * shape[1]
     )
     return LocalHamiltonian(
@@ -112,7 +112,7 @@ def build_mx_observable(shape: tuple[int, int]) -> LocalHamiltonian:
 def build_nn_zz_observable(shape: tuple[int, int]) -> LocalHamiltonian:
     """Build average nearest-neighbor zz."""
     n_bonds = shape[0] * (shape[1] - 1) + (shape[0] - 1) * shape[1]
-    diag_zz = jnp.array([1, -1, -1, 1], dtype=jnp.complex128) / n_bonds
+    diag_zz = jnp.array([1, -1, -1, 1], dtype=jnp.float64) / n_bonds
     terms = []
     for row in range(shape[0]):
         for col in range(shape[1]):
@@ -157,6 +157,7 @@ def build_model(seed: int) -> PEPS:
         shape=SHAPE,
         bond_dim=BOND_DIM,
         contraction_strategy=Variational(BOUNDARY_DIM),
+        dtype=jnp.float64,
     )
 
 

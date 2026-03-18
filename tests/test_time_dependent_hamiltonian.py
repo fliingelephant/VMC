@@ -14,6 +14,7 @@ from vmc.drivers import TDVPDriver
 from vmc.operators.local_terms import DiagonalOperator, LocalHamiltonian
 from vmc.operators.time_dependent import (
     AffineSchedule,
+    CubicSchedule,
     TimeDependentHamiltonian,
 )
 from vmc.peps import (
@@ -196,6 +197,39 @@ class TimeDependentHamiltonianTest(unittest.TestCase):
         )
         self.assertAlmostEqual(
             float(estimates.local_estimate[0, 0, 0].real), 2.5, places=12,
+        )
+
+    def test_cubic_schedule_works(self) -> None:
+        model = PEPS(
+            rngs=nnx.Rngs(0),
+            shape=(1, 1),
+            bond_dim=1,
+            contraction_strategy=NoTruncation(),
+        )
+        operator = TimeDependentHamiltonian(
+            base=_diag_one_hamiltonian((1, 1)),
+            schedule=CubicSchedule(
+                constant=1.0,
+                linear=2.0,
+                quadratic=3.0,
+                cubic=4.0,
+            ),
+        )
+        init_cache, transition, estimate = build_mc_kernels(
+            model,
+            operator,
+            full_gradient=True,
+        )
+        tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
+        config_states = jnp.zeros((1, 1), dtype=jnp.int32)
+        cache = init_cache(tensors, config_states, t=2.0)
+        chain_keys = jax.random.split(jax.random.key(1), 1)
+        mc_sampler = make_mc_sampler(transition, estimate)
+        (_, _, _), (_, estimates) = mc_sampler(
+            tensors, config_states, chain_keys, cache, n_steps=1,
+        )
+        self.assertAlmostEqual(
+            float(estimates.local_estimate[0, 0, 0].real), 49.0, places=12,
         )
 
     def test_gi_tdvp_uses_time_dependent_hamiltonian_and_observable(self) -> None:

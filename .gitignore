@@ -45,6 +45,7 @@ tpu_cache/
 # Generated example outputs
 examples/**/*.json
 examples/**/*.png
+examples/**/*.npz
 
 # macOS
 .DS_Store

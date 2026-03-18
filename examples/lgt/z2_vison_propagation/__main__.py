@@ -32,7 +32,7 @@ from netket import stats as nkstats
 
 from vmc.drivers import ImaginaryTimeUnit, RK4, RealTimeUnit, TDVPDriver
 from vmc.operators import PlaquetteOperator
-from vmc.peps import GIPEPS, GIPEPSConfig, GILocalHamiltonian, ZipUp
+from vmc.peps import GIPEPS, GIPEPSConfig, GILocalHamiltonian, Variational
 from vmc.peps.gi.local_terms import build_electric_terms
 from vmc.preconditioners import MetricsConfig, SRPreconditioner
 
@@ -54,8 +54,8 @@ DEFAULT_G = 0.1
 DEFAULT_BOND_DIM = 3
 DEFAULT_N_SAMPLES = 10240
 DEFAULT_N_CHAINS = 1024
-DEFAULT_N_STEPS_GS = 100
-DEFAULT_DT_GS = 0.01
+DEFAULT_N_STEPS_GS = 400
+DEFAULT_DT_GS = 0.005
 DEFAULT_GS_DIAG_SHIFT = 1e-4
 DEFAULT_T = 18.0
 DEFAULT_DT_RT = 0.01
@@ -203,7 +203,7 @@ def build_model(
             degeneracy_per_charge=(bond_dim, bond_dim),
             charge_of_site=(0,),
         ),
-        contraction_strategy=ZipUp(truncate_bond_dimension=3 * bond_dim),
+        contraction_strategy=Variational(truncate_bond_dimension=3 * bond_dim),
     )
 
 
@@ -626,7 +626,7 @@ def _run_ground_state_command(args: argparse.Namespace) -> None:
         "h": args.h,
         "g": args.g,
         "bond_dim": args.bond_dim,
-        "boundary_method": "ZipUp",
+        "boundary_method": "Variational",
         "boundary_dimension": 3 * args.bond_dim,
         "seed": args.seed,
     }

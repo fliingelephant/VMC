@@ -408,11 +408,12 @@ class SRPreconditioner:
         _, unravel = ravel_pytree(params)
         updates = unravel(updates_flat)
         if jnp.isrealobj(grad_factor):
-            updates = jax.tree_util.tree_map(
-                lambda x, t: (2.0 * x.real).astype(t.dtype)
-                if not jnp.iscomplexobj(t)
-                else x,
-                updates,
-                params,
-            )
+            if jnp.issubdtype(model.dtype, jnp.complexfloating):
+                updates = jax.tree_util.tree_map(lambda x: 2.0 * x, updates)
+            else:
+                updates = jax.tree_util.tree_map(
+                    lambda x, t: (2.0 * x.real).astype(t.dtype),
+                    updates,
+                    params,
+                )
         return tree_cast(updates, params), metrics

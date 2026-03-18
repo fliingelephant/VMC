@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 
 
 RANK_CUTOFF = 1e-8
+PLOT_FLOOR = 1e-20
 
 
 @dataclass(frozen=True)
@@ -48,7 +49,7 @@ def parse_args() -> argparse.Namespace:
         "--output",
         type=Path,
         default=None,
-        help="Output PNG path for plotting one JSON file.",
+        help="Output plot path for plotting one JSON file.",
     )
     parser.add_argument(
         "--dpi",
@@ -61,12 +62,17 @@ def parse_args() -> argparse.Namespace:
 
 def _ordered_plot_values(eigenvalues: list[float]) -> np.ndarray:
     """Sort all modes by |lambda| descending for a log-axis spectrum plot."""
-    ordered = np.sort(np.abs(np.asarray(eigenvalues, dtype=float)))[::-1]
-    return np.maximum(ordered, np.finfo(float).tiny)
+    return np.sort(np.abs(np.asarray(eigenvalues, dtype=float)))[::-1]
+
+
+def _plot_values(eigenvalues: list[float]) -> np.ndarray:
+    """Clip sub-floor modes from the visible log plot."""
+    ordered = _ordered_plot_values(eigenvalues)
+    return np.where(ordered >= PLOT_FLOOR, ordered, np.nan)
 
 
 def _default_output_path(json_path: Path) -> Path:
-    return json_path.with_name("qgt_spectra.png")
+    return json_path.with_name("qgt_spectra.pdf")
 
 
 def _scheme_mathtext(label: str) -> str:
@@ -99,9 +105,11 @@ def _separator_rank(eigenvalues: np.ndarray) -> int:
 
 
 def _draw_case(ax: plt.Axes, case: PlotCase, *, show_legend: bool) -> None:
-    qgt = _ordered_plot_values(case.record["qgt_eigenvalues"])
-    projected = _ordered_plot_values(case.record["projected_qgt_eigenvalues"])
-    separator_rank = _separator_rank(qgt)
+    qgt = _plot_values(case.record["qgt_eigenvalues"])
+    projected = _plot_values(case.record["projected_qgt_eigenvalues"])
+    separator_rank = _separator_rank(
+        _ordered_plot_values(case.record["qgt_eigenvalues"])
+    )
 
     x_qgt = np.arange(1, qgt.size + 1)
     x_projected = np.arange(1, projected.size + 1)
@@ -134,6 +142,7 @@ def _draw_case(ax: plt.Axes, case: PlotCase, *, show_legend: bool) -> None:
     )
     ax.axvline(separator, color="#e76f51", linewidth=1.0, alpha=0.9)
     ax.set_xlim(1, qgt.size)
+    ax.set_ylim(bottom=PLOT_FLOOR)
     ax.set_xlabel(r"eigenmodes (sorted by $|\lambda|$, descending)")
     ax.set_ylabel(r"$|\lambda|$")
     ax.set_title(_case_title(case))

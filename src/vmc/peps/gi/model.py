@@ -64,9 +64,9 @@ class GIPEPSConfig:
     Qx: Any
     degeneracy_per_charge: tuple[int, ...]
     charge_of_site: tuple[int, ...]
-    conserve_particle_number: bool = True
     particle_number: int | None = None
     dtype: Any = jnp.complex128
+    conserve_particle_number: bool = field(default=True, kw_only=True)
     mask_per_charge: Any = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:

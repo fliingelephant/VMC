@@ -24,6 +24,19 @@ from vmc.peps.gi.model import assemble_tensors, estimate
 
 
 class GIMatterTest(unittest.TestCase):
+    def test_gipeps_config_positional_particle_number_is_preserved(self) -> None:
+        cfg = GIPEPSConfig(
+            (2, 2),
+            2,
+            2,
+            0,
+            (1, 1),
+            (0, 1),
+            2,
+        )
+        self.assertEqual(cfg.particle_number, 2)
+        self.assertTrue(cfg.conserve_particle_number)
+
     def _make_binary_z2_model(
         self,
         *,

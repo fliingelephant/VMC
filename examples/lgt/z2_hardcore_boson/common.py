@@ -58,7 +58,10 @@ SR_METRICS_CONFIG = MetricsConfig(
 
 def half_filling(shape: tuple[int, int]) -> int:
     """Return the half-filling hard-core boson number for a lattice."""
-    return shape[0] * shape[1] // 2
+    n_sites = shape[0] * shape[1]
+    if n_sites % 2:
+        raise ValueError(f"Half filling requires an even number of sites, got {shape}.")
+    return n_sites // 2
 
 
 def format_token(value: int | float) -> str:

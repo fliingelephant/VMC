@@ -274,6 +274,13 @@ def _load_existing_series(json_path: Path) -> dict[str, list]:
     return json.loads(json_path.read_text()).get("series", {})
 
 
+def _load_resume_series(output_json_path: Path, input_json_path: Path) -> dict[str, list]:
+    series = _load_existing_series(output_json_path)
+    if series or output_json_path == input_json_path:
+        return series
+    return _load_existing_series(input_json_path)
+
+
 def _validate_resume_series(
     series: dict[str, list],
     *,
@@ -633,7 +640,10 @@ def _run_ground_state_command(args: argparse.Namespace) -> None:
         json_path = args.json_output or _matching_json_path(state_path)
         initial_step = int(metadata.get("step", 0))
         initial_time = float(metadata.get("time", 0.0))
-        series = _load_existing_series(json_path)
+        series = _load_resume_series(
+            json_path,
+            json_path if args.json_output is not None else _matching_json_path(resume_state),
+        )
         _validate_resume_series(
             series,
             step=initial_step,
@@ -742,7 +752,10 @@ def _run_real_time_command(args: argparse.Namespace) -> None:
         initial_time = float(metadata.get("time", 0.0))
         state_path = _normalize_state_path(args.state_output or input_state)
         json_path = args.json_output or _matching_json_path(state_path)
-        series = _load_existing_series(json_path)
+        series = _load_resume_series(
+            json_path,
+            json_path if args.json_output is not None else _matching_json_path(input_state),
+        )
         _validate_resume_series(
             series,
             step=initial_step,

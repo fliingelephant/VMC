@@ -262,6 +262,7 @@ def save_latest(
             step_count=np.asarray(driver.step_count, dtype=np.int64),
             imaginary_time=np.asarray(float(driver.t), dtype=np.float64),
             sampler_key=np.asarray(jax.random.key_data(driver._sampler_key)),
+            sampler_key_impl=np.asarray(jax.random.key_impl(driver._sampler_key)),
             sampler_configuration=np.asarray(driver._sampler_configuration),
             **tensor_arrays,
         )
@@ -302,7 +303,8 @@ def restore_latest(run_dir: Path, driver: TDVPDriver) -> None:
         }
         driver._sampler_configuration = saved_config
         driver._sampler_key = jax.random.wrap_key_data(
-            jnp.asarray(data["sampler_key"], dtype=jnp.uint32)
+            jnp.asarray(data["sampler_key"], dtype=jnp.uint32),
+            impl=str(data["sampler_key_impl"]),
         )
         driver.step_count = int(data["step_count"])
         driver.t = float(data["imaginary_time"])

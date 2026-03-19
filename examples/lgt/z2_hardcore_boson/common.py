@@ -65,7 +65,7 @@ def format_token(value: int | float) -> str:
     """Format numeric values for filesystem-safe run-directory names."""
     if isinstance(value, int) or float(value).is_integer():
         return str(int(value))
-    return format(float(value), ".6g").replace("-", "m").replace(".", "p")
+    return format(float(value), ".17g").replace("-", "m").replace(".", "p")
 
 
 def build_z2_hardcore_boson_hamiltonian(
@@ -246,15 +246,20 @@ def save_latest(
         for row, tensors in driver._tensors.items()
         for col, tensor in tensors.items()
     }
-    np.savez(
-        npz_path,
-        step_count=np.asarray(driver.step_count, dtype=np.int64),
-        imaginary_time=np.asarray(float(driver.t), dtype=np.float64),
-        sampler_key=np.asarray(jax.random.key_data(driver._sampler_key)),
-        sampler_configuration=np.asarray(driver._sampler_configuration),
-        **tensor_arrays,
-    )
-    json_path.write_text(
+    npz_tmp_path = npz_path.with_name(f"{npz_path.name}.tmp")
+    with npz_tmp_path.open("wb") as handle:
+        np.savez(
+            handle,
+            step_count=np.asarray(driver.step_count, dtype=np.int64),
+            imaginary_time=np.asarray(float(driver.t), dtype=np.float64),
+            sampler_key=np.asarray(jax.random.key_data(driver._sampler_key)),
+            sampler_configuration=np.asarray(driver._sampler_configuration),
+            **tensor_arrays,
+        )
+    npz_tmp_path.replace(npz_path)
+
+    json_tmp_path = json_path.with_name(f"{json_path.name}.tmp")
+    json_tmp_path.write_text(
         json.dumps(
             {
                 "problem": problem,
@@ -267,6 +272,7 @@ def save_latest(
             indent=2,
         )
     )
+    json_tmp_path.replace(json_path)
 
 
 def restore_latest(run_dir: Path, driver: TDVPDriver) -> None:

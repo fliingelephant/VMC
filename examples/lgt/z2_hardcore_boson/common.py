@@ -263,7 +263,7 @@ def save_latest(
             step_count=np.asarray(driver.step_count, dtype=np.int64),
             imaginary_time=np.asarray(float(driver.t), dtype=np.float64),
             sampler_key=np.asarray(jax.random.key_data(driver._sampler_key)),
-            sampler_key_impl=np.asarray(jax.random.key_impl(driver._sampler_key)),
+            sampler_key_impl=np.asarray(str(jax.random.key_impl(driver._sampler_key))),
             sampler_configuration=np.asarray(driver._sampler_configuration),
             **tensor_arrays,
         )
@@ -310,7 +310,7 @@ def restore_latest(run_dir: Path, driver: TDVPDriver) -> None:
         driver._sampler_configuration = saved_config
         driver._sampler_key = jax.random.wrap_key_data(
             jnp.asarray(data["sampler_key"], dtype=jnp.uint32),
-            impl=str(data["sampler_key_impl"]),
+            impl=data["sampler_key_impl"].item(),
         )
         driver.step_count = int(data["step_count"])
         driver.t = float(data["imaginary_time"])
@@ -353,7 +353,10 @@ def run_ground_state_steps(
     update_row: Callable[[TDVPDriver, dict[str, float]], None] | None = None,
     format_extra: Callable[[dict[str, float]], str] | None = None,
 ) -> None:
-    """Run one ground-state trajectory with periodic logging and checkpointing."""
+    """Run one ground-state trajectory to the requested target step count."""
+    remaining_steps = max(0, n_steps - driver.step_count)
+    if remaining_steps == 0:
+        return
     extra_header = "" if format_extra is None else format_extra({})
     if extra_header:
         extra_header = f" {extra_header}"
@@ -363,7 +366,7 @@ def run_ground_state_steps(
         "TDVP_residual SR_solve_residual".format(label=label),
         flush=True,
     )
-    for local_step in range(1, n_steps + 1):
+    for local_step in range(1, remaining_steps + 1):
         driver.run(driver.dt)
         row = ground_state_metrics(
             driver,
@@ -373,7 +376,7 @@ def run_ground_state_steps(
         if update_row is not None:
             update_row(driver, row)
         extra_values = "" if format_extra is None else format_extra(row)
-        if driver.step_count % log_every == 0 or local_step == n_steps:
+        if driver.step_count % log_every == 0 or local_step == remaining_steps:
             print(
                 (
                     f"[{label}] {row['completed_steps']:4d} {row['imaginary_time']:.6f} "
@@ -388,7 +391,7 @@ def run_ground_state_steps(
                 ),
                 flush=True,
             )
-        if driver.step_count % save_every == 0 or local_step == n_steps:
+        if driver.step_count % save_every == 0 or local_step == remaining_steps:
             save_latest(run_dir, driver=driver, problem=problem, latest_metrics=row)
             print(f"Saved {run_dir / 'latest.json'}", flush=True)
 

@@ -63,14 +63,17 @@ def build_mc_kernels(
                 env = _apply_mpo_from_below(env, row_mpo, strategy)
             return tuple(envs)
 
-        coeffs = coeff_structure.build_coeffs(t) if has_time_dep else static_coeffs
-        coeffs_batch = jnp.broadcast_to(
-            coeffs,
-            (config_states_flat.shape[0], coeffs.shape[0]),
-        )
+        dynamic_coeffs = None if not has_time_dep else coeff_structure.build_coeffs(t)
         return Cache(
             bottom_envs=jax.vmap(build_one)(config_states_flat),
-            coeffs=coeffs_batch,
+            coeffs=(
+                None
+                if dynamic_coeffs is None
+                else jnp.broadcast_to(
+                    dynamic_coeffs,
+                    (config_states_flat.shape[0], dynamic_coeffs.shape[0]),
+                )
+            ),
         )
 
     def transition(
@@ -136,7 +139,7 @@ def build_mc_kernels(
             terms=terms,
             build_row_mpo=build_row_mpo,
             eval_term=eval_term,
-            coeffs=context.coeffs,
+            coeffs=static_coeffs if context.coeffs is None else context.coeffs,
             collect_grads=True,
         )
         indices = config_state_next.reshape(shape)

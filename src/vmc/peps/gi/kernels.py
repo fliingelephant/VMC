@@ -63,14 +63,17 @@ def build_mc_kernels(
                 env = gi_model._apply_mpo_from_below(env, row_mpo, strategy)
             return tuple(envs)
 
-        coeffs = coeff_structure.build_coeffs(t) if has_time_dep else static_coeffs
-        coeffs_batch = jnp.broadcast_to(
-            coeffs,
-            (config_states.shape[0], coeffs.shape[0]),
-        )
+        dynamic_coeffs = None if not has_time_dep else coeff_structure.build_coeffs(t)
         return Cache(
             bottom_envs=jax.vmap(build_one)(config_states),
-            coeffs=coeffs_batch,
+            coeffs=(
+                None
+                if dynamic_coeffs is None
+                else jnp.broadcast_to(
+                    dynamic_coeffs,
+                    (config_states.shape[0], dynamic_coeffs.shape[0]),
+                )
+            ),
         )
 
     def transition(
@@ -112,7 +115,7 @@ def build_mc_kernels(
             context.top_envs,
             mask_per_charge,
             terms=bucketed_terms,
-            coeffs=context.coeffs,
+            coeffs=static_coeffs if context.coeffs is None else context.coeffs,
         )
         sites, h_links, v_links = GIPEPS.unflatten_sample(config_state_next, shape)
         grad_parts = []

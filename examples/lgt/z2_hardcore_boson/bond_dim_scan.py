@@ -12,6 +12,7 @@ if __package__ in (None, ""):
         DEFAULT_G,
         DEFAULT_H,
         DEFAULT_J,
+        coupling_suffix,
         DEFAULT_LOG_EVERY,
         DEFAULT_M,
         DEFAULT_SAVE_EVERY,
@@ -30,6 +31,7 @@ else:
         DEFAULT_G,
         DEFAULT_H,
         DEFAULT_J,
+        coupling_suffix,
         DEFAULT_LOG_EVERY,
         DEFAULT_M,
         DEFAULT_SAVE_EVERY,
@@ -56,8 +58,8 @@ def _run_dir(args: argparse.Namespace) -> Path:
         / "data"
         / "bond_dim_scan"
         / (
-            f"L{args.L}_Dk{args.bond_dim_per_charge}_g{format_token(args.g)}"
-            f"_J{format_token(args.J)}"
+            f"L{args.L}_Dk{args.bond_dim_per_charge}_"
+            f"{coupling_suffix(h=args.h, g=args.g, J=args.J, m=args.m)}"
         )
     )
 

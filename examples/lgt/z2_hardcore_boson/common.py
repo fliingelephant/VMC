@@ -68,6 +68,14 @@ def format_token(value: int | float) -> str:
     return format(float(value), ".17g").replace("-", "m").replace(".", "p")
 
 
+def coupling_suffix(*, h: float, g: float, J: float, m: float) -> str:
+    """Format the Hamiltonian couplings for a run-directory suffix."""
+    return (
+        f"h{format_token(h)}_g{format_token(g)}_"
+        f"J{format_token(J)}_m{format_token(m)}"
+    )
+
+
 def build_z2_hardcore_boson_hamiltonian(
     shape: tuple[int, int],
     *,

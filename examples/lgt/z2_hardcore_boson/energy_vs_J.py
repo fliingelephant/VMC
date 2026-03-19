@@ -12,6 +12,7 @@ if __package__ in (None, ""):
         DEFAULT_G,
         DEFAULT_H,
         DEFAULT_J,
+        coupling_suffix,
         DEFAULT_LOG_EVERY,
         DEFAULT_M,
         DEFAULT_SAVE_EVERY,
@@ -30,6 +31,7 @@ else:
         DEFAULT_G,
         DEFAULT_H,
         DEFAULT_J,
+        coupling_suffix,
         DEFAULT_LOG_EVERY,
         DEFAULT_M,
         DEFAULT_SAVE_EVERY,
@@ -58,7 +60,7 @@ def _run_dir(args: argparse.Namespace) -> Path:
         / "data"
         / "energy_vs_J"
         / (
-            f"L{args.L}_g{format_token(args.g)}_J{format_token(args.J)}"
+            f"L{args.L}_{coupling_suffix(h=args.h, g=args.g, J=args.J, m=args.m)}"
             f"_Dk{args.bond_dim_per_charge}"
         )
     )

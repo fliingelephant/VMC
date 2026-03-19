@@ -7,11 +7,37 @@ import jax
 import jax.numpy as jnp
 
 from vmc.operators.local_terms import merge_operators
+from vmc.operators.time_dependent import TimeDependentHamiltonian
 from vmc.peps.gi import model as gi_model
+from vmc.peps.gi.local_terms import HorizontalHiggsLinkTerm, VerticalHiggsLinkTerm
 from vmc.peps.gi.model import GIPEPS, _link_value_or_zero, _site_cfg_index
 from vmc.peps.standard.kernels import Cache, Context, LocalEstimates, build_mc_kernels
 
 __all__ = ["build_mc_kernels"]
+
+
+def _validate_terms(model: GIPEPS, operators: tuple[object, ...]) -> None:
+    has_higgs_terms = any(
+        isinstance(term, (HorizontalHiggsLinkTerm, VerticalHiggsLinkTerm))
+        for operator in operators
+        for term in (
+            operator.base.terms
+            if isinstance(operator, TimeDependentHamiltonian)
+            else operator.terms
+        )
+    )
+    if not has_higgs_terms:
+        return
+    if not model.config.is_binary_occupancy_matter:
+        raise ValueError(
+            "Higgs link terms require binary-occupancy Z2 GIPEPS "
+            "(N=2, phys_dim=2, charge_of_site=(0, 1))."
+        )
+    if model.config.conserve_particle_number:
+        raise ValueError(
+            "Higgs link terms require parity-sector GI updates "
+            "(conserve_particle_number=False)."
+        )
 
 
 @build_mc_kernels.dispatch
@@ -37,6 +63,7 @@ def build_mc_kernels(
     )
     nc_per_site = tuple(sd // model.phys_dim for sd in model.sliced_dims)
     all_operators = (operator,) + observables
+    _validate_terms(model, all_operators)
     bucketed_terms, coeff_structure = merge_operators(
         all_operators,
         shape,

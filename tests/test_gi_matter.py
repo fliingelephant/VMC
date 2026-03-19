@@ -15,26 +15,31 @@ from vmc.peps import NoTruncation, build_mc_kernels
 from vmc.peps.common.contraction import _forward_with_cache
 from vmc.peps.gi import GILocalHamiltonian, GIPEPS, GIPEPSConfig
 from vmc.peps.gi.local_terms import (
+    HorizontalHiggsLinkTerm,
     HorizontalMatterHoppingTerm,
+    VerticalHiggsLinkTerm,
     VerticalMatterHoppingTerm,
 )
 from vmc.peps.gi.model import assemble_tensors, estimate
 
 
 class GIMatterTest(unittest.TestCase):
-    def _make_model(
+    def _make_binary_z2_model(
         self,
         *,
+        shape: tuple[int, int] = (2, 2),
         Qx: int | jax.Array = 0,
+        conserve_particle_number: bool = True,
         particle_number: int | None = 2,
     ) -> GIPEPS:
         cfg = GIPEPSConfig(
-            shape=(2, 2),
+            shape=shape,
             N=2,
             phys_dim=2,
             Qx=Qx,
             degeneracy_per_charge=(1, 1),
             charge_of_site=(0, 1),
+            conserve_particle_number=conserve_particle_number,
             particle_number=particle_number,
         )
         return GIPEPS(
@@ -83,7 +88,7 @@ class GIMatterTest(unittest.TestCase):
         return amp, energies
 
     def test_fixed_particle_number_initialization_and_transition(self) -> None:
-        model = self._make_model(particle_number=2)
+        model = self._make_binary_z2_model(particle_number=2)
         cfg = model.config
         key = jax.random.key(0)
         init_samples = model.random_physical_configuration(key, n_samples=2)
@@ -114,7 +119,7 @@ class GIMatterTest(unittest.TestCase):
             self._assert_gauss(sample, cfg)
 
     def test_site_dependent_qx_fixed_particle_number(self) -> None:
-        model = self._make_model(
+        model = self._make_binary_z2_model(
             Qx=jnp.asarray([[1, 0], [0, 0]], dtype=jnp.int32),
             particle_number=1,
         )
@@ -127,7 +132,7 @@ class GIMatterTest(unittest.TestCase):
             self._assert_gauss(sample, cfg)
 
     def test_horizontal_hopping_local_energy_matches_manual_ratio(self) -> None:
-        model = self._make_model()
+        model = self._make_binary_z2_model()
         cfg = model.config
         term = HorizontalMatterHoppingTerm(row=0, col=0)
         operator = GILocalHamiltonian(
@@ -157,7 +162,7 @@ class GIMatterTest(unittest.TestCase):
         self.assertAlmostEqual(float(jnp.abs(energies[0] - expected)), 0.0, places=9)
 
     def test_vertical_hopping_local_energy_matches_manual_ratio(self) -> None:
-        model = self._make_model()
+        model = self._make_binary_z2_model()
         cfg = model.config
         term = VerticalMatterHoppingTerm(row=0, col=0)
         operator = GILocalHamiltonian(
@@ -185,6 +190,175 @@ class GIMatterTest(unittest.TestCase):
         )
         expected = jnp.asarray(-0.3) * amp_prop / amp
         self.assertAlmostEqual(float(jnp.abs(energies[0] - expected)), 0.0, places=9)
+
+    def test_parity_sector_initialization_without_fixed_particle_number(self) -> None:
+        model = self._make_binary_z2_model(
+            shape=(3, 3),
+            conserve_particle_number=False,
+            particle_number=None,
+        )
+        cfg = model.config
+        samples = model.random_physical_configuration(jax.random.key(7), n_samples=8)
+        particle_counts = []
+        for sample in samples:
+            self._assert_gauss(sample, cfg)
+            sites, _, _ = GIPEPS.unflatten_sample(sample, cfg.shape)
+            particle_count = int(jnp.sum(sites))
+            particle_counts.append(particle_count)
+            self.assertEqual(particle_count % 2, 0)
+        self.assertTrue(any(count > 0 for count in particle_counts))
+
+    def test_parity_transition_preserves_gauss_law_and_allows_number_change(self) -> None:
+        model = self._make_binary_z2_model(
+            shape=(1, 2),
+            conserve_particle_number=False,
+            particle_number=None,
+        )
+        cfg = model.config
+        tensors = [[jnp.ones_like(jnp.asarray(t)) for t in row] for row in model.tensors]
+        operator = GILocalHamiltonian(shape=cfg.shape, terms=())
+        init_cache, transition, _ = build_mc_kernels(
+            model,
+            operator,
+            full_gradient=False,
+        )
+        sample = GIPEPS.flatten_sample(
+            jnp.asarray([[0, 0]], dtype=jnp.int32),
+            jnp.asarray([[0]], dtype=jnp.int32),
+            jnp.zeros((0, 2), dtype=jnp.int32),
+        )
+        cache = init_cache(tensors, sample.reshape(1, -1))
+        sample_next, _, _ = transition(
+            tensors,
+            sample,
+            jax.random.key(3),
+            jax.tree_util.tree_map(lambda x: x[0], cache),
+        )
+        self._assert_gauss(sample_next, cfg)
+        sites_next, h_next, _ = GIPEPS.unflatten_sample(sample_next, cfg.shape)
+        self.assertEqual(int(jnp.sum(sites_next)) % 2, 0)
+        self.assertNotEqual(int(jnp.sum(sites_next)), 0)
+        self.assertTrue(jnp.array_equal(h_next, jnp.asarray([[1]], dtype=jnp.int32)))
+
+    def test_horizontal_higgs_link_local_energy_matches_manual_ratio(self) -> None:
+        model = self._make_binary_z2_model(
+            shape=(1, 2),
+            conserve_particle_number=False,
+            particle_number=None,
+        )
+        cfg = model.config
+        term = HorizontalHiggsLinkTerm(row=0, col=0)
+        operator = GILocalHamiltonian(
+            shape=cfg.shape,
+            terms=(term,),
+            coeffs=(jnp.asarray(0.7),),
+        )
+        sites = jnp.asarray([[0, 0]], dtype=jnp.int32)
+        h_links = jnp.asarray([[0]], dtype=jnp.int32)
+        v_links = jnp.zeros((0, 2), dtype=jnp.int32)
+        tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
+        amp, energies = self._local_energy_for_sample(
+            model, operator, sites, h_links, v_links
+        )
+        sites_prop = jnp.asarray([[1, 1]], dtype=jnp.int32)
+        h_prop = jnp.asarray([[1]], dtype=jnp.int32)
+        amp_prop = GIPEPS.apply(
+            tensors,
+            GIPEPS.flatten_sample(sites_prop, h_prop, v_links),
+            cfg.shape,
+            cfg,
+            model.strategy,
+        )
+        expected = jnp.asarray(0.7) * amp_prop / amp
+        self.assertAlmostEqual(float(jnp.abs(energies[0] - expected)), 0.0, places=9)
+
+    def test_vertical_higgs_link_local_energy_matches_manual_ratio(self) -> None:
+        model = self._make_binary_z2_model(
+            shape=(2, 1),
+            conserve_particle_number=False,
+            particle_number=None,
+        )
+        cfg = model.config
+        term = VerticalHiggsLinkTerm(row=0, col=0)
+        operator = GILocalHamiltonian(
+            shape=cfg.shape,
+            terms=(term,),
+            coeffs=(jnp.asarray(-0.3),),
+        )
+        sites = jnp.asarray([[0], [0]], dtype=jnp.int32)
+        h_links = jnp.zeros((2, 0), dtype=jnp.int32)
+        v_links = jnp.asarray([[0]], dtype=jnp.int32)
+        tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
+        amp, energies = self._local_energy_for_sample(
+            model, operator, sites, h_links, v_links
+        )
+        sites_prop = jnp.asarray([[1], [1]], dtype=jnp.int32)
+        v_prop = jnp.asarray([[1]], dtype=jnp.int32)
+        amp_prop = GIPEPS.apply(
+            tensors,
+            GIPEPS.flatten_sample(sites_prop, h_links, v_prop),
+            cfg.shape,
+            cfg,
+            model.strategy,
+        )
+        expected = jnp.asarray(-0.3) * amp_prop / amp
+        self.assertAlmostEqual(float(jnp.abs(energies[0] - expected)), 0.0, places=9)
+
+    def test_higgs_link_terms_reject_pure_gauge_gipeps(self) -> None:
+        model = GIPEPS(
+            rngs=nnx.Rngs(0),
+            config=GIPEPSConfig(
+                shape=(1, 2),
+                N=2,
+                phys_dim=1,
+                Qx=0,
+                degeneracy_per_charge=(1, 1),
+                charge_of_site=(0,),
+            ),
+            contraction_strategy=NoTruncation(),
+        )
+        operator = GILocalHamiltonian(
+            shape=model.shape,
+            terms=(HorizontalHiggsLinkTerm(row=0, col=0),),
+            coeffs=(jnp.asarray(0.7),),
+        )
+        with self.assertRaisesRegex(ValueError, "binary-occupancy Z2 GIPEPS"):
+            build_mc_kernels(model, operator, full_gradient=False)
+
+    def test_higgs_link_terms_reject_nonbinary_zn_gipeps(self) -> None:
+        model = GIPEPS(
+            rngs=nnx.Rngs(0),
+            config=GIPEPSConfig(
+                shape=(1, 2),
+                N=3,
+                phys_dim=3,
+                Qx=0,
+                degeneracy_per_charge=(1, 1, 1),
+                charge_of_site=(0, 1, 2),
+            ),
+            contraction_strategy=NoTruncation(),
+        )
+        operator = GILocalHamiltonian(
+            shape=model.shape,
+            terms=(HorizontalHiggsLinkTerm(row=0, col=0),),
+            coeffs=(jnp.asarray(0.7),),
+        )
+        with self.assertRaisesRegex(ValueError, "binary-occupancy Z2 GIPEPS"):
+            build_mc_kernels(model, operator, full_gradient=False)
+
+    def test_higgs_link_terms_reject_number_conserving_binary_z2_gipeps(self) -> None:
+        model = self._make_binary_z2_model(
+            shape=(1, 2),
+            conserve_particle_number=True,
+            particle_number=0,
+        )
+        operator = GILocalHamiltonian(
+            shape=model.shape,
+            terms=(HorizontalHiggsLinkTerm(row=0, col=0),),
+            coeffs=(jnp.asarray(0.7),),
+        )
+        with self.assertRaisesRegex(ValueError, "parity-sector GI updates"):
+            build_mc_kernels(model, operator, full_gradient=False)
 
 
 if __name__ == "__main__":

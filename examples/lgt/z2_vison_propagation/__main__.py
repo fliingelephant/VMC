@@ -98,7 +98,7 @@ def _default_real_time_json_path(state_path: Path, *, T: float) -> Path:
 
 
 def _default_plot_path(input_path: Path) -> Path:
-    return input_path.with_name(f"{input_path.stem}_fig5a.png")
+    return input_path.with_name(f"{input_path.stem}_fig5a.pdf")
 
 
 def _save_json(result: dict, output_path: Path) -> None:

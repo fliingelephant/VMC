@@ -122,10 +122,15 @@ def main() -> None:
         log_every=args.log_every,
         save_every=args.save_every,
         energy_scale=SHAPE[0] * SHAPE[1],
-        update_row=lambda _driver, row: (
+        update_row=lambda _driver, row: row.update(
+            absolute_error_vs_quoted_ed=abs(
+                row["energy_mean"] - QUOTED_ED_ENERGY_PER_SITE
+            )
+        ),
+        format_extra=lambda row: (
             "abs_err_vs_ed"
             if not row
-            else "{:.6e}".format(abs(row["energy_mean"] - QUOTED_ED_ENERGY_PER_SITE))
+            else f"{row['absolute_error_vs_quoted_ed']:.6e}"
         ),
     )
 

@@ -169,7 +169,23 @@ def main() -> None:
         log_every=args.log_every,
         save_every=args.save_every,
         energy_scale=shape[0] * shape[1],
-        update_row=lambda current_driver, row: (
+        update_row=lambda current_driver, row: row.update(
+            {
+                key: value
+                for bulk_size, stats in zip(bulk_sizes, current_driver.observable_stats)
+                for key, value in (
+                    (
+                        f"bulk{bulk_size}_energy_per_site",
+                        float(stats.mean.real) / (bulk_size * bulk_size),
+                    ),
+                    (
+                        f"bulk{bulk_size}_error",
+                        float(stats.error_of_mean.real) / (bulk_size * bulk_size),
+                    ),
+                )
+            }
+        ),
+        format_extra=lambda row: (
             " ".join(
                 f"bulk{bulk_size}_energy_per_site bulk{bulk_size}_err"
                 for bulk_size in bulk_sizes
@@ -177,10 +193,10 @@ def main() -> None:
             if not row
             else " ".join(
                 (
-                    f"{float(stats.mean.real) / (bulk_size * bulk_size):.10f} "
-                    f"{float(stats.error_of_mean.real) / (bulk_size * bulk_size):.6e}"
+                    f"{row[f'bulk{bulk_size}_energy_per_site']:.10f} "
+                    f"{row[f'bulk{bulk_size}_error']:.6e}"
                 )
-                for bulk_size, stats in zip(bulk_sizes, current_driver.observable_stats)
+                for bulk_size in bulk_sizes
             )
         ),
     )

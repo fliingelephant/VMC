@@ -197,7 +197,7 @@ def prepare_run_dir(run_dir: Path, *, resume: bool) -> Path:
     """Prepare one overwritten or resumable run directory."""
     npz_path, json_path = latest_paths(run_dir)
     if resume:
-        if not npz_path.exists() or not json_path.exists():
+        if not npz_path.exists():
             raise FileNotFoundError(f"Missing checkpoint in {run_dir}")
         return run_dir
     if run_dir.exists():
@@ -232,7 +232,9 @@ def maybe_resume(
     """Resume one driver from an existing checkpoint if requested."""
     if not resume:
         return
-    validate_problem(run_dir, problem)
+    _, json_path = latest_paths(run_dir)
+    if json_path.exists():
+        validate_problem(run_dir, problem)
     restore_latest(run_dir, driver)
     print(
         f"[{label}] resumed at step={driver.step_count} tau={driver.t:.6f}",
@@ -341,10 +343,11 @@ def run_ground_state_steps(
     log_every: int,
     save_every: int,
     energy_scale: float,
-    update_row: Callable[[TDVPDriver, dict[str, float]], str] | None = None,
+    update_row: Callable[[TDVPDriver, dict[str, float]], None] | None = None,
+    format_extra: Callable[[dict[str, float]], str] | None = None,
 ) -> None:
     """Run one ground-state trajectory with periodic logging and checkpointing."""
-    extra_header = "" if update_row is None else update_row(driver, {})
+    extra_header = "" if format_extra is None else format_extra({})
     if extra_header:
         extra_header = f" {extra_header}"
     print(
@@ -361,7 +364,9 @@ def run_ground_state_steps(
             energy_scale=energy_scale,
             step_wall_time=time.perf_counter() - wall_start,
         )
-        extra_values = "" if update_row is None else update_row(driver, row)
+        if update_row is not None:
+            update_row(driver, row)
+        extra_values = "" if format_extra is None else format_extra(row)
         if driver.step_count % log_every == 0 or local_step == n_steps:
             print(
                 (

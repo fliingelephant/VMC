@@ -198,7 +198,7 @@ def latest_paths(run_dir: Path) -> tuple[Path, Path]:
 
 def prepare_run_dir(run_dir: Path, *, resume: bool) -> Path:
     """Prepare one overwritten or resumable run directory."""
-    npz_path, json_path = latest_paths(run_dir)
+    npz_path, _ = latest_paths(run_dir)
     if resume:
         if not npz_path.exists():
             raise FileNotFoundError(f"Missing checkpoint in {run_dir}")
@@ -207,21 +207,6 @@ def prepare_run_dir(run_dir: Path, *, resume: bool) -> Path:
         shutil.rmtree(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     return run_dir
-
-
-def load_latest_json(run_dir: Path) -> dict[str, Any]:
-    """Load the human-readable latest metadata for one run directory."""
-    _, json_path = latest_paths(run_dir)
-    return json.loads(json_path.read_text())
-
-
-def validate_problem(run_dir: Path, problem: dict[str, Any]) -> None:
-    """Ensure a resumed run uses the same parameter point."""
-    latest = load_latest_json(run_dir)
-    if latest["problem"] != problem:
-        raise ValueError(
-            f"Run configuration does not match existing checkpoint in {run_dir}."
-        )
 
 
 def maybe_resume(
@@ -235,9 +220,13 @@ def maybe_resume(
     """Resume one driver from an existing checkpoint if requested."""
     if not resume:
         return
-    _, json_path = latest_paths(run_dir)
-    if json_path.exists():
-        validate_problem(run_dir, problem)
+    npz_path, _ = latest_paths(run_dir)
+    with np.load(npz_path, allow_pickle=False) as data:
+        checkpoint_problem = json.loads(data["problem_json"].item())
+    if checkpoint_problem != problem:
+        raise ValueError(
+            f"Run configuration does not match existing checkpoint in {run_dir}."
+        )
     restore_latest(run_dir, driver)
     print(
         f"[{label}] resumed at step={driver.step_count} tau={driver.t:.6f}",
@@ -263,6 +252,7 @@ def save_latest(
     with npz_tmp_path.open("wb") as handle:
         np.savez(
             handle,
+            problem_json=np.asarray(json.dumps(problem, sort_keys=True)),
             step_count=np.asarray(driver.step_count, dtype=np.int64),
             imaginary_time=np.asarray(float(driver.t), dtype=np.float64),
             sampler_key=np.asarray(jax.random.key_data(driver._sampler_key)),
@@ -356,9 +346,8 @@ def run_ground_state_steps(
     update_row: Callable[[TDVPDriver, dict[str, float]], None] | None = None,
     format_extra: Callable[[dict[str, float]], str] | None = None,
 ) -> None:
-    """Run one ground-state trajectory to the requested target step count."""
-    remaining_steps = max(0, n_steps - driver.step_count)
-    if remaining_steps == 0:
+    """Run one ground-state trajectory for the requested additional steps."""
+    if n_steps <= 0:
         return
     extra_header = "" if format_extra is None else format_extra({})
     if extra_header:
@@ -369,7 +358,7 @@ def run_ground_state_steps(
         "TDVP_residual SR_solve_residual".format(label=label),
         flush=True,
     )
-    for local_step in range(1, remaining_steps + 1):
+    for local_step in range(1, n_steps + 1):
         driver.run(driver.dt)
         row = ground_state_metrics(
             driver,
@@ -379,7 +368,7 @@ def run_ground_state_steps(
         if update_row is not None:
             update_row(driver, row)
         extra_values = "" if format_extra is None else format_extra(row)
-        if driver.step_count % log_every == 0 or local_step == remaining_steps:
+        if driver.step_count % log_every == 0 or local_step == n_steps:
             print(
                 (
                     f"[{label}] {row['completed_steps']:4d} {row['imaginary_time']:.6f} "
@@ -394,7 +383,7 @@ def run_ground_state_steps(
                 ),
                 flush=True,
             )
-        if driver.step_count % save_every == 0 or local_step == remaining_steps:
+        if driver.step_count % save_every == 0 or local_step == n_steps:
             save_latest(run_dir, driver=driver, problem=problem, latest_metrics=row)
             print(f"Saved {run_dir / 'latest.json'}", flush=True)
 

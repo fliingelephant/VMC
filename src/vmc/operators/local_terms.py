@@ -286,7 +286,12 @@ class CoefficientStructure:
                 raise ValueError(
                     "Time-dependent operators require a non-None time `t`."
                 )
-            parts.append(base * coeffs_at(sched, t))
+            sched_coeffs = coeffs_at(sched, t)
+            if sched_coeffs.shape != base.shape:
+                raise ValueError(
+                    f"Expected schedule coefficients of shape {base.shape}, got {sched_coeffs.shape}."
+                )
+            parts.append(base * sched_coeffs)
         return jnp.concatenate(parts) if len(parts) > 1 else parts[0]
 
 

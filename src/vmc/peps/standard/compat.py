@@ -148,8 +148,8 @@ def local_estimate(
     bucketed_terms, coeff_structure = merge_operators(
         (operator,), shape, eval_span=type(model).eval_span,
     )
-    if coeffs is None:
-        coeffs = coeff_structure.build_coeffs()
+    base_coeffs = coeff_structure.build_coeffs()
+    coeffs = base_coeffs if coeffs is None else base_coeffs * coeffs
     has_diag = bool(bucketed_terms.diagonal)
     has_offdiag = any(
         cell

@@ -15,8 +15,6 @@ __all__ = [
     "CubicSchedule",
     "TimeDependentHamiltonian",
     "coeffs_at",
-    "operator_schedule",
-    "operator_terms",
 ]
 
 
@@ -113,28 +111,3 @@ def coeffs_at(schedule: CubicSchedule, t: float | jax.Array) -> jax.Array:
         ((schedule.cubic * t + schedule.quadratic) * t + schedule.linear) * t
         + schedule.constant
     )
-
-
-@dispatch
-def operator_schedule(operator: object) -> TermCoefficientSchedule | None:
-    """Return the coefficient schedule for an operator, or None if static."""
-    del operator
-    return None
-
-
-@operator_schedule.dispatch
-def operator_schedule(
-    operator: TimeDependentHamiltonian,
-) -> TermCoefficientSchedule:
-    return operator.schedule
-
-
-@dispatch
-def operator_terms(operator: object) -> tuple:
-    """Return the local terms of an operator."""
-    return operator.terms
-
-
-@operator_terms.dispatch
-def operator_terms(operator: TimeDependentHamiltonian) -> tuple:
-    return operator.base.terms

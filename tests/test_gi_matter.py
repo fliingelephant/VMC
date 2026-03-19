@@ -129,8 +129,12 @@ class GIMatterTest(unittest.TestCase):
     def test_horizontal_hopping_local_energy_matches_manual_ratio(self) -> None:
         model = self._make_model()
         cfg = model.config
-        term = HorizontalMatterHoppingTerm(row=0, col=0, coeff=0.7)
-        operator = GILocalHamiltonian(shape=cfg.shape, terms=(term,))
+        term = HorizontalMatterHoppingTerm(row=0, col=0)
+        operator = GILocalHamiltonian(
+            shape=cfg.shape,
+            terms=(term,),
+            coeffs=(jnp.asarray(0.7),),
+        )
 
         sites = jnp.asarray([[1, 0], [0, 1]], dtype=jnp.int32)
         h_links = jnp.asarray([[0], [1]], dtype=jnp.int32)
@@ -149,14 +153,18 @@ class GIMatterTest(unittest.TestCase):
             cfg,
             model.strategy,
         )
-        expected = term.coeff * amp_prop / amp
+        expected = jnp.asarray(0.7) * amp_prop / amp
         self.assertAlmostEqual(float(jnp.abs(energies[0] - expected)), 0.0, places=9)
 
     def test_vertical_hopping_local_energy_matches_manual_ratio(self) -> None:
         model = self._make_model()
         cfg = model.config
-        term = VerticalMatterHoppingTerm(row=0, col=0, coeff=-0.3)
-        operator = GILocalHamiltonian(shape=cfg.shape, terms=(term,))
+        term = VerticalMatterHoppingTerm(row=0, col=0)
+        operator = GILocalHamiltonian(
+            shape=cfg.shape,
+            terms=(term,),
+            coeffs=(jnp.asarray(-0.3),),
+        )
 
         sites = jnp.asarray([[1, 0], [0, 1]], dtype=jnp.int32)
         h_links = jnp.asarray([[0], [1]], dtype=jnp.int32)
@@ -175,7 +183,7 @@ class GIMatterTest(unittest.TestCase):
             cfg,
             model.strategy,
         )
-        expected = term.coeff * amp_prop / amp
+        expected = jnp.asarray(-0.3) * amp_prop / amp
         self.assertAlmostEqual(float(jnp.abs(energies[0] - expected)), 0.0, places=9)
 
 

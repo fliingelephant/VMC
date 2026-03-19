@@ -33,6 +33,7 @@ import logging
 from pathlib import Path
 
 import jax
+import jax.numpy as jnp
 from flax import nnx
 
 from vmc.drivers import TDVPDriver, ImaginaryTimeUnit
@@ -74,33 +75,40 @@ def build_z2_matter_hamiltonian(
     """
     n_rows, n_cols = shape
     plaquette_terms = tuple(
-        PlaquetteOperator(row=r, col=c, coeff=-h)
+        PlaquetteOperator(row=r, col=c)
         for r in range(n_rows - 1)
         for c in range(n_cols - 1)
     )
-    electric_terms = build_electric_terms(shape, coeff=g, N=2)
+    electric_terms = build_electric_terms(shape, N=2)
     mass_terms = tuple(
         MatterMassTerm(
             row=r,
             col=c,
-            coeff=m,
             charge_of_site=(0, 1),
         )
         for r in range(n_rows)
         for c in range(n_cols)
     )
     horizontal_hops = tuple(
-        HorizontalMatterHoppingTerm(row=r, col=c, coeff=J)
+        HorizontalMatterHoppingTerm(row=r, col=c)
         for r in range(n_rows)
         for c in range(n_cols - 1)
     )
     vertical_hops = tuple(
-        VerticalMatterHoppingTerm(row=r, col=c, coeff=J)
+        VerticalMatterHoppingTerm(row=r, col=c)
         for r in range(n_rows - 1)
         for c in range(n_cols)
     )
     terms = electric_terms + plaquette_terms + mass_terms + horizontal_hops + vertical_hops
-    return GILocalHamiltonian(shape=shape, terms=terms)
+    return GILocalHamiltonian(
+        shape=shape,
+        terms=terms,
+        coeffs=(jnp.asarray(g),) * len(electric_terms)
+        + (jnp.asarray(-h),) * len(plaquette_terms)
+        + (jnp.asarray(m),) * len(mass_terms)
+        + (jnp.asarray(J),) * len(horizontal_hops)
+        + (jnp.asarray(J),) * len(vertical_hops),
+    )
 
 
 def run_optimization(

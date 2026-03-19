@@ -56,10 +56,13 @@ def _sample_with_kernels(
 class GIPEPSTest(unittest.TestCase):
     def _plaquette_terms(self, shape, coeff):
         n_rows, n_cols = shape
-        return tuple(
-            PlaquetteOperator(row=r, col=c, coeff=coeff)
-            for r in range(n_rows - 1)
-            for c in range(n_cols - 1)
+        return (
+            tuple(
+                PlaquetteOperator(row=r, col=c)
+                for r in range(n_rows - 1)
+                for c in range(n_cols - 1)
+            ),
+            (jnp.asarray(coeff),) * ((n_rows - 1) * (n_cols - 1)),
         )
 
     def _assert_gauss(self, sites, h_links, v_links, config):
@@ -159,11 +162,13 @@ class GIPEPSTest(unittest.TestCase):
                 charge_of_site=charge_of_site,
                 particle_number=(2 if phys_dim == 2 else None),
             )
-            electric_terms = build_electric_terms(config.shape, coeff=0.1, N=config.N)
-            plaquette_terms = self._plaquette_terms(config.shape, coeff=0.2)
+            electric_terms = build_electric_terms(config.shape, N=config.N)
+            plaquette_terms, plaquette_coeffs = self._plaquette_terms(config.shape, coeff=0.2)
             operator = GILocalHamiltonian(
                 shape=config.shape,
                 terms=electric_terms + plaquette_terms,
+                coeffs=(jnp.asarray(0.1),) * len(electric_terms)
+                + plaquette_coeffs,
             )
             n_chains = 2
             for idx, strategy in enumerate(strategies):
@@ -228,11 +233,13 @@ class GIPEPSTest(unittest.TestCase):
         )
         strategy = NoTruncation()
         model = GIPEPS(rngs=nnx.Rngs(0), config=config, contraction_strategy=strategy)
-        electric_terms = build_electric_terms(config.shape, coeff=0.1, N=config.N)
-        plaquette_terms = self._plaquette_terms(config.shape, coeff=0.2)
+        electric_terms = build_electric_terms(config.shape, N=config.N)
+        plaquette_terms, plaquette_coeffs = self._plaquette_terms(config.shape, coeff=0.2)
         operator = GILocalHamiltonian(
             shape=config.shape,
             terms=electric_terms + plaquette_terms,
+            coeffs=(jnp.asarray(0.1),) * len(electric_terms)
+            + plaquette_coeffs,
         )
         key = jax.random.key(0)
         key, init_key = jax.random.split(key)
@@ -279,11 +286,13 @@ class GIPEPSTest(unittest.TestCase):
         )
         strategy = NoTruncation()
         model = GIPEPS(rngs=nnx.Rngs(1), config=config, contraction_strategy=strategy)
-        electric_terms = build_electric_terms(config.shape, coeff=0.1, N=config.N)
-        plaquette_terms = self._plaquette_terms(config.shape, coeff=0.2)
+        electric_terms = build_electric_terms(config.shape, N=config.N)
+        plaquette_terms, plaquette_coeffs = self._plaquette_terms(config.shape, coeff=0.2)
         operator = GILocalHamiltonian(
             shape=config.shape,
             terms=electric_terms + plaquette_terms,
+            coeffs=(jnp.asarray(0.1),) * len(electric_terms)
+            + plaquette_coeffs,
         )
         key = jax.random.key(1)
         key, init_key = jax.random.split(key)
@@ -338,11 +347,13 @@ class GIPEPSTest(unittest.TestCase):
         )
         strategy = NoTruncation()
         model = GIPEPS(rngs=nnx.Rngs(42), config=config, contraction_strategy=strategy)
-        electric_terms = build_electric_terms(config.shape, coeff=0.1, N=config.N)
-        plaquette_terms = self._plaquette_terms(config.shape, coeff=0.2)
+        electric_terms = build_electric_terms(config.shape, N=config.N)
+        plaquette_terms, plaquette_coeffs = self._plaquette_terms(config.shape, coeff=0.2)
         operator = GILocalHamiltonian(
             shape=config.shape,
             terms=electric_terms + plaquette_terms,
+            coeffs=(jnp.asarray(0.1),) * len(electric_terms)
+            + plaquette_coeffs,
         )
         key = jax.random.key(42)
         key, init_key = jax.random.split(key)
@@ -467,11 +478,13 @@ class GIPEPSTest(unittest.TestCase):
         )
         strategy = NoTruncation()
         model = GIPEPS(rngs=nnx.Rngs(42), config=config, contraction_strategy=strategy)
-        electric_terms = build_electric_terms(config.shape, coeff=0.1, N=config.N)
-        plaquette_terms = self._plaquette_terms(config.shape, coeff=0.2)
+        electric_terms = build_electric_terms(config.shape, N=config.N)
+        plaquette_terms, plaquette_coeffs = self._plaquette_terms(config.shape, coeff=0.2)
         operator = GILocalHamiltonian(
             shape=config.shape,
             terms=electric_terms + plaquette_terms,
+            coeffs=(jnp.asarray(0.1),) * len(electric_terms)
+            + plaquette_coeffs,
         )
         key = jax.random.key(42)
         key, init_key = jax.random.split(key)
@@ -603,11 +616,13 @@ class GIPEPSTest(unittest.TestCase):
             particle_number=2,
         )
         model = GIPEPS(rngs=nnx.Rngs(123), config=config, contraction_strategy=NoTruncation())
-        electric_terms = build_electric_terms(config.shape, coeff=0.1, N=config.N)
-        plaquette_terms = self._plaquette_terms(config.shape, coeff=0.2)
+        electric_terms = build_electric_terms(config.shape, N=config.N)
+        plaquette_terms, plaquette_coeffs = self._plaquette_terms(config.shape, coeff=0.2)
         operator = GILocalHamiltonian(
             shape=config.shape,
             terms=electric_terms + plaquette_terms,
+            coeffs=(jnp.asarray(0.1),) * len(electric_terms)
+            + plaquette_coeffs,
         )
 
         key = jax.random.key(123)

@@ -8,7 +8,7 @@ import jax.numpy as jnp
 
 from vmc.operators.local_terms import (
     DiagonalOperator,
-    Operator,
+    LocalHamiltonian as GILocalHamiltonian,
     TransitionOperator,
     support_span,
 )
@@ -53,10 +53,9 @@ class MatterMassTerm(DiagonalOperator):
         *,
         row: int,
         col: int,
-        coeff: float,
         charge_of_site: tuple[int, ...],
     ) -> None:
-        diag = jnp.asarray(charge_of_site, dtype=jnp.int32) * jnp.asarray(coeff)
+        diag = jnp.asarray(charge_of_site, dtype=jnp.int32)
         super().__init__(sites=((row, col),), diag=diag)
 
 
@@ -67,23 +66,19 @@ class HorizontalMatterHoppingTerm(TransitionOperator):
 
     row: int
     col: int
-    coeff: jax.Array
 
     @property
     def sites(self) -> tuple[tuple[int, int], ...]:
         return ((self.row, self.col), (self.row, self.col + 1))
 
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "coeff", jnp.asarray(self.coeff))
-
     def tree_flatten(self):
-        return (self.coeff,), (self.row, self.col)
+        return (), (self.row, self.col)
 
     @classmethod
     def tree_unflatten(cls, aux_data, children):
-        (coeff,) = children
+        del children
         row, col = aux_data
-        return cls(row=row, col=col, coeff=coeff)
+        return cls(row=row, col=col)
 
 
 @jax.tree_util.register_pytree_node_class
@@ -93,41 +88,19 @@ class VerticalMatterHoppingTerm(TransitionOperator):
 
     row: int
     col: int
-    coeff: jax.Array
 
     @property
     def sites(self) -> tuple[tuple[int, int], ...]:
         return ((self.row, self.col), (self.row + 1, self.col))
 
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "coeff", jnp.asarray(self.coeff))
-
     def tree_flatten(self):
-        return (self.coeff,), (self.row, self.col)
+        return (), (self.row, self.col)
 
     @classmethod
     def tree_unflatten(cls, aux_data, children):
-        (coeff,) = children
+        del children
         row, col = aux_data
-        return cls(row=row, col=col, coeff=coeff)
-
-
-@jax.tree_util.register_pytree_node_class
-@dataclass(frozen=True)
-class GILocalHamiltonian:
-    """Local Hamiltonian container for GI-PEPS."""
-
-    shape: tuple[int, int]
-    terms: tuple[Operator, ...] = ()
-
-    def tree_flatten(self):
-        return (self.terms,), (self.shape,)
-
-    @classmethod
-    def tree_unflatten(cls, aux_data, children):
-        (terms,) = children
-        (shape,) = aux_data
-        return cls(shape=shape, terms=terms)
+        return cls(row=row, col=col)
 
 
 @support_span.dispatch
@@ -142,11 +115,10 @@ def support_span(_: VerticalMatterHoppingTerm) -> tuple[int, int]:
 
 def build_electric_terms(
     shape: tuple[int, int],
-    coeff: float,
     N: int,
 ) -> tuple[LinkDiagonalTerm, ...]:
     n_rows, n_cols = shape
-    diag = coeff * (2.0 - 2.0 * jnp.cos(2.0 * jnp.pi * jnp.arange(N) / N))
+    diag = 2.0 - 2.0 * jnp.cos(2.0 * jnp.pi * jnp.arange(N) / N)
     terms: list[LinkDiagonalTerm] = []
     for r in range(n_rows):
         for c in range(n_cols - 1):

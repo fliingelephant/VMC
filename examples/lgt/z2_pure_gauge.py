@@ -67,30 +67,35 @@ def build_z2_hamiltonian(
     """Build the pure Z2 gauge Hamiltonian."""
     n_rows, n_cols = shape
     plaquette_terms = tuple(
-        PlaquetteOperator(row=r, col=c, coeff=-h)
+        PlaquetteOperator(row=r, col=c)
         for r in range(n_rows - 1)
         for c in range(n_cols - 1)
     )
-    electric_terms = build_electric_terms(shape, coeff=g, N=2)
-    return GILocalHamiltonian(shape=shape, terms=electric_terms + plaquette_terms)
+    electric_terms = build_electric_terms(shape, N=2)
+    return GILocalHamiltonian(
+        shape=shape,
+        terms=electric_terms + plaquette_terms,
+        coeffs=(jnp.asarray(g),) * len(electric_terms)
+        + (jnp.asarray(-h),) * len(plaquette_terms),
+    )
 
 
 def build_mean_plaquette_observable(shape: tuple[int, int]) -> GILocalHamiltonian:
     """Build the average plaquette operator.
 
-    ``PlaquetteOperator`` evaluates ``coeff * (P + P†)``. For Z2, ``P = P†``,
-    so the average plaquette value is obtained with a coefficient of
+    ``PlaquetteOperator`` evaluates ``P + P†``. For Z2, ``P = P†``, so the
+    average plaquette value is obtained with a coefficient of
     ``1 / (2 * n_plaquettes)``.
     """
     n_rows, n_cols = shape
     n_plaquettes = (n_rows - 1) * (n_cols - 1)
     coeff = jnp.asarray(0.5 / n_plaquettes, dtype=jnp.complex128)
     terms = tuple(
-        PlaquetteOperator(row=r, col=c, coeff=coeff)
+        PlaquetteOperator(row=r, col=c)
         for r in range(n_rows - 1)
         for c in range(n_cols - 1)
     )
-    return GILocalHamiltonian(shape=shape, terms=terms)
+    return GILocalHamiltonian(shape=shape, terms=terms, coeffs=(coeff,) * len(terms))
 
 
 def build_mean_link_z_observable(

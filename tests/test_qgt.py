@@ -179,14 +179,17 @@ class QGTTest(unittest.TestCase):
         key = jax.random.key(123)
         init_cfg = model.random_physical_configuration(key, n_samples=1)
 
-        electric_terms = build_electric_terms(config.shape, coeff=0.1, N=config.N)
+        electric_terms = build_electric_terms(config.shape, N=config.N)
         plaquette_terms = tuple(
-            PlaquetteOperator(row=r, col=c, coeff=0.2)
+            PlaquetteOperator(row=r, col=c)
             for r in range(config.shape[0] - 1)
             for c in range(config.shape[1] - 1)
         )
         operator = GILocalHamiltonian(
-            shape=config.shape, terms=electric_terms + plaquette_terms
+            shape=config.shape,
+            terms=electric_terms + plaquette_terms,
+            coeffs=(jnp.asarray(0.1),) * len(electric_terms)
+            + (jnp.asarray(0.2),) * len(plaquette_terms),
         )
 
         samples_full, grads_full, _ = _sample_with_kernels(
@@ -242,14 +245,17 @@ class QGTTest(unittest.TestCase):
         key = jax.random.key(123)
         init_cfg = model.random_physical_configuration(key, n_samples=1)
 
-        electric_terms = build_electric_terms(config.shape, coeff=0.1, N=config.N)
+        electric_terms = build_electric_terms(config.shape, N=config.N)
         plaquette_terms = tuple(
-            PlaquetteOperator(row=r, col=c, coeff=0.2)
+            PlaquetteOperator(row=r, col=c)
             for r in range(config.shape[0] - 1)
             for c in range(config.shape[1] - 1)
         )
         operator = GILocalHamiltonian(
-            shape=config.shape, terms=electric_terms + plaquette_terms
+            shape=config.shape,
+            terms=electric_terms + plaquette_terms,
+            coeffs=(jnp.asarray(0.1),) * len(electric_terms)
+            + (jnp.asarray(0.2),) * len(plaquette_terms),
         )
         _, grads, p = _sample_with_kernels(
             model,

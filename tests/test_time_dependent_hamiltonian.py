@@ -134,6 +134,99 @@ class TimeDependentHamiltonianTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "non-None time"):
             init_cache(tensors, config_states)
 
+    def test_time_dependent_multiplies_static_coeffs(self) -> None:
+        model = PEPS(
+            rngs=nnx.Rngs(0),
+            shape=(1, 1),
+            bond_dim=1,
+            contraction_strategy=NoTruncation(),
+        )
+        operator = TimeDependentHamiltonian(
+            base=LocalHamiltonian(
+                shape=(1, 1),
+                terms=(
+                    DiagonalOperator(
+                        sites=((0, 0),),
+                        diag=jnp.asarray([1.0, 1.0], dtype=jnp.complex128),
+                    ),
+                ),
+                coeffs=(jnp.asarray(2.0, dtype=jnp.float64),),
+            ),
+            schedule=AffineSchedule(
+                offset=jnp.asarray([1.5], dtype=jnp.float64),
+                slope=jnp.asarray([0.5], dtype=jnp.float64),
+            ),
+        )
+        init_cache, transition, estimate = build_mc_kernels(
+            model,
+            operator,
+            full_gradient=True,
+        )
+        tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
+        config_states = jnp.zeros((1, 1), dtype=jnp.int32)
+        cache = init_cache(tensors, config_states, t=2.0)
+        chain_keys = jax.random.split(jax.random.key(1), 1)
+        mc_sampler = make_mc_sampler(transition, estimate)
+        (_, _, _), (_, estimates) = mc_sampler(
+            tensors,
+            config_states,
+            chain_keys,
+            cache,
+            n_steps=1,
+        )
+        self.assertAlmostEqual(
+            float(estimates.local_estimate[0, 0, 0].real),
+            5.0,
+            places=12,
+        )
+
+    def test_scalar_schedule_scales_multi_term_hamiltonian_uniformly(self) -> None:
+        model = PEPS(
+            rngs=nnx.Rngs(0),
+            shape=(1, 1),
+            bond_dim=1,
+            contraction_strategy=NoTruncation(),
+        )
+        operator = TimeDependentHamiltonian(
+            base=LocalHamiltonian(
+                shape=(1, 1),
+                terms=(
+                    DiagonalOperator(
+                        sites=((0, 0),),
+                        diag=jnp.asarray([1.0, 1.0], dtype=jnp.complex128),
+                    ),
+                    DiagonalOperator(
+                        sites=((0, 0),),
+                        diag=jnp.asarray([2.0, 2.0], dtype=jnp.complex128),
+                    ),
+                ),
+                coeffs=(2.0, 3.0),
+            ),
+            schedule=AffineSchedule(offset=4.0, slope=0.0),
+        )
+        init_cache, transition, estimate = build_mc_kernels(
+            model,
+            operator,
+            full_gradient=True,
+        )
+        tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
+        config_states = jnp.zeros((1, 1), dtype=jnp.int32)
+        cache = init_cache(tensors, config_states, t=0.0)
+        chain_keys = jax.random.split(jax.random.key(1), 1)
+        mc_sampler = make_mc_sampler(transition, estimate)
+        (_, _, _), (_, estimates) = mc_sampler(
+            tensors,
+            config_states,
+            chain_keys,
+            cache,
+            n_steps=1,
+        )
+        self.assertAlmostEqual(
+            float(estimates.local_estimate[0, 0, 0].real),
+            32.0,
+            places=12,
+        )
+
     def test_tdvp_uses_time_dependent_coeffs(self) -> None:
         model = PEPS(
             rngs=nnx.Rngs(0),

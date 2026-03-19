@@ -105,8 +105,10 @@ def local_estimate(
     samples: jax.Array,
     operator: LocalHamiltonian,
     amps: jax.Array,
+    *,
+    coeffs: jax.Array | None = None,
 ) -> jax.Array:
-    return peps_local_estimate(model, samples, operator, amps)
+    return peps_local_estimate(model, samples, operator, amps, coeffs=coeffs)
 
 
 @dispatch

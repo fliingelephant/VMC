@@ -56,8 +56,8 @@ DEFAULT_N_SAMPLES = 10240
 DEFAULT_N_CHAINS = 1024
 DEFAULT_N_STEPS_GS = 400
 DEFAULT_DT_GS = 0.005
-DEFAULT_GS_DIAG_SHIFT = 1e-4
-DEFAULT_T = 18.0
+DEFAULT_GS_DIAG_SHIFT = 1e-6
+DEFAULT_T = 20.0
 DEFAULT_DT_RT = 0.01
 DEFAULT_RT_DIAG_SHIFT = 1e-8
 DEFAULT_SEED = 42
@@ -98,7 +98,7 @@ def _default_real_time_json_path(state_path: Path, *, T: float) -> Path:
 
 
 def _default_plot_path(input_path: Path) -> Path:
-    return input_path.with_name(f"{input_path.stem}_fig5a.png")
+    return input_path.with_name(f"{input_path.stem}_fig5a.pdf")
 
 
 def _save_json(result: dict, output_path: Path) -> None:
@@ -155,12 +155,17 @@ def build_z2_hamiltonian(
     """Build the pure Z2 gauge Hamiltonian."""
     n_rows, n_cols = shape
     plaquette_terms = tuple(
-        PlaquetteOperator(row=row, col=col, coeff=-h)
+        PlaquetteOperator(row=row, col=col)
         for row in range(n_rows - 1)
         for col in range(n_cols - 1)
     )
-    electric_terms = build_electric_terms(shape, coeff=g, N=2)
-    return GILocalHamiltonian(shape=shape, terms=electric_terms + plaquette_terms)
+    electric_terms = build_electric_terms(shape, N=2)
+    return GILocalHamiltonian(
+        shape=shape,
+        terms=electric_terms + plaquette_terms,
+        coeffs=(jnp.asarray(g),) * len(electric_terms)
+        + (jnp.asarray(-h),) * len(plaquette_terms),
+    )
 
 
 def build_fig5a_plaquette_observables(
@@ -169,18 +174,19 @@ def build_fig5a_plaquette_observables(
 ) -> tuple[GILocalHamiltonian, ...]:
     """Build the selected plaquette observables used in Fig. 5(a).
 
-    The plaquette labels follow the Wu open-data convention directly: row-major
-    plaquette-grid indices on the ``(L - 1) x (L - 1)`` plaquette lattice.
+    The Wu/open-data plaquette rows are counted from the bottom, while the
+    internal ``PlaquetteOperator`` rows are counted from the top.
 
-    ``PlaquetteOperator`` evaluates ``coeff * (P + P†)``. For Z2, ``P = P†``,
-    so a coefficient of ``0.5`` yields the plaquette expectation value itself.
+    ``PlaquetteOperator`` evaluates ``P + P†``. For Z2, ``P = P†``, so a
+    coefficient of ``0.5`` yields the plaquette expectation value itself.
     """
     if shape[0] < 4 or shape[1] < 4:
         raise ValueError("Fig. 5(a) selected plaquettes require L >= 4.")
     return tuple(
         GILocalHamiltonian(
             shape=shape,
-            terms=(PlaquetteOperator(row=row, col=col, coeff=0.5),),
+            terms=(PlaquetteOperator(row=shape[0] - 2 - row, col=col),),
+            coeffs=(jnp.asarray(0.5),),
         )
         for row, col in plaquettes
     )

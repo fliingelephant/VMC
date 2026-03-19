@@ -145,9 +145,11 @@ def local_estimate(
     samples = jnp.asarray(samples)
     amps = jnp.asarray(amps)
     shape = model.shape
-    bucketed_terms, _ = merge_operators(
+    bucketed_terms, coeff_structure = merge_operators(
         (operator,), shape, eval_span=type(model).eval_span,
     )
+    base_coeffs = coeff_structure.build_coeffs()
+    coeffs = base_coeffs if coeffs is None else base_coeffs * coeffs
     has_diag = bool(bucketed_terms.diagonal)
     has_offdiag = any(
         cell
@@ -170,8 +172,7 @@ def local_estimate(
                 for row, col in term.sites:
                     idx = idx * phys_dim + spins[row, col]
                 for _op_idx, coeff_idx in contributions:
-                    coeff = 1.0 if coeffs is None else coeffs[coeff_idx]
-                    total = total + coeff * term.diag[idx]
+                    total = total + coeffs[coeff_idx] * term.diag[idx]
             return total
 
         return jax.vmap(diag_only)(samples)

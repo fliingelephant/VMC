@@ -124,6 +124,48 @@ class LocalEstimateExactTest(unittest.TestCase):
         max_diff = jnp.max(jnp.abs(local_fast[mask] - local_slow[mask]))
         self.assertLess(float(max_diff), 1e-10)
 
+    def test_peps_local_estimate_respects_operator_coeffs(self) -> None:
+        shape = (1, 2)
+        bond_op = jnp.diag(jnp.asarray([1.0, -1.0, -1.0, 1.0], dtype=jnp.complex128))
+        operator = LocalHamiltonian(
+            shape=shape,
+            terms=(HorizontalTwoSiteOperator(0, 0, bond_op),),
+            coeffs=(jnp.asarray(2.5),),
+        )
+        model = PEPS(
+            rngs=nnx.Rngs(7),
+            shape=shape,
+            bond_dim=2,
+            contraction_strategy=NoTruncation(),
+        )
+        samples = spin_to_occupancy(jnp.asarray([[-1, -1], [-1, 1], [1, -1], [1, 1]], dtype=jnp.int32))
+        amps = _value(model, samples)
+        local = local_estimate(model, samples, operator, amps)
+        expected = jnp.asarray([2.5, -2.5, -2.5, 2.5], dtype=jnp.complex128)
+        self.assertTrue(jnp.allclose(local, expected))
+
+    def test_peps_local_estimate_composes_runtime_coeffs_with_operator_coeffs(self) -> None:
+        shape = (1, 2)
+        bond_op = jnp.diag(jnp.asarray([1.0, -1.0, -1.0, 1.0], dtype=jnp.complex128))
+        operator = LocalHamiltonian(
+            shape=shape,
+            terms=(HorizontalTwoSiteOperator(0, 0, bond_op),),
+            coeffs=(2.5,),
+        )
+        model = PEPS(
+            rngs=nnx.Rngs(7),
+            shape=shape,
+            bond_dim=2,
+            contraction_strategy=NoTruncation(),
+        )
+        samples = spin_to_occupancy(
+            jnp.asarray([[-1, -1], [-1, 1], [1, -1], [1, 1]], dtype=jnp.int32)
+        )
+        amps = _value(model, samples)
+        local = local_estimate(model, samples, operator, amps, coeffs=jnp.asarray([3.0]))
+        expected = jnp.asarray([7.5, -7.5, -7.5, 7.5], dtype=jnp.complex128)
+        self.assertTrue(jnp.allclose(local, expected))
+
     def test_multi_operator_evaluation(self) -> None:
         """Multiple operators evaluated via build_mc_kernels match individual evaluations."""
         shape = (3, 3)

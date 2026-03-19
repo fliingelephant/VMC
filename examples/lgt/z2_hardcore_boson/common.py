@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import shutil
 from pathlib import Path
 from typing import Any, Callable
@@ -269,6 +270,10 @@ def save_latest(
     npz_tmp_path.replace(npz_path)
 
     json_tmp_path = json_path.with_name(f"{json_path.name}.tmp")
+    clean_latest_metrics = {
+        key: (None if isinstance(value, float) and not math.isfinite(value) else value)
+        for key, value in latest_metrics.items()
+    }
     json_tmp_path.write_text(
         json.dumps(
             {
@@ -277,9 +282,10 @@ def save_latest(
                     "completed_steps": int(driver.step_count),
                     "imaginary_time": float(driver.t),
                 },
-                "latest_metrics": latest_metrics,
+                "latest_metrics": clean_latest_metrics,
             },
             indent=2,
+            allow_nan=False,
         )
     )
     json_tmp_path.replace(json_path)

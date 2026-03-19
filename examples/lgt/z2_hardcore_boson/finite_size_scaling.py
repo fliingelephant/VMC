@@ -134,7 +134,6 @@ def main() -> None:
         )
         for bulk_size in bulk_sizes
     )
-    run_dir = prepare_run_dir(_run_dir(args), resume=args.resume)
     problem = _problem(args, particle_number)
     driver = build_ground_state_driver(
         shape=shape,
@@ -153,6 +152,7 @@ def main() -> None:
         diag_shift=args.diag_shift,
         observables=observables,
     )
+    run_dir = prepare_run_dir(_run_dir(args), resume=args.resume)
     maybe_resume(
         run_dir,
         problem=problem,

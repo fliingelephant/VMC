@@ -111,7 +111,6 @@ def main() -> None:
     args = _parse_args()
     shape = (args.L, args.L)
     particle_number = half_filling(shape)
-    run_dir = prepare_run_dir(_run_dir(args), resume=args.resume)
     problem = _problem(args, particle_number)
     driver = build_ground_state_driver(
         shape=shape,
@@ -129,6 +128,7 @@ def main() -> None:
         dt=args.dt,
         diag_shift=args.diag_shift,
     )
+    run_dir = prepare_run_dir(_run_dir(args), resume=args.resume)
     maybe_resume(run_dir, problem=problem, driver=driver, resume=args.resume, label="bond_dim_scan")
     run_ground_state_steps(
         label="bond_dim_scan",

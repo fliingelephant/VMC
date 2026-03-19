@@ -94,7 +94,6 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
-    run_dir = prepare_run_dir(_run_dir(), resume=args.resume)
     problem = _problem(args)
     driver = build_ground_state_driver(
         shape=SHAPE,
@@ -112,6 +111,7 @@ def main() -> None:
         dt=args.dt,
         diag_shift=args.diag_shift,
     )
+    run_dir = prepare_run_dir(_run_dir(), resume=args.resume)
     maybe_resume(run_dir, problem=problem, driver=driver, resume=args.resume, label="benchmark_3x3")
     run_ground_state_steps(
         label="benchmark_3x3",

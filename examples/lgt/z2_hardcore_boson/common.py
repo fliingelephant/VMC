@@ -90,34 +90,42 @@ def build_z2_hardcore_boson_hamiltonian(
     """Build the Z2 gauge theory with hard-core bosons Hamiltonian."""
     n_rows, n_cols = shape
     plaquette_terms = tuple(
-        PlaquetteOperator(row=row, col=col, coeff=-h)
+        PlaquetteOperator(row=row, col=col)
         for row in range(n_rows - 1)
         for col in range(n_cols - 1)
     )
-    electric_terms = build_electric_terms(shape, coeff=g, N=2)
+    electric_terms = build_electric_terms(shape, N=2)
     mass_terms = tuple(
         MatterMassTerm(
             row=row,
             col=col,
-            coeff=m,
             charge_of_site=CHARGE_OF_SITE,
         )
         for row in range(n_rows)
         for col in range(n_cols)
     )
     horizontal_hops = tuple(
-        HorizontalMatterHoppingTerm(row=row, col=col, coeff=J)
+        HorizontalMatterHoppingTerm(row=row, col=col)
         for row in range(n_rows)
         for col in range(n_cols - 1)
     )
     vertical_hops = tuple(
-        VerticalMatterHoppingTerm(row=row, col=col, coeff=J)
+        VerticalMatterHoppingTerm(row=row, col=col)
         for row in range(n_rows - 1)
         for col in range(n_cols)
     )
+    terms = electric_terms + plaquette_terms + mass_terms + horizontal_hops + vertical_hops
+    coeffs = (
+        (jnp.asarray(g),) * len(electric_terms)
+        + (jnp.asarray(-h),) * len(plaquette_terms)
+        + (jnp.asarray(m),) * len(mass_terms)
+        + (jnp.asarray(J),) * len(horizontal_hops)
+        + (jnp.asarray(J),) * len(vertical_hops)
+    )
     return GILocalHamiltonian(
         shape=shape,
-        terms=electric_terms + plaquette_terms + mass_terms + horizontal_hops + vertical_hops,
+        terms=terms,
+        coeffs=coeffs,
     )
 
 
@@ -411,29 +419,35 @@ def build_central_bulk_observable(
     col1 = col0 + bulk_size
 
     terms = []
-    for term in build_z2_hardcore_boson_hamiltonian(shape, h=h, g=g, J=J, m=m).terms:
+    coeffs = []
+    operator = build_z2_hardcore_boson_hamiltonian(shape, h=h, g=g, J=J, m=m)
+    for term, coeff in zip(operator.terms, operator.coeffs):
         if isinstance(term, MatterMassTerm):
             row, col = term.sites[0]
             if _site_in_box(row, col, row0, row1, col0, col1):
                 terms.append(term)
+                coeffs.append(coeff)
         elif isinstance(term, HorizontalMatterHoppingTerm):
             if (
                 _site_in_box(term.row, term.col, row0, row1, col0, col1)
                 and _site_in_box(term.row, term.col + 1, row0, row1, col0, col1)
             ):
                 terms.append(term)
+                coeffs.append(coeff)
         elif isinstance(term, VerticalMatterHoppingTerm):
             if (
                 _site_in_box(term.row, term.col, row0, row1, col0, col1)
                 and _site_in_box(term.row + 1, term.col, row0, row1, col0, col1)
             ):
                 terms.append(term)
+                coeffs.append(coeff)
         elif isinstance(term, PlaquetteOperator):
             if (
                 _site_in_box(term.row, term.col, row0, row1, col0, col1)
                 and _site_in_box(term.row + 1, term.col + 1, row0, row1, col0, col1)
             ):
                 terms.append(term)
+                coeffs.append(coeff)
         elif isinstance(term, LinkDiagonalTerm):
             if term.orientation == "h":
                 keep = (
@@ -451,6 +465,7 @@ def build_central_bulk_observable(
                 )
             if keep:
                 terms.append(term)
+                coeffs.append(coeff)
         else:
             raise TypeError(f"Unsupported term type: {type(term)!r}")
-    return GILocalHamiltonian(shape=shape, terms=tuple(terms))
+    return GILocalHamiltonian(shape=shape, terms=tuple(terms), coeffs=tuple(coeffs))

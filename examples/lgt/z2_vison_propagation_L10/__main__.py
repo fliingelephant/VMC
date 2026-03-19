@@ -614,8 +614,10 @@ def _real_time_result(
 
 
 def _run_ground_state_command(args: argparse.Namespace) -> None:
-    if args.resume_state is not None:
-        resume_state = _normalize_state_path(args.resume_state)
+    resume_state = (
+        None if args.resume_state is None else _normalize_state_path(args.resume_state)
+    )
+    if resume_state is not None:
         model, metadata = load_model_state(resume_state)
         if metadata.get("stage") != "ground_state":
             raise ValueError("Ground-state resume requires a ground-state checkpoint.")
@@ -649,10 +651,13 @@ def _run_ground_state_command(args: argparse.Namespace) -> None:
             bond_dim=args.bond_dim,
             seed=args.seed,
         )
-        state_path = args.state_output or _default_ground_state_state_path(
-            L=args.L,
-            g=args.g,
-            bond_dim=args.bond_dim,
+        state_path = _normalize_state_path(
+            args.state_output
+            or _default_ground_state_state_path(
+                L=args.L,
+                g=args.g,
+                bond_dim=args.bond_dim,
+            )
         )
         json_path = args.json_output or _matching_json_path(state_path)
         initial_step = 0

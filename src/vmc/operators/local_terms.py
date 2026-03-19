@@ -296,7 +296,7 @@ class CoefficientStructure:
 
 
 def merge_operators(
-    operators: tuple[object, ...],
+    operators: tuple[LocalHamiltonian | TimeDependentHamiltonian, ...],
     shape: tuple[int, int],
     eval_span: Callable[[TransitionOperator], tuple[int, int]] | None = None,
 ) -> tuple[BucketedOperators, CoefficientStructure]:
@@ -317,11 +317,16 @@ def merge_operators(
     base_coeffs: list[jax.Array] = []
     schedules: list = []
     for op_idx, op in enumerate(operators):
-        base = op.base if isinstance(op, TimeDependentHamiltonian) else op
-        schedule = op.schedule if isinstance(op, TimeDependentHamiltonian) else None
+        if isinstance(op, TimeDependentHamiltonian):
+            base = op.base
+            schedule = op.schedule
+        else:
+            base = op
+            schedule = None
+        if not isinstance(base, LocalHamiltonian):
+            raise TypeError(f"Unsupported operator type: {type(base)!r}")
         terms = base.terms
-        coeffs = _normalize_coeffs(getattr(base, "coeffs", None), len(terms))
-        base_coeffs.append(jnp.asarray(coeffs))
+        base_coeffs.append(jnp.asarray(base.coeffs))
         schedules.append(schedule)
         for local_idx, term in enumerate(terms):
             flat_terms.append((term, op_idx, local_idx))

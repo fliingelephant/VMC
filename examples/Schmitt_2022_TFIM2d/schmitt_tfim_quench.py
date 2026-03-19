@@ -39,6 +39,7 @@ from vmc.operators import (
 from vmc.peps import PEPS, Variational
 from vmc.preconditioners import (
     DirectSolve,
+    MetricsConfig,
     SRPreconditioner,
     solve_cg,
     solve_cholesky,
@@ -56,15 +57,15 @@ PLUS_X = jnp.asarray([1.0, 1.0], dtype=jnp.complex128) / jnp.sqrt(2.0)
 class RunConfig:
     """Runtime configuration for a single Schmitt-style quench."""
 
-    L: int = 9
+    L: int = 7
     tau_q: float = 0.8
     dt: float = 0.01
     bond_dim: int = 4
     boundary_dim: int = 16
     seed: int = 0
-    n_samples: int = 8192
-    n_chains: int = 128
-    solver: str = "svd"
+    n_samples: int = 10240
+    n_chains: int = 1024
+    solver: str = "cholesky"
     diag_shift: float = 1e-8
     gc: float = GC
     csv: str | None = None
@@ -233,8 +234,11 @@ def measurement_row(
     tau_q: float,
     gc: float,
     energy_per_site: float,
+    energy_err: float,
     mx: float,
+    mx_err: float,
     czz_values: tuple[float, ...],
+    czz_errs: tuple[float, ...],
     distances: tuple[int, ...],
 ) -> dict[str, float]:
     """Assemble one output row."""
@@ -245,10 +249,13 @@ def measurement_row(
         "J": 1.0 + epsilon,
         "g": gc * (1.0 - epsilon),
         "energy": energy_per_site,
+        "energy_err": energy_err,
         "mx": mx,
+        "mx_err": mx_err,
     }
-    for distance, value in zip(distances, czz_values, strict=True):
+    for distance, value, err in zip(distances, czz_values, czz_errs, strict=True):
         row[f"czz_r{distance}"] = value
+        row[f"czz_r{distance}_err"] = err
     return row
 
 
@@ -273,6 +280,12 @@ def build_driver(cfg: RunConfig) -> tuple[TDVPDriver, tuple[int, ...]]:
         preconditioner=SRPreconditioner(
             diag_shift=cfg.diag_shift,
             strategy=DirectSolve(solver=solver_from_name(cfg.solver)),
+            metrics_config=MetricsConfig(
+                record_FS_norm=True,
+                record_TDVP_residual=True,
+                record_SR_solve_residual=True,
+                record_step_wall_time=True,
+            ),
         ),
         dt=cfg.dt,
         t0=t0,
@@ -281,55 +294,108 @@ def build_driver(cfg: RunConfig) -> tuple[TDVPDriver, tuple[int, ...]]:
         sampler_key=jax.random.key(cfg.seed + 17),
         n_samples=cfg.n_samples,
         n_chains=cfg.n_chains,
-        full_gradient=True,
+        full_gradient=False,
     )
     return driver, distances
 
 
-def run_single_quench(cfg: RunConfig) -> list[dict[str, float]]:
-    """Run one Schmitt-style smooth quench and return the logged trajectory."""
+def _stat_err(stat) -> float:
+    eom = stat.error_of_mean
+    return float(eom.real) if jnp.isfinite(eom) else 0.0
+
+
+def run_single_quench(
+    cfg: RunConfig,
+    csv_path: Path | None = None,
+    tau_q_column: float | None = None,
+) -> list[dict[str, float]]:
+    """Run one Schmitt-style smooth quench and return the logged trajectory.
+
+    If csv_path is given, rows are written incrementally (crash-safe).
+    """
     t0, t1 = smooth_time_window(cfg.tau_q)
     total_time = t1 - t0
     steps = int(round(total_time / cfg.dt))
     if not jnp.isclose(total_time, steps * cfg.dt):
         raise ValueError("The smooth-ramp window must be an integer multiple of dt.")
 
+    print(
+        f"[schmitt] L={cfg.L}  tau_q={cfg.tau_q:.4f}  D={cfg.bond_dim}  "
+        f"D'={cfg.boundary_dim}  Ns={cfg.n_samples}  chains={cfg.n_chains}  "
+        f"solver={cfg.solver}  dt={cfg.dt:.4f}  steps={steps}",
+        flush=True,
+    )
+    print("[schmitt] Building driver...", flush=True)
     driver, distances = build_driver(cfg)
+    print(f"[schmitt] Driver built. Starting time evolution ({steps} steps)...", flush=True)
     n_sites = cfg.L * cfg.L
     rows = []
-    for _ in range(steps):
+    csv_writer = None
+    csv_fh = None
+
+    print(
+        "[schmitt] step time wall_time E/N E/N_err mx mx_err TDVP_res SR_res",
+        flush=True,
+    )
+    for step_i in range(steps):
         driver.run(cfg.dt)
-        rows.append(
-            measurement_row(
-                float(driver.t),
-                cfg.tau_q,
-                cfg.gc,
-                float(driver.energy.mean.real) / n_sites,
-                float(driver.observable_stats[0].mean.real),
-                tuple(float(stat.mean.real) for stat in driver.observable_stats[1:]),
-                distances,
-            )
+        e_stats = driver.energy
+        mx_stats = driver.observable_stats[0]
+        czz_stats = driver.observable_stats[1:]
+        metrics = driver.metrics
+        wall = metrics.get("step_wall_time", float("nan"))
+        tdvp_res = metrics.get("TDVP_residual", float("nan"))
+        sr_res = metrics.get("SR_solve_residual", float("nan"))
+        print(
+            f"[schmitt] {step_i + 1:4d}/{steps} {float(driver.t):8.4f} "
+            f"{wall:7.2f}s  E/N={float(e_stats.mean.real) / n_sites:.8f} "
+            f"+/- {_stat_err(e_stats) / n_sites:.6f}  "
+            f"mx={float(mx_stats.mean.real):.6f} +/- {_stat_err(mx_stats):.6f}  "
+            f"TDVP_res={tdvp_res:.2e}  SR_res={sr_res:.2e}",
+            flush=True,
         )
+        row = measurement_row(
+            float(driver.t),
+            cfg.tau_q,
+            cfg.gc,
+            float(e_stats.mean.real) / n_sites,
+            _stat_err(e_stats) / n_sites,
+            float(mx_stats.mean.real),
+            _stat_err(mx_stats),
+            tuple(float(s.mean.real) for s in czz_stats),
+            tuple(_stat_err(s) for s in czz_stats),
+            distances,
+        )
+        if tau_q_column is not None:
+            row = {"tau_q": tau_q_column, **row}
+        rows.append(row)
+
+        if csv_path is not None:
+            if csv_writer is None:
+                csv_path.parent.mkdir(parents=True, exist_ok=True)
+                csv_fh = csv_path.open("w", newline="")
+                csv_writer = csv.DictWriter(csv_fh, fieldnames=list(row.keys()))
+                csv_writer.writeheader()
+            csv_writer.writerow(row)
+            csv_fh.flush()
+
+    if csv_fh is not None:
+        csv_fh.close()
+        print(f"[schmitt] Saved {csv_path}", flush=True)
     return rows
 
 
-def run_tauq_sweep(cfg: RunConfig, tau_qs: tuple[float, ...]) -> list[dict[str, float]]:
+def run_tauq_sweep(
+    cfg: RunConfig, tau_qs: tuple[float, ...], csv_path: Path | None = None,
+) -> list[dict[str, float]]:
     """Run multiple quenches and concatenate the logged rows."""
-    return [
-        {"tau_q": tau_q, **row}
-        for tau_q in tau_qs
-        for row in run_single_quench(replace(cfg, tau_q=tau_q, csv=None))
-    ]
-
-
-def write_rows_csv(rows: list[dict[str, float]], path: Path) -> None:
-    """Write rows to CSV."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    headers = tuple(rows[0].keys())
-    with path.open("w", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=headers)
-        writer.writeheader()
-        writer.writerows(rows)
+    all_rows = []
+    for tau_q in tau_qs:
+        sub_cfg = replace(cfg, tau_q=tau_q)
+        all_rows.extend(
+            run_single_quench(sub_cfg, csv_path=csv_path, tau_q_column=tau_q)
+        )
+    return all_rows
 
 
 def parse_args() -> tuple[RunConfig, tuple[float, ...]]:
@@ -337,8 +403,8 @@ def parse_args() -> tuple[RunConfig, tuple[float, ...]]:
     parser = argparse.ArgumentParser(
         description="Run a PEPS Schmitt-style smooth TFIM quench on an odd OBC lattice."
     )
-    parser.add_argument("--L", type=int, default=RunConfig.L)
-    parser.add_argument("--tau-q", type=float, nargs="+", default=[RunConfig.tau_q])
+    parser.add_argument("--L", type=int, default=7)
+    parser.add_argument("--tau-q", type=float, nargs="+", default=[0.8])
     parser.add_argument("--dt", type=float, default=RunConfig.dt)
     parser.add_argument("--bond-dim", type=int, default=RunConfig.bond_dim)
     parser.add_argument("--boundary-dim", type=int, default=RunConfig.boundary_dim)
@@ -348,7 +414,7 @@ def parse_args() -> tuple[RunConfig, tuple[float, ...]]:
     parser.add_argument(
         "--solver",
         choices=("cg", "cholesky", "svd"),
-        default=RunConfig.solver,
+        default="cholesky",
     )
     parser.add_argument("--diag-shift", type=float, default=RunConfig.diag_shift)
     parser.add_argument("--csv", type=str, default=None)
@@ -382,16 +448,15 @@ def parse_args() -> tuple[RunConfig, tuple[float, ...]]:
 def main() -> None:
     """Run one or more smooth Schmitt quenches and print the logged rows."""
     cfg, tau_qs = parse_args()
-    rows = run_single_quench(cfg) if len(tau_qs) == 1 else run_tauq_sweep(cfg, tau_qs)
+    csv_path = Path(cfg.csv) if cfg.csv else None
+    if len(tau_qs) == 1:
+        rows = run_single_quench(cfg, csv_path=csv_path)
+    else:
+        rows = run_tauq_sweep(cfg, tau_qs, csv_path=csv_path)
     headers = tuple(rows[0].keys())
     print("\t".join(headers))
     for row in rows:
         print("\t".join(f"{float(row[key]):.10f}" for key in headers))
-
-    if cfg.csv:
-        path = Path(cfg.csv)
-        write_rows_csv(rows, path)
-        print(f"saved {path}")
 
 
 if __name__ == "__main__":

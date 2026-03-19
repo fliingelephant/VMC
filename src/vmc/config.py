@@ -17,6 +17,10 @@ config.update("jax_persistent_cache_min_compile_time_secs", 0)
 config.update("jax_persistent_cache_min_entry_size_bytes", -1)
 config.update("jax_persistent_cache_enable_xla_caches", "all")
 
+_xla_flags = os.environ.get("XLA_FLAGS", "")
+if "xla_gpu_force_compilation_parallelism" not in _xla_flags:
+    os.environ["XLA_FLAGS"] = f"{_xla_flags} --xla_gpu_force_compilation_parallelism=16".strip()
+
 
 def setup_logging() -> None:
     """Configure logging based on environment variables.

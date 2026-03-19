@@ -78,8 +78,12 @@ def _default_real_time_state_path(*, L: int, g: float, bond_dim: int) -> Path:
     return EXAMPLE_DIR / f"{_run_stem(L=L, g=g, bond_dim=bond_dim)}_real_time_latest.npz"
 
 
+def _normalize_state_path(path: Path) -> Path:
+    return path if path.suffix == ".npz" else path.with_suffix(".npz")
+
+
 def _matching_json_path(state_path: Path) -> Path:
-    return state_path.with_suffix(".json")
+    return _normalize_state_path(state_path).with_suffix(".json")
 
 
 def build_z2_hamiltonian(
@@ -215,6 +219,7 @@ def create_bottom_left_vison(model: GIPEPS) -> GIPEPS:
 
 
 def save_model_state(model: GIPEPS, metadata: dict, output_path: Path) -> None:
+    output_path = _normalize_state_path(output_path)
     _, params, model_state = nnx.split(model, nnx.Param, ...)
     if nnx.to_pure_dict(model_state):
         raise ValueError("Expected an empty non-parameter GIPEPS state.")
@@ -229,6 +234,7 @@ def save_model_state(model: GIPEPS, metadata: dict, output_path: Path) -> None:
 
 
 def load_model_state(input_path: Path) -> tuple[GIPEPS, dict]:
+    input_path = _normalize_state_path(input_path)
     with np.load(input_path) as data:
         metadata = json.loads(str(data["metadata_json"].item()))
         shape = tuple(int(x) for x in metadata["shape"])
@@ -401,9 +407,16 @@ def run_real_time(
         n_chains=n_chains,
         full_gradient=False,
     )
-    n_steps = int(round(T / dt))
-    if abs(T - n_steps * dt) > 1e-12 * max(1.0, abs(T), abs(dt)):
-        raise ValueError(f"T={T} must be an integer multiple of dt={dt}.")
+    remaining_time = T - initial_time
+    if remaining_time < -1e-12 * max(1.0, abs(T), abs(initial_time)):
+        raise ValueError(
+            f"Target final time T={T} is smaller than current checkpoint time {initial_time}."
+        )
+    n_steps = int(round(remaining_time / dt))
+    if abs(remaining_time - n_steps * dt) > 1e-12 * max(1.0, abs(remaining_time), abs(dt)):
+        raise ValueError(
+            f"Remaining time {remaining_time} must be an integer multiple of dt={dt}."
+        )
 
     print(
         "[real_time] step t dt wall_time energy energy_err energy_var "
@@ -602,7 +615,8 @@ def _real_time_result(
 
 def _run_ground_state_command(args: argparse.Namespace) -> None:
     if args.resume_state is not None:
-        model, metadata = load_model_state(args.resume_state)
+        resume_state = _normalize_state_path(args.resume_state)
+        model, metadata = load_model_state(resume_state)
         if metadata.get("stage") != "ground_state":
             raise ValueError("Ground-state resume requires a ground-state checkpoint.")
         shape = tuple(int(x) for x in metadata["shape"])
@@ -613,7 +627,7 @@ def _run_ground_state_command(args: argparse.Namespace) -> None:
             bond_dim=int(metadata["bond_dim"]),
             seed=int(metadata["seed"]),
         )
-        state_path = args.state_output or args.resume_state
+        state_path = _normalize_state_path(args.state_output or resume_state)
         json_path = args.json_output or _matching_json_path(state_path)
         initial_step = int(metadata.get("step", 0))
         initial_time = float(metadata.get("time", 0.0))
@@ -672,7 +686,7 @@ def _run_ground_state_command(args: argparse.Namespace) -> None:
                 dt=args.dt,
                 diag_shift=args.diag_shift,
                 checkpoint_every=args.save_every,
-                resume_state=args.resume_state,
+                resume_state=resume_state,
                 series=series_data,
             ),
             json_path,
@@ -696,7 +710,8 @@ def _run_ground_state_command(args: argparse.Namespace) -> None:
 
 
 def _run_real_time_command(args: argparse.Namespace) -> None:
-    model, metadata = load_model_state(args.state)
+    input_state = _normalize_state_path(args.state)
+    model, metadata = load_model_state(input_state)
     shape = tuple(int(x) for x in metadata["shape"])
     problem = _build_problem_metadata(
         shape=shape,
@@ -710,17 +725,17 @@ def _run_real_time_command(args: argparse.Namespace) -> None:
         model = create_bottom_left_vison(model)
         initial_step = 0
         initial_time = 0.0
-        state_path = args.state_output or _default_real_time_state_path(
+        state_path = _normalize_state_path(args.state_output or _default_real_time_state_path(
             L=problem["L"],
             g=float(problem["g"]),
             bond_dim=int(problem["bond_dim"]),
-        )
+        ))
         json_path = args.json_output or _matching_json_path(state_path)
         series: dict[str, list] = {}
     elif stage == "real_time":
         initial_step = int(metadata.get("step", 0))
         initial_time = float(metadata.get("time", 0.0))
-        state_path = args.state_output or args.state
+        state_path = _normalize_state_path(args.state_output or input_state)
         json_path = args.json_output or _matching_json_path(state_path)
         series = _load_existing_series(json_path)
         _validate_resume_series(
@@ -760,7 +775,7 @@ def _run_real_time_command(args: argparse.Namespace) -> None:
                 dt=args.dt,
                 diag_shift=args.diag_shift,
                 checkpoint_every=args.save_every,
-                input_state=args.state,
+                input_state=input_state,
                 series=series_data,
             ),
             json_path,

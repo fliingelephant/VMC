@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -357,12 +356,11 @@ def run_ground_state_steps(
         flush=True,
     )
     for local_step in range(1, n_steps + 1):
-        wall_start = time.perf_counter()
         driver.run(driver.dt)
         row = ground_state_metrics(
             driver,
             energy_scale=energy_scale,
-            step_wall_time=time.perf_counter() - wall_start,
+            step_wall_time=float(driver.metrics["step_wall_time"]),
         )
         if update_row is not None:
             update_row(driver, row)

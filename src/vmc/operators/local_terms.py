@@ -35,6 +35,26 @@ __all__ = [
 ]
 
 
+def _normalize_coeffs(
+    coeffs: Any,
+    n_terms: int,
+) -> tuple[jax.Array, ...]:
+    if coeffs is None:
+        return (jnp.asarray(1.0),) * n_terms
+    if isinstance(coeffs, tuple):
+        if len(coeffs) != n_terms:
+            raise ValueError(f"Expected {n_terms} coefficients, got {len(coeffs)}.")
+        return tuple(jnp.asarray(coeff) for coeff in coeffs)
+    coeff_array = jnp.asarray(coeffs)
+    if coeff_array.ndim == 0:
+        if n_terms != 1:
+            raise ValueError(f"Expected {n_terms} coefficients, got scalar.")
+        return (coeff_array,)
+    if coeff_array.shape != (n_terms,):
+        raise ValueError(f"Expected {n_terms} coefficients, got shape {coeff_array.shape}.")
+    return tuple(coeff_array[idx] for idx in range(n_terms))
+
+
 class Operator(abc.ABC):
     """Abstract base class for local operator terms."""
 
@@ -173,16 +193,11 @@ class LocalHamiltonian:
     coeffs: tuple[jax.Array, ...] | None = None
 
     def __post_init__(self) -> None:
-        coeffs = self.coeffs
-        if coeffs is None:
-            coeffs = (jnp.asarray(1.0),) * len(self.terms)
-        elif len(coeffs) != len(self.terms):
-            raise ValueError(
-                f"Expected {len(self.terms)} coefficients, got {len(coeffs)}."
-            )
-        else:
-            coeffs = tuple(jnp.asarray(coeff) for coeff in coeffs)
-        object.__setattr__(self, "coeffs", coeffs)
+        object.__setattr__(
+            self,
+            "coeffs",
+            _normalize_coeffs(self.coeffs, len(self.terms)),
+        )
 
     def tree_flatten(self):
         return (self.terms, self.coeffs), (self.shape,)
@@ -276,7 +291,7 @@ class CoefficientStructure:
 
 
 def merge_operators(
-    operators: tuple[LocalHamiltonian | TimeDependentHamiltonian, ...],
+    operators: tuple[object, ...],
     shape: tuple[int, int],
     eval_span: Callable[[TransitionOperator], tuple[int, int]] | None = None,
 ) -> tuple[BucketedOperators, CoefficientStructure]:
@@ -300,8 +315,8 @@ def merge_operators(
         base = op.base if isinstance(op, TimeDependentHamiltonian) else op
         schedule = op.schedule if isinstance(op, TimeDependentHamiltonian) else None
         terms = base.terms
-        coeffs = jnp.asarray(base.coeffs)
-        base_coeffs.append(coeffs)
+        coeffs = _normalize_coeffs(getattr(base, "coeffs", None), len(terms))
+        base_coeffs.append(jnp.asarray(coeffs))
         schedules.append(schedule)
         for local_idx, term in enumerate(terms):
             flat_terms.append((term, op_idx, local_idx))

@@ -227,6 +227,28 @@ class MergeOperatorsTest(unittest.TestCase):
             )
         )
 
+    def test_scalar_coeff_for_single_term_is_accepted(self) -> None:
+        shape = (2, 2)
+        op = LocalHamiltonian(
+            shape=shape,
+            terms=(PlaquetteOperator(row=0, col=0),),
+            coeffs=jnp.asarray(2.5),
+        )
+        _, coeff_struct = merge_operators((op,), shape)
+        self.assertTrue(jnp.allclose(coeff_struct.build_coeffs(), jnp.asarray([2.5])))
+
+    def test_wrapper_with_terms_only_defaults_to_unit_coeffs(self) -> None:
+        shape = (2, 2)
+
+        class Wrapper:
+            def __init__(self, terms):
+                self.terms = terms
+
+        wrapped = Wrapper((OneSiteOperator(row=0, col=0, op=jnp.eye(2)),))
+        merged, coeff_struct = merge_operators((wrapped,), shape)
+        self.assertEqual(len(merged), 1)
+        self.assertTrue(jnp.allclose(coeff_struct.build_coeffs(), jnp.asarray([1.0])))
+
 
 if __name__ == "__main__":
     unittest.main()

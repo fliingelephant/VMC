@@ -138,6 +138,8 @@ def local_estimate(
     samples: jax.Array,
     operator: LocalHamiltonian,
     amps: jax.Array,
+    *,
+    coeffs: jax.Array | None = None,
 ) -> jax.Array:
     """Compute local energy estimates for PEPS from local operator terms."""
     samples = jnp.asarray(samples)
@@ -146,7 +148,8 @@ def local_estimate(
     bucketed_terms, coeff_structure = merge_operators(
         (operator,), shape, eval_span=type(model).eval_span,
     )
-    coeffs = coeff_structure.build_coeffs()
+    if coeffs is None:
+        coeffs = coeff_structure.build_coeffs()
     has_diag = bool(bucketed_terms.diagonal)
     has_offdiag = any(
         cell

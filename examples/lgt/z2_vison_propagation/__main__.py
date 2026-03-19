@@ -155,12 +155,17 @@ def build_z2_hamiltonian(
     """Build the pure Z2 gauge Hamiltonian."""
     n_rows, n_cols = shape
     plaquette_terms = tuple(
-        PlaquetteOperator(row=row, col=col, coeff=-h)
+        PlaquetteOperator(row=row, col=col)
         for row in range(n_rows - 1)
         for col in range(n_cols - 1)
     )
-    electric_terms = build_electric_terms(shape, coeff=g, N=2)
-    return GILocalHamiltonian(shape=shape, terms=electric_terms + plaquette_terms)
+    electric_terms = build_electric_terms(shape, N=2)
+    return GILocalHamiltonian(
+        shape=shape,
+        terms=electric_terms + plaquette_terms,
+        coeffs=(jnp.asarray(g),) * len(electric_terms)
+        + (jnp.asarray(-h),) * len(plaquette_terms),
+    )
 
 
 def build_fig5a_plaquette_observables(
@@ -172,15 +177,16 @@ def build_fig5a_plaquette_observables(
     The plaquette labels follow the Wu open-data convention directly: row-major
     plaquette-grid indices on the ``(L - 1) x (L - 1)`` plaquette lattice.
 
-    ``PlaquetteOperator`` evaluates ``coeff * (P + P†)``. For Z2, ``P = P†``,
-    so a coefficient of ``0.5`` yields the plaquette expectation value itself.
+    ``PlaquetteOperator`` evaluates ``P + P†``. For Z2, ``P = P†``, so a
+    coefficient of ``0.5`` yields the plaquette expectation value itself.
     """
     if shape[0] < 4 or shape[1] < 4:
         raise ValueError("Fig. 5(a) selected plaquettes require L >= 4.")
     return tuple(
         GILocalHamiltonian(
             shape=shape,
-            terms=(PlaquetteOperator(row=row, col=col, coeff=0.5),),
+            terms=(PlaquetteOperator(row=row, col=col),),
+            coeffs=(jnp.asarray(0.5),),
         )
         for row, col in plaquettes
     )

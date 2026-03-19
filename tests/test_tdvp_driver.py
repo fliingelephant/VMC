@@ -206,7 +206,8 @@ class TDVPKernelCacheTest(unittest.TestCase):
             model,
             GILocalHamiltonian(
                 shape=shape,
-                terms=build_electric_terms(shape, coeff=0.1, N=2),
+                terms=build_electric_terms(shape, N=2),
+                coeffs=(jnp.asarray(0.1),) * (shape[0] * (shape[1] - 1) + (shape[0] - 1) * shape[1]),
             ),
             preconditioner=SRPreconditioner(
                 strategy=DirectSolve(solver=solve_cholesky),

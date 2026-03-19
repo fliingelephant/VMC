@@ -9,7 +9,10 @@ import jax
 import jax.numpy as jnp
 from plum import dispatch
 
-from vmc.operators.time_dependent import coeffs_at, operator_schedule, operator_terms
+from vmc.operators.time_dependent import (
+    TimeDependentHamiltonian,
+    coeffs_at,
+)
 
 Contribution: TypeAlias = tuple[int, int]  # (op_idx, coeff_idx)
 Contributions: TypeAlias = tuple["Contribution", ...]
@@ -149,19 +152,15 @@ class PlaquetteOperator(TransitionOperator):
 
     row: int
     col: int
-    coeff: jax.Array
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "coeff", jnp.asarray(self.coeff))
 
     def tree_flatten(self):
-        return (self.coeff,), (self.row, self.col)
+        return (), (self.row, self.col)
 
     @classmethod
     def tree_unflatten(cls, aux_data, children):
-        (coeff,) = children
+        del children
         row, col = aux_data
-        return cls(row=row, col=col, coeff=coeff)
+        return cls(row=row, col=col)
 
 
 @jax.tree_util.register_pytree_node_class
@@ -171,15 +170,28 @@ class LocalHamiltonian:
 
     shape: tuple[int, int]
     terms: tuple[Operator, ...] = ()
+    coeffs: tuple[jax.Array, ...] | None = None
+
+    def __post_init__(self) -> None:
+        coeffs = self.coeffs
+        if coeffs is None:
+            coeffs = (jnp.asarray(1.0),) * len(self.terms)
+        elif len(coeffs) != len(self.terms):
+            raise ValueError(
+                f"Expected {len(self.terms)} coefficients, got {len(coeffs)}."
+            )
+        else:
+            coeffs = tuple(jnp.asarray(coeff) for coeff in coeffs)
+        object.__setattr__(self, "coeffs", coeffs)
 
     def tree_flatten(self):
-        return (self.terms,), (self.shape,)
+        return (self.terms, self.coeffs), (self.shape,)
 
     @classmethod
     def tree_unflatten(cls, aux_data, children):
-        (terms,) = children
+        terms, coeffs = children
         (shape,) = aux_data
-        return cls(shape=shape, terms=terms)
+        return cls(shape=shape, terms=terms, coeffs=coeffs)
 
 
 @dataclass(frozen=True)
@@ -241,31 +253,30 @@ class CoefficientStructure:
     """Maps flat coefficient indices back to source operators.
 
     ``schedules`` holds the (optional) time-dependent schedule for each
-    source operator, and ``n_terms_per_op`` counts how many terms each
-    source operator contributes.
+    source operator.
     """
 
+    base_coeffs: tuple[jax.Array, ...]
     schedules: tuple[Any, ...]  # TermCoefficientSchedule | None per op
-    n_terms_per_op: tuple[int, ...]
 
     def build_coeffs(self, t: float | jax.Array | None = None) -> jax.Array:
         """Build flat coefficient array at time *t*."""
         parts: list[jax.Array] = []
-        for op_idx, n_terms in enumerate(self.n_terms_per_op):
+        for op_idx, base in enumerate(self.base_coeffs):
             sched = self.schedules[op_idx]
             if sched is None:
-                parts.append(jnp.ones(n_terms, dtype=jnp.float64))
+                parts.append(base)
                 continue
             if t is None:
                 raise ValueError(
                     "Time-dependent operators require a non-None time `t`."
                 )
-            parts.append(coeffs_at(sched, t))
+            parts.append(base * coeffs_at(sched, t))
         return jnp.concatenate(parts) if len(parts) > 1 else parts[0]
 
 
 def merge_operators(
-    operators: tuple[LocalHamiltonian, ...],
+    operators: tuple[LocalHamiltonian | TimeDependentHamiltonian, ...],
     shape: tuple[int, int],
     eval_span: Callable[[TransitionOperator], tuple[int, int]] | None = None,
 ) -> tuple[BucketedOperators, CoefficientStructure]:
@@ -283,25 +294,28 @@ def merge_operators(
 
     # Flatten all terms with source tracking
     flat_terms: list[tuple[Operator, int, int]] = []  # (term, op_idx, term_within_op_idx)
+    base_coeffs: list[jax.Array] = []
     schedules: list = []
-    n_terms_per_op: list[int] = []
     for op_idx, op in enumerate(operators):
-        schedules.append(operator_schedule(op))
-        terms = operator_terms(op)
-        n_terms_per_op.append(len(terms))
+        base = op.base if isinstance(op, TimeDependentHamiltonian) else op
+        schedule = op.schedule if isinstance(op, TimeDependentHamiltonian) else None
+        terms = base.terms
+        coeffs = jnp.asarray(base.coeffs)
+        base_coeffs.append(coeffs)
+        schedules.append(schedule)
         for local_idx, term in enumerate(terms):
             flat_terms.append((term, op_idx, local_idx))
 
     # Build coefficient offset per operator
     coeff_offset: list[int] = []
     offset = 0
-    for n in n_terms_per_op:
+    for coeffs in base_coeffs:
         coeff_offset.append(offset)
-        offset += n
+        offset += len(coeffs)
 
     coeff_struct = CoefficientStructure(
+        base_coeffs=tuple(base_coeffs),
         schedules=tuple(schedules),
-        n_terms_per_op=tuple(n_terms_per_op),
     )
 
     # Bucket terms, deduplicating identical operators across sources.

@@ -127,6 +127,8 @@ def build_mc_kernels(
         all_operators, shape, eval_span=type(model).eval_span,
     )
     has_time_dep = any(s is not None for s in coeff_structure.schedules)
+    static_coeffs = None if has_time_dep else coeff_structure.build_coeffs()
+
     def init_cache(
         tensors: Any,
         samples: jax.Array,
@@ -145,13 +147,11 @@ def build_mc_kernels(
                 env = _apply_mpo_from_below(env, mpo, strategy)
             return tuple(envs)
 
-        coeffs_batch = None
-        if has_time_dep:
-            coeffs = coeff_structure.build_coeffs(t)
-            coeffs_batch = jnp.broadcast_to(
-                coeffs,
-                (samples_flat.shape[0], coeffs.shape[0]),
-            )
+        coeffs = coeff_structure.build_coeffs(t) if has_time_dep else static_coeffs
+        coeffs_batch = jnp.broadcast_to(
+            coeffs,
+            (samples_flat.shape[0], coeffs.shape[0]),
+        )
         return Cache(
             bottom_envs=jax.vmap(build_one_bottom_envs)(samples_flat),
             coeffs=coeffs_batch,

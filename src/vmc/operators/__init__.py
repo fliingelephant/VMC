@@ -21,7 +21,6 @@ from vmc.operators.time_dependent import (
     TermCoefficientSchedule,
     TimeDependentHamiltonian,
     coeffs_at,
-    operator_schedule,
 )
 
 __all__ = [
@@ -42,5 +41,4 @@ __all__ = [
     "CubicSchedule",
     "TimeDependentHamiltonian",
     "coeffs_at",
-    "operator_schedule",
 ]

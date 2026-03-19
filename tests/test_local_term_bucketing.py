@@ -14,6 +14,10 @@ from vmc.operators.local_terms import (
     VerticalTwoSiteOperator,
     merge_operators,
 )
+from vmc.peps.gi.local_terms import (
+    HorizontalMatterHoppingTerm,
+    build_electric_terms,
+)
 
 
 class LocalTermBucketingTest(unittest.TestCase):
@@ -38,7 +42,7 @@ class LocalTermBucketingTest(unittest.TestCase):
     def test_plaquette_out_of_bounds_raises(self) -> None:
         ham = LocalHamiltonian(
             shape=(2, 2),
-            terms=(PlaquetteOperator(row=1, col=1, coeff=jnp.asarray(1.0)),),
+            terms=(PlaquetteOperator(row=1, col=1),),
         )
         with self.assertRaises(ValueError):
             merge_operators((ham,), ham.shape)
@@ -77,7 +81,7 @@ class MergeOperatorsTest(unittest.TestCase):
 
         self.assertEqual(len(merged), 1)
         self.assertEqual(len(merged.diagonal), 1)
-        self.assertEqual(coeff_struct.n_terms_per_op, (4,))
+        self.assertEqual(tuple(len(coeffs) for coeffs in coeff_struct.base_coeffs), (4,))
         self.assertTrue(all(s is None for s in coeff_struct.schedules))
         coeffs = coeff_struct.build_coeffs()
         self.assertTrue(jnp.allclose(coeffs, jnp.ones(4)))
@@ -101,7 +105,7 @@ class MergeOperatorsTest(unittest.TestCase):
         merged, coeff_struct = merge_operators((op_a, op_b), shape)
 
         self.assertEqual(len(merged), 2)
-        self.assertEqual(coeff_struct.n_terms_per_op, (2, 1))
+        self.assertEqual(tuple(len(coeffs) for coeffs in coeff_struct.base_coeffs), (2, 1))
 
         for row_passes in merged.rows:
             for dr, cols in row_passes:
@@ -154,6 +158,74 @@ class MergeOperatorsTest(unittest.TestCase):
         self.assertEqual(len(contribs), 2)
         self.assertEqual(contribs[0][0], 0)
         self.assertEqual(contribs[1][0], 1)
+
+    def test_same_plaquette_with_different_static_coeffs_is_deduplicated(self) -> None:
+        """Equal plaquette geometry should share one bucket entry across operators."""
+        shape = (3, 3)
+        op_a = LocalHamiltonian(
+            shape=shape,
+            terms=(PlaquetteOperator(row=0, col=1),),
+            coeffs=(jnp.asarray(-1.0),),
+        )
+        op_b = LocalHamiltonian(
+            shape=shape,
+            terms=(PlaquetteOperator(row=0, col=1),),
+            coeffs=(jnp.asarray(0.5),),
+        )
+
+        merged, coeff_struct = merge_operators((op_a, op_b), shape)
+
+        cell = merged.rows[0][0][1][1]  # row=0, dr=2, col=1
+        self.assertEqual(len(cell), 1)
+        _, contributions = cell[0]
+        self.assertEqual(len(contributions), 2)
+        self.assertEqual(contributions[0][0], 0)
+        self.assertEqual(contributions[1][0], 1)
+        self.assertTrue(
+            jnp.allclose(
+                coeff_struct.build_coeffs(),
+                jnp.asarray([-1.0, 0.5]),
+            )
+        )
+
+    def test_same_electric_link_with_different_static_coeffs_is_deduplicated(self) -> None:
+        """Equal electric-link geometry should share one diagonal bucket entry."""
+        shape = (2, 2)
+        term = build_electric_terms(shape, N=2)[0]
+        op_a = LocalHamiltonian(shape=shape, terms=(term,), coeffs=(jnp.asarray(0.3),))
+        op_b = LocalHamiltonian(shape=shape, terms=(term,), coeffs=(jnp.asarray(0.5),))
+
+        merged, coeff_struct = merge_operators((op_a, op_b), shape)
+
+        self.assertEqual(len(merged.diagonal), 1)
+        _, contributions = merged.diagonal[0]
+        self.assertEqual(len(contributions), 2)
+        self.assertTrue(
+            jnp.allclose(
+                coeff_struct.build_coeffs(),
+                jnp.asarray([0.3, 0.5]),
+            )
+        )
+
+    def test_same_gi_hopping_with_different_static_coeffs_is_deduplicated(self) -> None:
+        """Equal GI hopping geometry should share one transition bucket entry."""
+        shape = (2, 2)
+        term = HorizontalMatterHoppingTerm(row=0, col=0)
+        op_a = LocalHamiltonian(shape=shape, terms=(term,), coeffs=(jnp.asarray(0.7),))
+        op_b = LocalHamiltonian(shape=shape, terms=(term,), coeffs=(jnp.asarray(-0.2),))
+
+        merged, coeff_struct = merge_operators((op_a, op_b), shape)
+
+        cell = merged.rows[0][0][1][0]  # row=0, dr=1, col=0
+        self.assertEqual(len(cell), 1)
+        _, contributions = cell[0]
+        self.assertEqual(len(contributions), 2)
+        self.assertTrue(
+            jnp.allclose(
+                coeff_struct.build_coeffs(),
+                jnp.asarray([0.7, -0.2]),
+            )
+        )
 
 
 if __name__ == "__main__":

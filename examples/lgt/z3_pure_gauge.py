@@ -23,6 +23,7 @@ import logging
 from pathlib import Path
 
 import jax
+import jax.numpy as jnp
 from flax import nnx
 
 from vmc.drivers import TDVPDriver, ImaginaryTimeUnit
@@ -46,14 +47,19 @@ def build_z3_hamiltonian(
     n_rows, n_cols = shape
     
     plaquette_terms = tuple(
-        PlaquetteOperator(row=r, col=c, coeff=-h)
+        PlaquetteOperator(row=r, col=c)
         for r in range(n_rows - 1)
         for c in range(n_cols - 1)
     )
     
-    electric_terms = build_electric_terms(shape, coeff=g, N=3)
+    electric_terms = build_electric_terms(shape, N=3)
     
-    return GILocalHamiltonian(shape=shape, terms=electric_terms + plaquette_terms)
+    return GILocalHamiltonian(
+        shape=shape,
+        terms=electric_terms + plaquette_terms,
+        coeffs=(jnp.asarray(g),) * len(electric_terms)
+        + (jnp.asarray(-h),) * len(plaquette_terms),
+    )
 
 
 def run_optimization(

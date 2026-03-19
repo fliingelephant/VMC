@@ -682,7 +682,7 @@ def _eval_term(
         )
         mpo0 = jnp.transpose(eff0[sites_prop[row, col]], (2, 3, 0, 1))
         mpo1 = jnp.transpose(eff1[sites_prop[row, col + 1]], (2, 3, 0, 1))
-        return term.coeff * jnp.einsum(
+        return jnp.einsum(
             "ace,aub,cduv,evf,bgh,digw,fwj,hij->",
             envs.left_env,
             envs.top_env[col],
@@ -731,7 +731,7 @@ def _eval_term(
             envs.left_env, envs.top_env, mpos[0], mpos[2],
             mpos[1], mpos[3], envs.bottom_env_next, envs.right_envs[col + 1], col,
         )
-    return term.coeff * (_flip_amp(1) + _flip_amp(-1))
+    return _flip_amp(1) + _flip_amp(-1)
 
 
 @_eval_term.dispatch
@@ -769,7 +769,7 @@ def _eval_term(
         )
         mpo0 = jnp.transpose(eff0[sites_prop[row, col]], (2, 3, 0, 1))
         mpo1 = jnp.transpose(eff1[sites_prop[row + 1, col]], (2, 3, 0, 1))
-        return term.coeff * _contract_2row_1col(
+        return _contract_2row_1col(
             envs.left_env,
             envs.top_env[col],
             mpo0,

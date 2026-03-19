@@ -57,7 +57,7 @@ DEFAULT_N_CHAINS = 1024
 DEFAULT_N_STEPS_GS = 400
 DEFAULT_DT_GS = 0.005
 DEFAULT_GS_DIAG_SHIFT = 1e-4
-DEFAULT_T = 18.0
+DEFAULT_T = 20.0
 DEFAULT_DT_RT = 0.01
 DEFAULT_RT_DIAG_SHIFT = 1e-8
 DEFAULT_SEED = 42
@@ -174,8 +174,8 @@ def build_fig5a_plaquette_observables(
 ) -> tuple[GILocalHamiltonian, ...]:
     """Build the selected plaquette observables used in Fig. 5(a).
 
-    The plaquette labels follow the Wu open-data convention directly: row-major
-    plaquette-grid indices on the ``(L - 1) x (L - 1)`` plaquette lattice.
+    The Wu/open-data plaquette rows are counted from the bottom, while the
+    internal ``PlaquetteOperator`` rows are counted from the top.
 
     ``PlaquetteOperator`` evaluates ``P + P†``. For Z2, ``P = P†``, so a
     coefficient of ``0.5`` yields the plaquette expectation value itself.
@@ -185,7 +185,7 @@ def build_fig5a_plaquette_observables(
     return tuple(
         GILocalHamiltonian(
             shape=shape,
-            terms=(PlaquetteOperator(row=row, col=col),),
+            terms=(PlaquetteOperator(row=shape[0] - 2 - row, col=col),),
             coeffs=(jnp.asarray(0.5),),
         )
         for row, col in plaquettes

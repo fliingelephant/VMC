@@ -83,8 +83,52 @@ class HorizontalMatterHoppingTerm(TransitionOperator):
 
 @jax.tree_util.register_pytree_node_class
 @dataclass(frozen=True)
+class HorizontalHiggsLinkTerm(TransitionOperator):
+    """Z2 Higgs link term sigma_x X sigma_x on a horizontal link."""
+
+    row: int
+    col: int
+
+    @property
+    def sites(self) -> tuple[tuple[int, int], ...]:
+        return ((self.row, self.col), (self.row, self.col + 1))
+
+    def tree_flatten(self):
+        return (), (self.row, self.col)
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        del children
+        row, col = aux_data
+        return cls(row=row, col=col)
+
+
+@jax.tree_util.register_pytree_node_class
+@dataclass(frozen=True)
 class VerticalMatterHoppingTerm(TransitionOperator):
     """Gauge-covariant hard-core hopping on a vertical link."""
+
+    row: int
+    col: int
+
+    @property
+    def sites(self) -> tuple[tuple[int, int], ...]:
+        return ((self.row, self.col), (self.row + 1, self.col))
+
+    def tree_flatten(self):
+        return (), (self.row, self.col)
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        del children
+        row, col = aux_data
+        return cls(row=row, col=col)
+
+
+@jax.tree_util.register_pytree_node_class
+@dataclass(frozen=True)
+class VerticalHiggsLinkTerm(TransitionOperator):
+    """Z2 Higgs link term sigma_x X sigma_x on a vertical link."""
 
     row: int
     col: int
@@ -109,7 +153,17 @@ def support_span(_: HorizontalMatterHoppingTerm) -> tuple[int, int]:
 
 
 @support_span.dispatch
+def support_span(_: HorizontalHiggsLinkTerm) -> tuple[int, int]:
+    return 1, 2
+
+
+@support_span.dispatch
 def support_span(_: VerticalMatterHoppingTerm) -> tuple[int, int]:
+    return 2, 1
+
+
+@support_span.dispatch
+def support_span(_: VerticalHiggsLinkTerm) -> tuple[int, int]:
     return 2, 1
 
 

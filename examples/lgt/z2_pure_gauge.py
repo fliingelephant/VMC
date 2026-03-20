@@ -1,38 +1,35 @@
 """Fixed-step SR benchmark for pure Z2 lattice gauge theory.
 
-This example mirrors the benchmark-script structure used by the ground-state
-examples, but targets the gauge-invariant PEPS implementation for pure Z2 LGT.
-It runs one fixed-step imaginary-time SR trajectory and records:
-
-- total energy
-- mean plaquette value
-- mean horizontal-link Z expectation
-- mean vertical-link Z expectation
+Records total energy, mean plaquette value, mean horizontal-link Z, and mean
+vertical-link Z expectation values.
 """
 
 from __future__ import annotations
 
-from vmc import config  # noqa: F401 - JAX config must be imported first
-
-import json
+import sys
 from pathlib import Path
 
-import jax
-import jax.numpy as jnp
-from flax import nnx
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from vmc.drivers import ImaginaryTimeUnit, TDVPDriver
-from vmc.operators import PlaquetteOperator
-from vmc.peps import ZipUp
-from vmc.peps.gi import GILocalHamiltonian, GIPEPS, GIPEPSConfig
-from vmc.peps.gi.local_terms import LinkDiagonalTerm, build_electric_terms
-from vmc.preconditioners import (
+from vmc import config  # noqa: F401, E402 - JAX config must be imported first
+
+import jax  # noqa: E402
+import jax.numpy as jnp  # noqa: E402
+from flax import nnx  # noqa: E402
+
+from vmc.drivers import ImaginaryTimeUnit, TDVPDriver  # noqa: E402
+from vmc.operators import PlaquetteOperator  # noqa: E402
+from vmc.peps import ZipUp  # noqa: E402
+from vmc.peps.gi import GILocalHamiltonian, GIPEPS, GIPEPSConfig  # noqa: E402
+from vmc.peps.gi.local_terms import LinkDiagonalTerm, build_electric_terms  # noqa: E402
+from vmc.preconditioners import (  # noqa: E402
     DirectSolve,
-    MetricsConfig,
     SRPreconditioner,
     solve_cholesky,
 )
-from vmc.qgt import ParameterSpace
+from vmc.qgt import ParameterSpace  # noqa: E402
+
+from runner import DEFAULT_METRICS_CONFIG, run  # noqa: E402
 
 
 L = 3
@@ -50,13 +47,6 @@ SEED = 42
 SR_FIXED_STEPS = 100
 SR_FIXED_DT = 0.01
 SR_DIAG_SHIFT = 1e-8
-
-SR_METRICS_CONFIG = MetricsConfig(
-    record_FS_norm=True,
-    record_TDVP_residual=True,
-    record_SR_solve_residual=True,
-    record_step_wall_time=True,
-)
 
 
 def build_z2_hamiltonian(
@@ -157,12 +147,6 @@ def build_model(seed: int) -> GIPEPS:
     )
 
 
-def append_series(series: dict[str, list], **values) -> None:
-    """Append one row into a columnar series dict."""
-    for key, value in values.items():
-        series.setdefault(key, []).append(value)
-
-
 def benchmark_output_dir() -> Path:
     """Build the output directory for the current benchmark settings."""
     g_token = format(G_COUPLING, ".3f").replace(".", "p")
@@ -172,145 +156,9 @@ def benchmark_output_dir() -> Path:
     )
 
 
-def save_run(
-    output_path: Path,
-    *,
-    config_data: dict,
-    series: dict[str, list],
-) -> None:
-    """Write one benchmark run to JSON."""
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    summary = {
-        "final_step": series["step"][-1],
-        "final_imaginary_time": series["imaginary_time"][-1],
-    }
-    for name in ("energy", "plaquette", "z_h", "z_v"):
-        summary[f"final_{name}_mean"] = series[f"{name}_mean"][-1]
-        summary[f"final_{name}_error"] = series[f"{name}_error"][-1]
-    output_path.write_text(
-        json.dumps(
-            {
-                "problem": {
-                    "gauge_group": "Z2",
-                    "shape": SHAPE,
-                    "h": H_COUPLING,
-                    "g": G_COUPLING,
-                    "bond_dim": BOND_DIM,
-                    "boundary_method": "ZipUp",
-                    "boundary_dimension": BOUNDARY_DIM,
-                    "n_samples": N_SAMPLES,
-                    "n_chains": N_CHAINS,
-                    "seed": SEED,
-                    "Qx": 0,
-                },
-                "config": config_data,
-                "series": series,
-                "summary": summary,
-            },
-            indent=2,
-        )
-    )
-    print(f"Saved {output_path}", flush=True)
-
-
-def run_sr(
-    hamiltonian: GILocalHamiltonian,
-    observables: tuple[GILocalHamiltonian, ...],
-    output_path: Path,
-    *,
-    n_steps: int,
-    dt: float,
-) -> None:
-    """Run fixed-step SR and save the trajectory."""
-    label = output_path.stem
-    driver = TDVPDriver(
-        build_model(SEED),
-        hamiltonian,
-        observables=observables,
-        preconditioner=SRPreconditioner(
-            space=ParameterSpace(),
-            strategy=DirectSolve(solver=solve_cholesky),
-            diag_shift=SR_DIAG_SHIFT,
-            metrics_config=SR_METRICS_CONFIG,
-        ),
-        dt=dt,
-        time_unit=ImaginaryTimeUnit(),
-        sampler_key=jax.random.key(SEED),
-        n_samples=N_SAMPLES,
-        n_chains=N_CHAINS,
-        full_gradient=False,
-    )
-    series: dict[str, list] = {}
-    print(
-        (
-            f"[{label}] step t dt wall_time energy energy_err energy_var "
-            "plaquette plaquette_err z_h z_h_err z_v z_v_err "
-            "applied_FS_step_norm_squared FS_norm_squared TDVP_residual "
-            "SR_solve_residual"
-        ),
-        flush=True,
-    )
-
-    for step in range(1, n_steps + 1):
-        driver.run(dt)
-        metrics = driver.metrics
-        energy = driver.energy
-        observable_stats = {
-            "plaquette": driver.observable_stats[0],
-            "z_h": driver.observable_stats[1],
-            "z_v": driver.observable_stats[2],
-        }
-        fs_norm_squared = float(metrics["FS_norm_squared"])
-        row = {
-            "step": step,
-            "imaginary_time": float(driver.t),
-            "dt": dt,
-            "step_wall_time": float(metrics["step_wall_time"]),
-            "energy_mean": float(energy.mean.real),
-            "energy_error": float(energy.error_of_mean.real),
-            "energy_variance": float(energy.variance.real),
-            "applied_FS_step_norm_squared": dt**2 * fs_norm_squared,
-            "FS_norm_squared": fs_norm_squared,
-            "TDVP_residual": float(metrics["TDVP_residual"]),
-            "SR_solve_residual": float(metrics["SR_solve_residual"]),
-        }
-        for name, stats in observable_stats.items():
-            row[f"{name}_mean"] = float(stats.mean.real)
-            row[f"{name}_error"] = float(stats.error_of_mean.real)
-        append_series(series, **row)
-        print(
-            (
-                f"[{label}] {row['step']:3d} {row['imaginary_time']:.6f} "
-                f"{row['dt']:.6f} {row['step_wall_time']:.3f} "
-                f"{row['energy_mean']:.10f} {row['energy_error']:.6f} "
-                f"{row['energy_variance']:.6f} {row['plaquette_mean']:.10f} "
-                f"{row['plaquette_error']:.6f} {row['z_h_mean']:.10f} "
-                f"{row['z_h_error']:.6f} {row['z_v_mean']:.10f} "
-                f"{row['z_v_error']:.6f} "
-                f"{row['applied_FS_step_norm_squared']:.6e} "
-                f"{row['FS_norm_squared']:.6e} "
-                f"{row['TDVP_residual']:.6e} "
-                f"{row['SR_solve_residual']:.6e}"
-            ),
-            flush=True,
-        )
-
-    save_run(
-        output_path,
-        config_data={
-            "method": label,
-            "diag_shift": SR_DIAG_SHIFT,
-            "dt": dt,
-            "n_steps": n_steps,
-        },
-        series=series,
-    )
-
-
 def main() -> None:
     """Run the fixed-step SR benchmark."""
     hamiltonian, observables = build_problem()
-    output_dir = benchmark_output_dir()
     print(
         (
             f"Benchmarking pure Z2 gauge theory on {SHAPE}, "
@@ -319,12 +167,36 @@ def main() -> None:
         ),
         flush=True,
     )
-    run_sr(
+    driver = TDVPDriver(
+        build_model(SEED),
         hamiltonian,
-        observables,
-        output_dir / "sr_fixed.json",
-        n_steps=SR_FIXED_STEPS,
+        observables=observables,
+        preconditioner=SRPreconditioner(
+            space=ParameterSpace(),
+            strategy=DirectSolve(solver=solve_cholesky),
+            diag_shift=SR_DIAG_SHIFT,
+            metrics_config=DEFAULT_METRICS_CONFIG,
+        ),
         dt=SR_FIXED_DT,
+        time_unit=ImaginaryTimeUnit(),
+        sampler_key=jax.random.key(SEED),
+        n_samples=N_SAMPLES,
+        n_chains=N_CHAINS,
+        full_gradient=False,
+    )
+    run(
+        driver,
+        n_steps=SR_FIXED_STEPS,
+        run_dir=benchmark_output_dir(),
+        observable_names=("plaquette", "z_h", "z_v"),
+        log_every=1,
+        save_every=SR_FIXED_STEPS,
+        extra_config={
+            "gauge_group": "Z2",
+            "L": L,
+            "h": H_COUPLING,
+            "g": G_COUPLING,
+        },
     )
 
 

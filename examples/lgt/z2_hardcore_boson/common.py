@@ -1,37 +1,19 @@
-"""Shared helpers for Z2 hard-core-boson ground-state example scripts."""
+"""Shared physics helpers for Z2 hard-core-boson example scripts."""
 from __future__ import annotations
 
-import json
-import math
-import shutil
-from pathlib import Path
-from typing import Any, Callable
-
-import numpy as np
-
-from vmc import config  # noqa: F401 - JAX config must be imported first
-
-import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from vmc.drivers import ImaginaryTimeUnit, TDVPDriver
 from vmc.operators import PlaquetteOperator
-from vmc.peps import GIPEPS, GIPEPSConfig, GILocalHamiltonian, Variational
+from vmc.peps import GIPEPS, GIPEPSConfig, Variational
 from vmc.peps.gi.local_terms import (
+    GILocalHamiltonian,
     HorizontalMatterHoppingTerm,
     LinkDiagonalTerm,
     MatterMassTerm,
     VerticalMatterHoppingTerm,
     build_electric_terms,
 )
-from vmc.preconditioners import (
-    DirectSolve,
-    MetricsConfig,
-    SRPreconditioner,
-    solve_cholesky,
-)
-from vmc.qgt import ParameterSpace
 
 
 CHARGE_OF_SITE = (0, 1)
@@ -45,15 +27,6 @@ DEFAULT_M = 0.0
 DEFAULT_BOUNDARY_SWEEPS = 2
 DEFAULT_DT = 0.01
 DEFAULT_DIAG_SHIFT = 1e-4
-DEFAULT_LOG_EVERY = 50
-DEFAULT_SAVE_EVERY = 50
-
-SR_METRICS_CONFIG = MetricsConfig(
-    record_FS_norm=True,
-    record_TDVP_residual=True,
-    record_SR_solve_residual=True,
-    record_step_wall_time=True,
-)
 
 
 def half_filling(shape: tuple[int, int]) -> int:
@@ -152,248 +125,6 @@ def build_model(
         ),
         contraction_strategy=Variational(boundary_dim, n_sweeps=boundary_sweeps),
     )
-
-
-def build_ground_state_driver(
-    *,
-    shape: tuple[int, int],
-    h: float,
-    g: float,
-    J: float,
-    m: float,
-    particle_number: int,
-    bond_dim_per_charge: int,
-    boundary_dim: int,
-    boundary_sweeps: int,
-    seed: int,
-    n_samples: int,
-    n_chains: int,
-    dt: float,
-    diag_shift: float,
-    observables: tuple[Any, ...] = (),
-) -> TDVPDriver:
-    """Build a ground-state TDVP driver for one Z2 hard-core-boson point."""
-    return TDVPDriver(
-        build_model(
-            shape,
-            particle_number=particle_number,
-            bond_dim_per_charge=bond_dim_per_charge,
-            boundary_dim=boundary_dim,
-            boundary_sweeps=boundary_sweeps,
-            seed=seed,
-        ),
-        build_z2_hardcore_boson_hamiltonian(shape, h=h, g=g, J=J, m=m),
-        observables=observables,
-        preconditioner=SRPreconditioner(
-            space=ParameterSpace(),
-            strategy=DirectSolve(solver=solve_cholesky),
-            diag_shift=diag_shift,
-            metrics_config=SR_METRICS_CONFIG,
-        ),
-        dt=dt,
-        time_unit=ImaginaryTimeUnit(),
-        sampler_key=jax.random.key(seed),
-        n_samples=n_samples,
-        n_chains=n_chains,
-        full_gradient=False,
-    )
-
-
-def latest_paths(run_dir: Path) -> tuple[Path, Path]:
-    """Return the checkpoint and metadata paths for one run directory."""
-    return run_dir / "latest.npz", run_dir / "latest.json"
-
-
-def prepare_run_dir(run_dir: Path, *, resume: bool) -> Path:
-    """Prepare one overwritten or resumable run directory."""
-    npz_path, _ = latest_paths(run_dir)
-    if resume:
-        if not npz_path.exists():
-            raise FileNotFoundError(f"Missing checkpoint in {run_dir}")
-        return run_dir
-    if run_dir.exists():
-        shutil.rmtree(run_dir)
-    run_dir.mkdir(parents=True, exist_ok=True)
-    return run_dir
-
-
-def maybe_resume(
-    run_dir: Path,
-    *,
-    problem: dict[str, Any],
-    driver: TDVPDriver,
-    resume: bool,
-    label: str,
-) -> None:
-    """Resume one driver from an existing checkpoint if requested."""
-    if not resume:
-        return
-    npz_path, _ = latest_paths(run_dir)
-    with np.load(npz_path, allow_pickle=False) as data:
-        checkpoint_problem = json.loads(data["problem_json"].item())
-    if checkpoint_problem != problem:
-        raise ValueError(
-            f"Run configuration does not match existing checkpoint in {run_dir}."
-        )
-    restore_latest(run_dir, driver)
-    print(
-        f"[{label}] resumed at step={driver.step_count} tau={driver.t:.6f}",
-        flush=True,
-    )
-
-
-def save_latest(
-    run_dir: Path,
-    *,
-    driver: TDVPDriver,
-    problem: dict[str, Any],
-    latest_metrics: dict[str, Any],
-) -> None:
-    """Save the latest exact-resume state and human-readable metadata."""
-    npz_path, json_path = latest_paths(run_dir)
-    tensor_arrays = {
-        f"tensor_{row}_{col}": np.asarray(tensor)
-        for row, tensors in driver._tensors.items()
-        for col, tensor in tensors.items()
-    }
-    npz_tmp_path = npz_path.with_name(f"{npz_path.name}.tmp")
-    with npz_tmp_path.open("wb") as handle:
-        np.savez(
-            handle,
-            problem_json=np.asarray(json.dumps(problem, sort_keys=True)),
-            step_count=np.asarray(driver.step_count, dtype=np.int64),
-            imaginary_time=np.asarray(float(driver.t), dtype=np.float64),
-            sampler_key=np.asarray(jax.random.key_data(driver._sampler_key)),
-            sampler_key_impl=np.asarray(str(jax.random.key_impl(driver._sampler_key))),
-            sampler_configuration=np.asarray(driver._sampler_configuration),
-            **tensor_arrays,
-        )
-    npz_tmp_path.replace(npz_path)
-
-    json_tmp_path = json_path.with_name(f"{json_path.name}.tmp")
-    clean_latest_metrics = {
-        key: (None if isinstance(value, float) and not math.isfinite(value) else value)
-        for key, value in latest_metrics.items()
-    }
-    json_tmp_path.write_text(
-        json.dumps(
-            {
-                "problem": problem,
-                "progress": {
-                    "completed_steps": int(driver.step_count),
-                    "imaginary_time": float(driver.t),
-                },
-                "latest_metrics": clean_latest_metrics,
-            },
-            indent=2,
-            allow_nan=False,
-        )
-    )
-    json_tmp_path.replace(json_path)
-
-
-def restore_latest(run_dir: Path, driver: TDVPDriver) -> None:
-    """Restore one exact-resume checkpoint into a fresh driver."""
-    npz_path, _ = latest_paths(run_dir)
-    with np.load(npz_path, allow_pickle=False) as data:
-        saved_config = jnp.asarray(data["sampler_configuration"])
-        if int(saved_config.shape[0]) != driver.n_chains:
-            raise ValueError(
-                f"Checkpoint n_chains={saved_config.shape[0]} does not match driver.n_chains={driver.n_chains}."
-            )
-        driver._tensors = {
-            row: {
-                col: jnp.asarray(data[f"tensor_{row}_{col}"])
-                for col in tensors
-            }
-            for row, tensors in driver._tensors.items()
-        }
-        driver._sampler_configuration = saved_config
-        driver._sampler_key = jax.random.wrap_key_data(
-            jnp.asarray(data["sampler_key"], dtype=jnp.uint32),
-            impl=data["sampler_key_impl"].item(),
-        )
-        driver.step_count = int(data["step_count"])
-        driver.t = float(data["imaginary_time"])
-
-
-def ground_state_metrics(
-    driver: TDVPDriver,
-    *,
-    energy_scale: float,
-    step_wall_time: float,
-) -> dict[str, float]:
-    """Extract the common ground-state metrics for one completed step."""
-    energy = driver.energy
-    metrics = driver.metrics
-    fs_norm_squared = float(metrics["FS_norm_squared"])
-    return {
-        "completed_steps": int(driver.step_count),
-        "imaginary_time": float(driver.t),
-        "step_wall_time": float(step_wall_time),
-        "energy_mean": float(energy.mean.real) / energy_scale,
-        "energy_error": float(energy.error_of_mean.real) / energy_scale,
-        "energy_variance": float(energy.variance.real) / energy_scale**2,
-        "applied_FS_step_norm_squared": float(driver.dt**2 * fs_norm_squared),
-        "FS_norm_squared": fs_norm_squared,
-        "TDVP_residual": float(metrics["TDVP_residual"]),
-        "SR_solve_residual": float(metrics["SR_solve_residual"]),
-    }
-
-
-def run_ground_state_steps(
-    *,
-    label: str,
-    driver: TDVPDriver,
-    run_dir: Path,
-    problem: dict[str, Any],
-    n_steps: int,
-    log_every: int,
-    save_every: int,
-    energy_scale: float,
-    update_row: Callable[[TDVPDriver, dict[str, float]], None] | None = None,
-    format_extra: Callable[[dict[str, float]], str] | None = None,
-) -> None:
-    """Run one ground-state trajectory for the requested additional steps."""
-    if n_steps <= 0:
-        return
-    extra_header = "" if format_extra is None else format_extra({})
-    if extra_header:
-        extra_header = f" {extra_header}"
-    print(
-        "[{label}] step tau dt wall_time energy_per_site energy_err energy_var"
-        f"{extra_header} applied_FS_step_norm_squared FS_norm_squared "
-        "TDVP_residual SR_solve_residual".format(label=label),
-        flush=True,
-    )
-    for local_step in range(1, n_steps + 1):
-        driver.run(driver.dt)
-        row = ground_state_metrics(
-            driver,
-            energy_scale=energy_scale,
-            step_wall_time=float(driver.metrics["step_wall_time"]),
-        )
-        if update_row is not None:
-            update_row(driver, row)
-        extra_values = "" if format_extra is None else format_extra(row)
-        if driver.step_count % log_every == 0 or local_step == n_steps:
-            print(
-                (
-                    f"[{label}] {row['completed_steps']:4d} {row['imaginary_time']:.6f} "
-                    f"{driver.dt:.6f} {row['step_wall_time']:.6f} "
-                    f"{row['energy_mean']:.10f} {row['energy_error']:.6e} "
-                    f"{row['energy_variance']:.6e}"
-                    f"{'' if not extra_values else ' ' + extra_values} "
-                    f"{row['applied_FS_step_norm_squared']:.6e} "
-                    f"{row['FS_norm_squared']:.6e} "
-                    f"{row['TDVP_residual']:.6e} "
-                    f"{row['SR_solve_residual']:.6e}"
-                ),
-                flush=True,
-            )
-        if driver.step_count % save_every == 0 or local_step == n_steps:
-            save_latest(run_dir, driver=driver, problem=problem, latest_metrics=row)
-            print(f"Saved {run_dir / 'latest.json'}", flush=True)
 
 
 def _site_in_box(row: int, col: int, row0: int, row1: int, col0: int, col1: int) -> bool:

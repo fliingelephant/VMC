@@ -116,6 +116,37 @@ def load_checkpoint(run_dir, driver):
     return metadata
 
 
+def load_model_from_checkpoint(run_dir, model):
+    """Load model tensor values from a runner checkpoint.
+
+    Restores only the tensors (not sampler state) into ``model``.
+    Returns the updated model and the checkpoint metadata dict.
+    """
+    from flax import nnx
+
+    run_dir = Path(run_dir)
+    graphdef, params, model_state = nnx.split(model, nnx.Param, ...)
+    tensors = nnx.to_pure_dict(params)["tensors"]
+    target = {
+        "tensors": {
+            str(row): {str(col): t for col, t in rd.items()}
+            for row, rd in tensors.items()
+        },
+    }
+    ckptr = ocp.PyTreeCheckpointer()
+    restored = ckptr.restore(run_dir / "latest", item=target, partial_restore=True)
+    loaded = {
+        row: {
+            col: restored["tensors"][str(row)][str(col)]
+            for col in rd
+        }
+        for row, rd in tensors.items()
+    }
+    with open(run_dir / "latest.json") as f:
+        metadata = json.load(f)
+    return nnx.merge(graphdef, {"tensors": loaded}, model_state), metadata
+
+
 def run(
     driver,
     *,

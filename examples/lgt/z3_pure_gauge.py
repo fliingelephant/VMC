@@ -1,41 +1,35 @@
 """Ground state of pure Z3 lattice gauge theory.
 
-This example demonstrates gauge-invariant PEPS simulation of pure Z3 LGT.
-The Z3 gauge theory exhibits a first-order phase transition at g_c ≈ 0.375.
+The Z3 gauge theory exhibits a first-order phase transition at g_c ~ 0.375.
 
-The Hamiltonian is:
-    H = -h Σ_x (P_x + P_x†) + g Σ_links (2 - 2cos(2πE/3))
+Hamiltonian:
+    H = -h sum_x (P_x + P_x^dag) + g sum_links (2 - 2cos(2 pi E/3))
 
-To replicate Fig 2(a,b):
-- Scan g from 0.2 to 0.6
-- Compute dE/dg = (1/g)⟨H_E⟩
-- Compute d²E/dg² via finite difference
-- Run for sizes 8×8 to 24×24
-
-Reference: Wu & Liu, Phys. Rev. Lett. 135, 130401 (2025)
+Reference: Wu & Liu, Phys. Rev. Lett. 135, 130401 (2025), Fig 2(a,b)
 """
-
 from __future__ import annotations
 
-from vmc import config  # noqa: F401
-
-import logging
+import sys
 from pathlib import Path
 
-import jax
-import jax.numpy as jnp
-from flax import nnx
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from vmc.drivers import TDVPDriver, ImaginaryTimeUnit
-from vmc.operators import PlaquetteOperator
-from vmc.peps import ZipUp
-from vmc.peps.gi.local_terms import GILocalHamiltonian, build_electric_terms
-from vmc.peps.gi.model import GIPEPS, GIPEPSConfig
-from vmc.preconditioners import SRPreconditioner
+from vmc import config  # noqa: F401, E402
 
-from .observables import SimulationData, format_step_log
+import argparse  # noqa: E402
 
-logger = logging.getLogger(__name__)
+import jax  # noqa: E402
+import jax.numpy as jnp  # noqa: E402
+from flax import nnx  # noqa: E402
+
+from vmc.drivers import TDVPDriver, ImaginaryTimeUnit  # noqa: E402
+from vmc.operators import PlaquetteOperator  # noqa: E402
+from vmc.peps import ZipUp  # noqa: E402
+from vmc.peps.gi.local_terms import GILocalHamiltonian, build_electric_terms  # noqa: E402
+from vmc.peps.gi.model import GIPEPS, GIPEPSConfig  # noqa: E402
+from vmc.preconditioners import SRPreconditioner  # noqa: E402
+
+from runner import DEFAULT_METRICS_CONFIG, add_common_args, run  # noqa: E402
 
 
 def build_z3_hamiltonian(
@@ -45,15 +39,12 @@ def build_z3_hamiltonian(
 ) -> GILocalHamiltonian:
     """Build pure Z3 LGT Hamiltonian."""
     n_rows, n_cols = shape
-    
     plaquette_terms = tuple(
         PlaquetteOperator(row=r, col=c)
         for r in range(n_rows - 1)
         for c in range(n_cols - 1)
     )
-    
     electric_terms = build_electric_terms(shape, N=3)
-    
     return GILocalHamiltonian(
         shape=shape,
         terms=electric_terms + plaquette_terms,
@@ -62,169 +53,62 @@ def build_z3_hamiltonian(
     )
 
 
-def run_optimization(
-    model: GIPEPS,
-    operator: GILocalHamiltonian,
-    *,
-    n_samples: int = 500,
-    n_steps: int = 200,
-    dt: float = 0.01,
-    diag_shift: float = 0.1,
-    seed: int = 42,
-    data: SimulationData | None = None,
-) -> TDVPDriver:
-    """Run imaginary-time ground state optimization."""
-    driver = TDVPDriver(
-        model,
-        operator,
-        preconditioner=SRPreconditioner(diag_shift=diag_shift),
-        dt=dt,
-        time_unit=ImaginaryTimeUnit(),
-        sampler_key=jax.random.key(seed),
-        n_samples=n_samples,
-        full_gradient=True,
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Pure Z3 lattice gauge theory ground state optimization.",
     )
-
-    k = 5
-    n_chunks = n_steps // k
-    assert n_steps == n_chunks * k, (
-        f"n_steps={n_steps} must be a multiple of chunk size k={k}"
+    parser.add_argument("--L", type=int, default=8)
+    parser.add_argument("--g", type=float, default=0.375)
+    parser.add_argument("--h", type=float, default=1.0)
+    add_common_args(parser)
+    parser.set_defaults(
+        bond_dim=2, n_samples=2000, n_chains=1, n_steps=500,
+        full_gradient=True, log_every=5, save_every=100,
     )
-    for chunk in range(n_chunks):
-        driver.run(k * dt)
-        completed_steps = (chunk + 1) * k
-        if driver.energy is not None:
-            e = driver.energy
-            logger.info(format_step_log(
-                step=completed_steps,
-                energy=e.mean.real,
-                energy_error=e.error_of_mean.real,
-                energy_variance=e.variance.real,
-            ))
-            if data is not None:
-                data.add_step(
-                    step=completed_steps,
-                    time=driver.t,
-                    energy=e.mean.real,
-                    energy_error=e.error_of_mean.real,
-                    energy_variance=e.variance.real,
-                )
+    args = parser.parse_args()
 
-    e = driver.energy
-    logger.info("Final: E = %.6f ± %.4f [σ²=%.4f]", e.mean.real, e.error_of_mean.real, e.variance.real)
-    return driver
-
-
-def main(
-    size: int = 8,
-    g: float = 0.375,
-    h: float = 1.0,
-    bond_dim: int = 2,
-    n_samples: int = 2000,
-    n_steps: int = 500,
-    dt: float = 0.01,
-    output_dir: str | None = None,
-):
-    """Run Z3 pure gauge ground state optimization.
-    
-    Args:
-        size: Lattice size (size x size). Paper uses up to 24×24.
-        g: Electric field coupling (phase transition at g_c ≈ 0.375).
-        h: Magnetic (plaquette) coupling.
-        bond_dim: Bond dimension per charge sector (D_k). Paper uses D_k=2.
-        n_samples: MC samples per step. Paper uses ~10^4.
-        n_steps: Optimization steps.
-        dt: Imaginary time step.
-        output_dir: Directory to save output data (JSON). None to skip saving.
-    """
-    shape = (size, size)
-    
-    logger.info("=" * 60)
-    logger.info("Pure Z3 Lattice Gauge Theory")
-    logger.info("=" * 60)
-    logger.info(f"Lattice: {size}x{size}, h={h}, g={g}")
-    logger.info(f"Bond dimension per charge: D_k={bond_dim} (total D={3*bond_dim})")
-    logger.info(f"Critical point: g_c ≈ 0.375 (first-order transition)")
-    
-    # Pure gauge: phys_dim=1, single charge sector
-    cfg = GIPEPSConfig(
-        shape=shape,
-        N=3,
-        phys_dim=1,
-        Qx=0,
-        degeneracy_per_charge=(bond_dim, bond_dim, bond_dim),
-        charge_of_site=(0,),
-    )
-    
+    shape = (args.L, args.L)
     model = GIPEPS(
-        rngs=nnx.Rngs(42),
-        config=cfg,
-        contraction_strategy=ZipUp(truncate_bond_dimension=3 * bond_dim),
+        rngs=nnx.Rngs(args.seed),
+        config=GIPEPSConfig(
+            shape=shape, N=3, phys_dim=1, Qx=0,
+            degeneracy_per_charge=(args.bond_dim, args.bond_dim, args.bond_dim),
+            charge_of_site=(0,),
+        ),
+        contraction_strategy=ZipUp(truncate_bond_dimension=3 * args.bond_dim),
     )
-    
-    operator = build_z3_hamiltonian(shape, h=h, g=g)
-    
-    # Setup data logging
-    data = SimulationData(
-        model_type="Z3_pure_gauge",
-        lattice_size=shape,
-        parameters={"h": h, "g": g, "bond_dim": bond_dim, "n_samples": n_samples},
+    hamiltonian = build_z3_hamiltonian(shape, h=args.h, g=args.g)
+
+    driver = TDVPDriver(
+        model, hamiltonian,
+        preconditioner=SRPreconditioner(
+            diag_shift=args.diag_shift,
+            metrics_config=DEFAULT_METRICS_CONFIG,
+        ),
+        dt=args.dt,
+        time_unit=ImaginaryTimeUnit(),
+        sampler_key=jax.random.key(args.seed),
+        n_samples=args.n_samples,
+        n_chains=args.n_chains,
+        full_gradient=args.full_gradient,
     )
-    
-    run_optimization(model, operator, n_samples=n_samples, n_steps=n_steps, dt=dt, data=data)
-    
-    # Save data if output_dir specified
-    if output_dir:
-        path = Path(output_dir) / f"z3_pure_L{size}_g{g:.3f}.json"
-        data.save(path)
-    
-    return data
 
-
-def scan_g(
-    size: int = 8,
-    g_values: tuple[float, ...] = (0.25, 0.30, 0.35, 0.375, 0.40, 0.45, 0.50),
-    bond_dim: int = 2,
-    n_samples: int = 2000,
-    n_steps: int = 500,
-    dt: float = 0.01,
-    output_dir: str = "output/z3_scan",
-):
-    """Scan over g values to map out phase diagram (replicates Fig 2a,b).
-    
-    This produces E(g) data that can be used to compute:
-    - dE/dg = (1/g)⟨H_E⟩  
-    - d²E/dg² via finite difference
-    
-    The first-order transition should show sharp jumps in dE/dg and
-    a peak in d²E/dg² at g_c ≈ 0.375.
-    """
-    logger.info("=" * 60)
-    logger.info("Z3 Phase Diagram Scan")
-    logger.info(f"Lattice: {size}x{size}, D_k={bond_dim}")
-    logger.info(f"g values: {g_values}")
-    logger.info("=" * 60)
-    
-    results = []
-    for g in g_values:
-        logger.info(f"\n{'='*40}\nRunning g = {g}\n{'='*40}")
-        data = main(
-            size=size, g=g, bond_dim=bond_dim,
-            n_samples=n_samples, n_steps=n_steps, dt=dt,
-            output_dir=output_dir,
-        )
-        results.append(data)
-    
-    # Summary
-    logger.info("\n" + "=" * 60)
-    logger.info("SCAN SUMMARY")
-    logger.info("=" * 60)
-    for data in results:
-        g = data.parameters["g"]
-        e = data.energies[-1] if data.energies else float('nan')
-        logger.info(f"g = {g:.3f}: E = {e:.6f}")
+    g_tok = format(args.g, ".3f").replace(".", "p")
+    run_dir = f"data/z3_pure/L{args.L}_g{g_tok}"
+    run(
+        driver,
+        n_steps=args.n_steps,
+        run_dir=run_dir,
+        log_every=args.log_every,
+        save_every=args.save_every,
+        resume=args.resume,
+        extra_config={
+            "gauge_group": "Z3", "L": args.L,
+            "h": args.h, "g": args.g,
+            "critical_point": "g_c ~ 0.375 (first-order)",
+        },
+    )
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
     main()

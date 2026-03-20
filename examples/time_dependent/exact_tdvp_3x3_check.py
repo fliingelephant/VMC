@@ -11,8 +11,11 @@ step. The PEPS trajectory uses TDVPDriver.
 from __future__ import annotations
 
 import argparse
+import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import jax
 import jax.numpy as jnp
@@ -31,13 +34,9 @@ from vmc.operators import (
 )
 from vmc.peps import NoTruncation, PEPS
 from vmc.peps.standard.compat import _value
-from vmc.preconditioners import (
-    DirectSolve,
-    SRPreconditioner,
-    solve_cg,
-    solve_cholesky,
-    solve_svd,
-)
+from vmc.preconditioners import DirectSolve, SRPreconditioner
+
+from runner import DEFAULT_METRICS_CONFIG, resolve_solver  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -209,11 +208,7 @@ def _run_vmc_trajectory(
         preconditioner=SRPreconditioner(
             diag_shift=cfg.diag_shift,
             strategy=DirectSolve(
-                solver={
-                    "cholesky": solve_cholesky,
-                    "svd": solve_svd,
-                    "cg": solve_cg,
-                }[cfg.solver]
+                solver=resolve_solver(cfg.solver)
             ),
         ),
         dt=cfg.dt,

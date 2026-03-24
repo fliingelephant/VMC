@@ -12,62 +12,40 @@ from vmc import config  # noqa: F401, E402
 import argparse  # noqa: E402
 
 import jax  # noqa: E402
-from flax import nnx  # noqa: E402
 
 from vmc.drivers import ImaginaryTimeUnit, TDVPDriver  # noqa: E402
 from vmc.preconditioners import DirectSolve, SRPreconditioner, solve_cholesky  # noqa: E402
 from vmc.qgt import ParameterSpace  # noqa: E402
 
-from runner import DEFAULT_METRICS_CONFIG, run  # noqa: E402
-from common import (  # noqa: E402
-    DEFAULT_BOUNDARY_SWEEPS, DEFAULT_DIAG_SHIFT, DEFAULT_DT,
-    build_model, build_z2_hardcore_boson_hamiltonian,
-)
+from runner import DEFAULT_METRICS_CONFIG, add_common_args, run  # noqa: E402
+from common import build_model, build_z2_hardcore_boson_hamiltonian  # noqa: E402
 
 
 L = 3
 SHAPE = (L, L)
 PARTICLE_NUMBER = 2
-
 H_COUPLING = 1.0
 G_COUPLING = 0.33
 J_COUPLING = 0.5
 M_COUPLING = 0.0
-
 BOND_DIM_PER_CHARGE = 3
 BOUNDARY_DIM = 9
 QUOTED_ED_ENERGY_PER_SITE = -0.4707135061
 
-N_SAMPLES = 4096
-N_CHAINS = 64
-DEFAULT_N_STEPS = 200
-SEED = 42
 
-
-def _run_dir() -> Path:
-    return Path(__file__).resolve().parent / "data" / "benchmark_3x3"
-
-
-def _parse_args() -> argparse.Namespace:
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="Run the 3x3 quoted-ED benchmark for Z2 hard-core bosons.",
     )
-    parser.add_argument("--n-samples", type=int, default=N_SAMPLES)
-    parser.add_argument("--n-chains", type=int, default=N_CHAINS)
-    parser.add_argument("--n-steps", type=int, default=DEFAULT_N_STEPS)
-    parser.add_argument("--dt", type=float, default=DEFAULT_DT)
-    parser.add_argument("--diag-shift", type=float, default=DEFAULT_DIAG_SHIFT)
-    parser.add_argument("--boundary-sweeps", type=int, default=DEFAULT_BOUNDARY_SWEEPS)
-    parser.add_argument("--seed", type=int, default=SEED)
-    parser.add_argument("--log-every", type=int, default=50)
-    parser.add_argument("--save-every", type=int, default=50)
-    parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--output", type=str, default=None)
-    return parser.parse_args()
+    parser.add_argument("--boundary-sweeps", type=int, default=2)
+    add_common_args(parser)
+    parser.set_defaults(
+        n_samples=4096, n_chains=64, n_steps=200,
+        dt=0.01, diag_shift=1e-4, seed=42,
+        log_every=50, save_every=50,
+    )
+    args = parser.parse_args()
 
-
-def main() -> None:
-    args = _parse_args()
     model = build_model(
         SHAPE,
         particle_number=PARTICLE_NUMBER,
@@ -96,7 +74,7 @@ def main() -> None:
     run(
         driver,
         n_steps=args.n_steps,
-        run_dir=args.output or str(_run_dir()),
+        run_dir=args.output or str(Path(__file__).resolve().parent / "data" / "benchmark_3x3"),
         log_every=args.log_every,
         save_every=args.save_every,
         resume=args.resume,

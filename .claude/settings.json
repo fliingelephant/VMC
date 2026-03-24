@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "vmc": {
+      "command": "uv",
+      "args": ["run", "--directory", "${projectRoot}", "python", "tools/vmc-mcp/server.py"]
+    }
+  }
+}

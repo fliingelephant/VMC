@@ -119,7 +119,7 @@ def main() -> None:
     run(
         driver,
         T_final=args.T_final,
-        run_dir=(
+        run_dir=args.output or (
             f"data/z2_vison_higgs/L{L}_g{g_tok}_J{J_tok}_Dk{bond_dim}"
             f"_rt_vison_{orientation}_r{vison_row}_c{vison_col}"
         ),

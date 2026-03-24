@@ -65,6 +65,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--log-every", type=int, default=50)
     parser.add_argument("--save-every", type=int, default=50)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--output", type=str, default=None)
     return parser.parse_args()
 
 
@@ -100,7 +101,7 @@ def main() -> None:
     run(
         driver,
         n_steps=args.n_steps,
-        run_dir=_run_dir(args),
+        run_dir=args.output or str(_run_dir(args)),
         log_every=args.log_every,
         save_every=args.save_every,
         resume=args.resume,

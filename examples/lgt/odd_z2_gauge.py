@@ -98,7 +98,7 @@ def main() -> None:
     )
 
     g_tok = format(args.g, ".3f").replace(".", "p")
-    run_dir = f"data/odd_z2/L{args.L}_g{g_tok}"
+    run_dir = args.output or f"data/odd_z2/L{args.L}_g{g_tok}"
     run(
         driver,
         n_steps=args.n_steps,

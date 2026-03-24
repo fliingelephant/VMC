@@ -219,7 +219,7 @@ def run_single_quench(args, tau_q: float) -> None:
     )
 
     tau_q_tok = format(tau_q, ".4f").replace(".", "p")
-    run_dir = f"data/tfim_quench/L{args.L}_tauq{tau_q_tok}_D{args.bond_dim}"
+    run_dir = args.output or f"data/tfim_quench/L{args.L}_tauq{tau_q_tok}_D{args.bond_dim}"
     run(
         driver,
         T_final=t1,

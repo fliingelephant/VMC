@@ -75,7 +75,7 @@ def main() -> None:
     run(
         driver,
         n_steps=args.n_steps,
-        run_dir=f"data/z2_vison_higgs/L{args.L}_g{g_tok}_J{J_tok}_Dk{args.bond_dim}",
+        run_dir=args.output or f"data/z2_vison_higgs/L{args.L}_g{g_tok}_J{J_tok}_Dk{args.bond_dim}",
         log_every=args.log_every,
         save_every=args.save_every,
         resume=args.resume,

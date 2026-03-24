@@ -96,7 +96,7 @@ def main() -> None:
     run(
         driver,
         T_final=args.T_final,
-        run_dir=f"data/z2_vison/L{L}_g{g_tok}_Dk{bond_dim}_rt",
+        run_dir=args.output or f"data/z2_vison/L{L}_g{g_tok}_Dk{bond_dim}_rt",
         observable_names=plaq_names,
         log_every=args.log_every,
         save_every=args.save_every,

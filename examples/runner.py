@@ -49,6 +49,8 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--n-steps", type=int, default=None)
     parser.add_argument("--T-final", type=float, default=None, dest="T_final")
+    parser.add_argument("--output", type=str, default=None,
+                        help="Output directory for checkpoints and series")
 
 
 def save_checkpoint(run_dir, driver, step, *, series=None, **metadata):

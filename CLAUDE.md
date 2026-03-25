@@ -116,4 +116,3 @@ Follow [Google Python Style Guide](https://google.github.io/styleguide/pyguide.h
 
 - Use Python `logging` module, not `print()`.
 - **Guard expensive debug computations** with `logger.isEnabledFor(logging.DEBUG)`.
-- Control via `VMC_LOG_LEVEL` environment variable.

@@ -1,4 +1,5 @@
 """Tests for MCP compatibility tools."""
+
 from __future__ import annotations
 
 import sys
@@ -33,24 +34,30 @@ def test_unknown_model():
 
 def test_feasibility_z2_ground_state():
     config = {
-        "gauge_group": "Z2",
+        "N": 2,
         "lattice": (8, 8),
         "terms": ["electric", "plaquette"],
         "dynamics": "imaginary_time",
     }
     result = check_feasibility(config)
     assert result["feasible"] is True
-    assert "GIPEPS" in result["suggested_model"]
+    assert result["suggested_model"] == "GIPEPS"
 
 
-def test_feasibility_unsupported_gauge():
-    config = {"gauge_group": "SU2", "lattice": (8, 8), "terms": ["plaquette"]}
+def test_feasibility_odd_z2():
+    config = {"N": 2, "Qx": 1, "lattice": (8, 8), "terms": ["electric", "plaquette"]}
     result = check_feasibility(config)
-    assert result["feasible"] is False
+    assert result["feasible"] is True
+    assert result["suggested_model"] == "GIPEPS"
+    assert any("Qx" in n for n in result["notes"])
 
 
-def test_feasibility_standard_peps():
-    config = {"lattice": (4, 4), "terms": ["onsite", "diagonal"], "dynamics": "real_time"}
+def test_feasibility_no_gauge():
+    config = {
+        "lattice": (4, 4),
+        "terms": ["onsite", "diagonal"],
+        "dynamics": "real_time",
+    }
     result = check_feasibility(config)
     assert result["feasible"] is True
     assert result["suggested_model"] == "PEPS"
@@ -58,10 +65,10 @@ def test_feasibility_standard_peps():
 
 def test_feasibility_higgs():
     config = {
-        "gauge_group": "Z2",
+        "N": 2,
         "lattice": (8, 8),
         "terms": ["electric", "plaquette", "matter_mass", "higgs"],
     }
     result = check_feasibility(config)
     assert result["feasible"] is True
-    assert any("conserve_particle_number" in n for n in result.get("notes", []))
+    assert any("conserve_particle_number" in n for n in result["notes"])

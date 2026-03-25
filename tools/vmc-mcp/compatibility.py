@@ -1,22 +1,30 @@
 """Compatibility matrix and feasibility checker for the PEPS-tVMC codebase."""
+
 from __future__ import annotations
 
 # Which term types are valid with which model family
 TERM_MODEL_COMPAT = {
     "PEPS": {
-        "OneSiteOperator", "DiagonalOperator",
-        "HorizontalTwoSiteOperator", "VerticalTwoSiteOperator",
+        "OneSiteOperator",
+        "DiagonalOperator",
+        "HorizontalTwoSiteOperator",
+        "VerticalTwoSiteOperator",
         "PlaquetteOperator",
     },
     "GIPEPS": {
-        "PlaquetteOperator", "LinkDiagonalTerm",
+        "PlaquetteOperator",
+        "LinkDiagonalTerm",
         "MatterMassTerm",
-        "HorizontalMatterHoppingTerm", "VerticalMatterHoppingTerm",
-        "HorizontalHiggsLinkTerm", "VerticalHiggsLinkTerm",
+        "HorizontalMatterHoppingTerm",
+        "VerticalMatterHoppingTerm",
+        "HorizontalHiggsLinkTerm",
+        "VerticalHiggsLinkTerm",
     },
     "BlockadePEPS": {
-        "OneSiteOperator", "DiagonalOperator",
-        "HorizontalTwoSiteOperator", "VerticalTwoSiteOperator",
+        "OneSiteOperator",
+        "DiagonalOperator",
+        "HorizontalTwoSiteOperator",
+        "VerticalTwoSiteOperator",
         "PlaquetteOperator",
     },
 }
@@ -65,37 +73,34 @@ def check_compatibility(model: str, term_types: list[str]) -> dict:
             "reason": f"{model} does not support: {incompatible}",
             "incompatible_terms": incompatible,
         }
-    return {"compatible": True, "reason": "All terms supported.", "incompatible_terms": []}
+    return {
+        "compatible": True,
+        "reason": "All terms supported.",
+        "incompatible_terms": [],
+    }
 
 
 def check_feasibility(config: dict) -> dict:
     """Check if a simulation config is feasible with this codebase.
 
     Config keys:
-        gauge_group: str | None  (e.g., "Z2", "Z3", None for no gauge)
+        N: int | None       Z_N group order (None = no gauge symmetry → PEPS)
+        Qx: int             Background charge per site (0 = even, 1 = odd)
         lattice: tuple[int, int]
-        terms: list[str]  (user-friendly names or operator class names)
+        terms: list[str]    User-friendly names or operator class names
         dynamics: str | None  ("imaginary_time", "real_time", None)
     """
-    gauge_group = config.get("gauge_group")
+    N = config.get("N")
     lattice = config.get("lattice", (4, 4))
     terms = config.get("terms", [])
     notes: list[str] = []
 
     # Determine model family
-    if gauge_group and gauge_group.upper() != "NONE":
-        if not gauge_group.upper().startswith("Z"):
-            return {
-                "feasible": False,
-                "suggested_model": "",
-                "reason": (
-                    f"Gauge group {gauge_group!r} is not supported. "
-                    f"Only Abelian Z_N groups are supported."
-                ),
-                "missing_features": [f"{gauge_group} gauge group"],
-                "notes": notes,
-            }
+    if N is not None:
         suggested_model = "GIPEPS"
+        Qx = config.get("Qx", 0)
+        if Qx != 0:
+            notes.append(f"Odd gauge theory (Qx={Qx}): set Qx={Qx} in GIPEPSConfig.")
     else:
         suggested_model = "PEPS"
 
@@ -127,7 +132,9 @@ def check_feasibility(config: dict) -> dict:
     # Higgs terms note
     higgs_terms = {"HorizontalHiggsLinkTerm", "VerticalHiggsLinkTerm"}
     if higgs_terms & set(resolved_terms):
-        notes.append("Higgs terms require conserve_particle_number=False in GIPEPSConfig.")
+        notes.append(
+            "Higgs terms require conserve_particle_number=False in GIPEPSConfig."
+        )
 
     return {
         "feasible": True,

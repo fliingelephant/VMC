@@ -34,6 +34,7 @@ def main() -> None:
     parser.add_argument("--sigma-z-field", type=float, default=1.0)
     parser.add_argument("--boundary-sweeps", type=int, default=2)
     add_common_args(parser)
+    parser.add_argument("--n-steps", type=int, default=200)
     parser.set_defaults(
         bond_dim=2, dt=0.005, diag_shift=1e-4,
         n_steps=200, n_samples=4096, n_chains=512,

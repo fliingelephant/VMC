@@ -51,6 +51,7 @@ def main() -> None:
     parser.add_argument("--vison-row", type=int, default=None)
     parser.add_argument("--vison-col", type=int, default=None)
     add_common_args(parser)
+    parser.add_argument("--T", type=float, default=20.0, help="Duration to evolve")
     parser.set_defaults(
         bond_dim=2, dt=0.005, diag_shift=1e-8,
         n_samples=4096, n_chains=512,
@@ -117,7 +118,7 @@ def main() -> None:
     J_tok = format(J, ".3f").replace(".", "p")
     run(
         driver,
-        T_final=args.T_final,
+        T=args.T,
         run_dir=args.output or (
             f"data/z2_vison_higgs/L{L}_g{g_tok}_J{J_tok}_Dk{bond_dim}"
             f"_rt_vison_{orientation}_r{vison_row}_c{vison_col}"

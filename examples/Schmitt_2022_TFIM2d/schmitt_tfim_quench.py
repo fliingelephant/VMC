@@ -220,7 +220,7 @@ def run_single_quench(args, tau_q: float) -> None:
     run_dir = args.output or f"data/tfim_quench/L{args.L}_tauq{tau_q_tok}_D{args.bond_dim}"
     run(
         driver,
-        T_final=t1,
+        T=t1 - t0,
         run_dir=run_dir,
         observable_names=obs_names,
         log_every=args.log_every,

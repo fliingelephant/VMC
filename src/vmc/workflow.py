@@ -148,8 +148,6 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--log-every", type=int, default=10)
     parser.add_argument("--save-every", type=int, default=50)
     parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--n-steps", type=int, default=None)
-    parser.add_argument("--T-final", type=float, default=None, dest="T_final")
     parser.add_argument("--output", type=str, default=None,
                         help="Output directory for checkpoints and series")
 
@@ -260,7 +258,7 @@ def run(
     driver,
     *,
     n_steps: int | None = None,
-    T_final: float | None = None,
+    T: float | None = None,
     run_dir: str | Path,
     observable_names: tuple[str, ...] = (),
     log_every: int = 10,
@@ -271,10 +269,15 @@ def run(
 ) -> None:
     """Run a TDVP trajectory with periodic logging and checkpointing.
 
+    Specify exactly one of ``n_steps`` or ``T``:
+
+    - ``n_steps``: run this many steps (ground-state optimization).
+    - ``T``: run for this duration from the current time (dynamics).
+
     Args:
         driver: TDVPDriver instance.
-        n_steps: Number of steps to run. Mutually exclusive with T_final.
-        T_final: Target final time. Mutually exclusive with n_steps.
+        n_steps: Number of steps to run.
+        T: Duration to evolve (from current driver.t).
         run_dir: Output directory for checkpoints.
         observable_names: Names for driver observables (for logging keys).
         log_every: Log metrics every N steps.
@@ -283,6 +286,11 @@ def run(
         extra_config: Additional config to save in checkpoint JSON.
         out: Logger instance. Default: ConsoleLog().
     """
+    if n_steps is not None and T is not None:
+        raise TypeError("Specify n_steps or T, not both.")
+    if n_steps is None and T is None:
+        raise TypeError("Specify n_steps or T.")
+
     run_dir = Path(run_dir)
     series: dict[str, list] = {}
 
@@ -298,23 +306,19 @@ def run(
 
     start_step = driver.step_count
 
-    if T_final is not None:
-        remaining = T_final - driver.t
-        if remaining <= 1e-12 * max(1.0, abs(T_final)):
-            logger.info("Already at t=%.6f >= T_final=%.6f.", driver.t, T_final)
-            return
-        total_new_steps = math.ceil(remaining / driver.dt)
-    elif n_steps is not None:
-        total_new_steps = n_steps
+    if T is not None:
+        t_end = driver.t + T
+        total_new_steps = math.ceil(T / driver.dt)
     else:
-        raise ValueError("Provide exactly one of n_steps or T_final.")
+        t_end = None
+        total_new_steps = n_steps
 
     target_step = start_step + total_new_steps
 
     _log_config_table(
         driver,
         n_steps=total_new_steps,
-        T_final=T_final,
+        t_end=t_end,
         run_dir=str(run_dir),
         observable_names=observable_names,
         log_every=log_every,
@@ -434,7 +438,7 @@ def _extract_config(driver, extra):
 
 
 def _log_config_table(
-    driver, *, n_steps, T_final, run_dir, observable_names,
+    driver, *, n_steps, t_end, run_dir, observable_names,
     log_every, save_every, resume, extra_config, start_step, target_step,
 ):
     model = driver.model
@@ -489,8 +493,8 @@ def _log_config_table(
     lines.append(("dt", str(driver.dt)))
     lines.append(("t0", f"{driver.t:.6f}"))
 
-    if T_final is not None:
-        lines.append(("Target", f"T = {T_final:.6f} ({n_steps} steps)"))
+    if t_end is not None:
+        lines.append(("Target", f"t_end = {t_end:.6f} ({n_steps} steps)"))
     else:
         lines.append(("Target", f"{n_steps} steps -> step {target_step}"))
 
@@ -528,8 +532,8 @@ def _log_config_table(
     logger.info("-- Resume %s", bar)
     if resume:
         logger.info(f"{'Checkpoint':<{w}}step {start_step}, t = {driver.t:.6f}")
-        if T_final is not None:
-            logger.info(f"{'Remaining':<{w}}{n_steps} steps (t: {driver.t:.6f} -> {T_final:.6f})")
+        if t_end is not None:
+            logger.info(f"{'Remaining':<{w}}{n_steps} steps (t: {driver.t:.6f} -> {t_end:.6f})")
         else:
             logger.info(f"{'Remaining':<{w}}{n_steps} steps -> step {target_step}")
     else:

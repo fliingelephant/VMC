@@ -36,6 +36,7 @@ def main() -> None:
     parser.add_argument("--m", type=float, default=DEFAULT_M)
     parser.add_argument("--boundary-sweeps", type=int, default=2)
     add_common_args(parser)
+    parser.add_argument("--n-steps", type=int, default=200)
     parser.set_defaults(
         n_samples=4096, n_chains=64, n_steps=200,
         dt=0.01, diag_shift=1e-4, seed=42,

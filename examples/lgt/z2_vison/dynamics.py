@@ -45,6 +45,7 @@ def main() -> None:
     parser.add_argument("--state", type=str, required=True,
                         help="Path to ground-state run_dir from ground_state.py")
     add_common_args(parser)
+    parser.add_argument("--T", type=float, default=20.0, help="Duration to evolve")
     parser.set_defaults(bond_dim=3, dt=0.01, diag_shift=1e-8)
     args = parser.parse_args()
 
@@ -94,7 +95,7 @@ def main() -> None:
     g_tok = format(g, ".3f").replace(".", "p")
     run(
         driver,
-        T_final=args.T_final,
+        T=args.T,
         run_dir=args.output or f"data/z2_vison/L{L}_g{g_tok}_Dk{bond_dim}_rt",
         observable_names=plaq_names,
         log_every=args.log_every,

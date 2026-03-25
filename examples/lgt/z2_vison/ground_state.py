@@ -32,6 +32,7 @@ def main() -> None:
     parser.add_argument("--h", type=float, default=1.0)
     parser.add_argument("--g", type=float, default=0.1)
     add_common_args(parser)
+    parser.add_argument("--n-steps", type=int, default=200)
     parser.set_defaults(bond_dim=3, dt=0.005, diag_shift=1e-6, n_steps=400)
     args = parser.parse_args()
 

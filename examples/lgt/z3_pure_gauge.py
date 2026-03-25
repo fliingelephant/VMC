@@ -59,6 +59,7 @@ def main() -> None:
     parser.add_argument("--g", type=float, default=0.375)
     parser.add_argument("--h", type=float, default=1.0)
     add_common_args(parser)
+    parser.add_argument("--n-steps", type=int, default=200)
     parser.set_defaults(
         bond_dim=2, n_samples=2000, n_chains=1, n_steps=500,
         full_gradient=True, log_every=5, save_every=100,

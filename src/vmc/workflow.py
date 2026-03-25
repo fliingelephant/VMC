@@ -1,8 +1,11 @@
 """Simulation workflow infrastructure: run loop, checkpointing, logging.
 
 Provides the outer loop that wraps a TDVPDriver with periodic logging,
-checkpointing, and resume support. Inspired by NetKet's driver.run() and
-PyTorch Lightning's Trainer, but tailored for PEPS-tVMC.
+checkpointing, and resume support.
+
+- Checkpointing via Orbax CheckpointManager (atomic, step-numbered, max_to_keep).
+- Per-step metrics via pluggable AbstractLog (ConsoleLog, JsonLog, CompositeLog).
+- Static config stored as Orbax metadata, validated on resume.
 
 Usage::
 
@@ -18,10 +21,8 @@ import argparse
 import json
 import logging
 import math
-import os
 import platform
 import socket
-import tempfile
 import time
 from pathlib import Path
 
@@ -50,19 +51,13 @@ DEFAULT_METRICS_CONFIG = MetricsConfig(
 # ---------------------------------------------------------------------------
 
 class AbstractLog(abc.ABC):
-    """Base class for simulation loggers.
-
-    Loggers receive per-step metrics via ``__call__`` and flush buffered
-    data to disk via ``flush``.
-    """
+    """Base class for simulation loggers."""
 
     @abc.abstractmethod
-    def __call__(self, step: int, item: dict) -> None:
-        """Log one step of metrics."""
+    def __call__(self, step: int, item: dict) -> None: ...
 
     @abc.abstractmethod
-    def flush(self) -> None:
-        """Flush any buffered data to disk."""
+    def flush(self) -> None: ...
 
 
 class ConsoleLog(AbstractLog):
@@ -73,16 +68,12 @@ class ConsoleLog(AbstractLog):
 
     def __call__(self, step: int, item: dict) -> None:
         if not self._header_printed:
-            header = "  ".join(f"{k:>14}" for k in item)
-            logger.info(header)
+            logger.info("  ".join(f"{k:>14}" for k in item))
             self._header_printed = True
         parts = []
-        for k, v in item.items():
+        for v in item.values():
             if isinstance(v, float):
-                if abs(v) < 1e-2 or abs(v) > 1e4:
-                    parts.append(f"{v:14.4e}")
-                else:
-                    parts.append(f"{v:14.6f}")
+                parts.append(f"{v:14.4e}" if abs(v) < 1e-2 or abs(v) > 1e4 else f"{v:14.6f}")
             elif isinstance(v, int):
                 parts.append(f"{v:14d}")
             else:
@@ -153,62 +144,28 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Checkpointing
+# Checkpointing (Orbax CheckpointManager)
 # ---------------------------------------------------------------------------
 
-def save_checkpoint(run_dir, driver, step, *, series=None, runtime=None, **metadata):
-    """Save driver state to run_dir/latest/ (orbax) + latest.json."""
-    run_dir = Path(run_dir)
-    run_dir.mkdir(parents=True, exist_ok=True)
-
-    state = {
+def _driver_state(driver) -> dict:
+    """Extract the checkpointable state from a driver."""
+    config = driver._sampler_configuration
+    # Flatten to (n_chains, n_sites) — driver.run() reshapes to this form
+    if config.ndim > 2:
+        config = config.reshape(config.shape[0], -1)
+    return {
         "tensors": {
             str(row): {str(col): t for col, t in rd.items()}
             for row, rd in driver._tensors.items()
         },
         "sampler_key": driver._sampler_key,
-        "sampler_configuration": driver._sampler_configuration,
+        "sampler_configuration": config,
     }
-    import shutil
-    ckptr = ocp.PyTreeCheckpointer()
-    ckpt_path = run_dir / "latest"
-    ckpt_tmp = run_dir / "_latest_new"
-    if ckpt_tmp.exists():
-        shutil.rmtree(ckpt_tmp)
-    ckptr.save(ckpt_tmp, state)
-    if ckpt_path.exists():
-        shutil.rmtree(ckpt_path)
-    ckpt_tmp.rename(ckpt_path)
-
-    json_data = {
-        "step": int(step),
-        "time": float(driver.t),
-        "config": _extract_config(driver, metadata.pop("config", None)),
-    }
-    if runtime is not None:
-        json_data["runtime"] = runtime
-    if series is not None:
-        json_data["series"] = series
-    json_data.update(metadata)
-    _atomic_write_json(run_dir / "latest.json", json_data)
 
 
-def load_checkpoint(run_dir, driver):
-    """Restore driver state from run_dir/latest/ (orbax) + latest.json."""
-    run_dir = Path(run_dir)
-
-    target = {
-        "tensors": {
-            str(row): {str(col): t for col, t in rd.items()}
-            for row, rd in driver._tensors.items()
-        },
-        "sampler_key": driver._sampler_key,
-        "sampler_configuration": driver._sampler_configuration,
-    }
-    ckptr = ocp.PyTreeCheckpointer()
-    restored = ckptr.restore(run_dir / "latest", item=target)
-
-    saved_config = restored["sampler_configuration"]
+def _restore_driver(driver, state: dict) -> None:
+    """Restore driver state from a checkpoint dict."""
+    saved_config = state["sampler_configuration"]
     if saved_config.shape[0] != driver.n_chains:
         raise ValueError(
             f"Checkpoint n_chains={saved_config.shape[0]} != "
@@ -216,15 +173,9 @@ def load_checkpoint(run_dir, driver):
         )
     for row, rd in driver._tensors.items():
         for col in rd:
-            driver._tensors[row][col] = restored["tensors"][str(row)][str(col)]
-    driver._sampler_key = restored["sampler_key"]
+            driver._tensors[row][col] = state["tensors"][str(row)][str(col)]
+    driver._sampler_key = state["sampler_key"]
     driver._sampler_configuration = saved_config
-
-    with open(run_dir / "latest.json") as f:
-        metadata = json.load(f)
-    driver.step_count = metadata["step"]
-    driver.t = metadata["time"]
-    return metadata
 
 
 def load_model_from_checkpoint(run_dir, model):
@@ -232,6 +183,9 @@ def load_model_from_checkpoint(run_dir, model):
     from flax import nnx
 
     run_dir = Path(run_dir)
+    mgr = ocp.CheckpointManager(run_dir, options=ocp.CheckpointManagerOptions(read_only=True))
+    step = mgr.latest_step()
+
     graphdef, params, model_state = nnx.split(model, nnx.Param, ...)
     tensors = nnx.to_pure_dict(params)["tensors"]
     target = {
@@ -240,18 +194,14 @@ def load_model_from_checkpoint(run_dir, model):
             for row, rd in tensors.items()
         },
     }
-    ckptr = ocp.PyTreeCheckpointer()
-    restored = ckptr.restore(run_dir / "latest", item=target, partial_restore=True)
+    restored = mgr.restore(step, args=ocp.args.StandardRestore(target), partial_restore=True)
     loaded = {
-        row: {
-            col: restored["tensors"][str(row)][str(col)]
-            for col in rd
-        }
+        row: {col: restored["tensors"][str(row)][str(col)] for col in rd}
         for row, rd in tensors.items()
     }
-    with open(run_dir / "latest.json") as f:
-        metadata = json.load(f)
-    return nnx.merge(graphdef, {"tensors": loaded}, model_state), metadata
+    metadata = mgr.metadata()
+    meta_dict = dict(metadata.custom_metadata) if hasattr(metadata, 'custom_metadata') else {}
+    return nnx.merge(graphdef, {"tensors": loaded}, model_state), meta_dict
 
 
 # ---------------------------------------------------------------------------
@@ -279,17 +229,8 @@ def run(
     - ``T_final``: run until this absolute time (dynamics). On resume,
       computes remaining time from the checkpoint.
 
-    Args:
-        driver: TDVPDriver instance.
-        n_steps: Number of steps to run.
-        T_final: Target final time (absolute).
-        run_dir: Output directory for checkpoints.
-        observable_names: Names for driver observables (for logging keys).
-        log_every: Log metrics every N steps.
-        save_every: Save checkpoint every N steps.
-        resume: If True, resume from existing checkpoint in run_dir.
-        extra_config: Additional config to save in checkpoint JSON.
-        out: Logger instance. Default: ConsoleLog().
+    Checkpoints are managed by Orbax CheckpointManager (atomic, step-numbered).
+    Per-step metrics are written by the ``out`` logger (default: ConsoleLog).
     """
     if n_steps is not None and T_final is not None:
         raise TypeError("Specify n_steps or T_final, not both.")
@@ -297,17 +238,41 @@ def run(
         raise TypeError("Specify n_steps or T_final.")
 
     run_dir = Path(run_dir)
-    series: dict[str, list] = {}
+    run_dir.mkdir(parents=True, exist_ok=True)
 
     if out is None:
         out = ConsoleLog()
 
     runtime = _collect_runtime()
 
-    if resume and (run_dir / "latest").exists():
-        metadata = load_checkpoint(run_dir, driver)
-        series = metadata.get("series", {})
-        runtime = metadata.get("runtime", runtime)
+    # Build metadata for this run
+    run_metadata = _extract_config(driver, extra_config)
+    run_metadata["runtime"] = runtime
+
+    # Create CheckpointManager
+    mgr = ocp.CheckpointManager(
+        run_dir,
+        metadata=run_metadata,
+        options=ocp.CheckpointManagerOptions(max_to_keep=2, save_interval_steps=1),
+    )
+
+    # Resume from existing checkpoint
+    if resume and mgr.latest_step() is not None:
+        latest = mgr.latest_step()
+        state = _driver_state(driver)
+        restored = mgr.restore(latest, args=ocp.args.StandardRestore(state))
+        _restore_driver(driver, restored)
+        driver.step_count = latest
+        # Validate config on resume
+        saved_meta = mgr.metadata()
+        saved_extra = {}
+        if hasattr(saved_meta, 'custom_metadata'):
+            saved_extra = saved_meta.custom_metadata.get("extra", {})
+        if extra_config and saved_extra and extra_config != saved_extra:
+            logger.warning(
+                "Resume config differs from checkpoint. "
+                "Saved: %s, Current: %s", saved_extra, extra_config,
+            )
 
     start_step = driver.step_count
 
@@ -343,24 +308,15 @@ def run(
         target_step=target_step,
     )
 
-    run_dir.mkdir(parents=True, exist_ok=True)
-
     for _ in range(total_new_steps):
         driver.run(driver.dt)
         step = driver.step_count
         item = _build_step_item(driver, observable_names)
-        series.setdefault("step", []).append(int(step))
-        _accumulate_series(series, item)
         if step % log_every == 0 or step == target_step:
             out(step, item)
         if step % save_every == 0 or step == target_step:
-            runtime["finished"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            save_checkpoint(
-                run_dir, driver, step,
-                series=series,
-                runtime=runtime,
-                config=extra_config or {},
-            )
+            mgr.save(step, args=ocp.args.StandardSave(_driver_state(driver)))
+            mgr.wait_until_finished()
             out.flush()
 
     logger.info("Run complete: %d steps, t=%.6f", target_step, driver.t)
@@ -400,24 +356,6 @@ def _build_step_item(driver, observable_names: tuple[str, ...]) -> dict:
         if key in metrics:
             item[key] = float(metrics[key])
     return item
-
-
-def _accumulate_series(series: dict[str, list], item: dict) -> None:
-    """Append one step's metrics to the columnar series dict."""
-    for key, value in item.items():
-        series.setdefault(key, []).append(value)
-
-
-def _atomic_write_json(path: Path, data: dict) -> None:
-    text = json.dumps(data, indent=2, default=_json_default)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".json")
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(text)
-        os.replace(tmp, path)
-    except BaseException:
-        os.unlink(tmp)
-        raise
 
 
 def _json_default(obj):

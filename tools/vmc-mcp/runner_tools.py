@@ -7,7 +7,6 @@ import tempfile
 from pathlib import Path
 
 _SMOKE_DEFAULTS = {
-    "--n-steps": "2",
     "--n-samples": "32",
     "--n-chains": "4",
     "--bond-dim": "2",

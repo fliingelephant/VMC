@@ -61,13 +61,13 @@ def test_plot_heatmap_underscore_naming():
         assert Path(result["path"]).exists()
 
 
-def test_plot_heatmap_concat_naming():
+def test_plot_heatmap_multi_digit_indices():
     with tempfile.TemporaryDirectory() as tmpdir:
         run_dir = _make_mock_run_dir(tmpdir, {
-            "P_00_mean": [0.8, 0.7, 0.6],
-            "P_01_mean": [0.7, 0.6, 0.5],
-            "P_10_mean": [0.6, 0.5, 0.4],
-            "P_11_mean": [0.5, 0.4, 0.3],
+            "P_10_11_mean": [0.8, 0.7, 0.6],
+            "P_10_12_mean": [0.7, 0.6, 0.5],
+            "P_11_11_mean": [0.6, 0.5, 0.4],
+            "P_11_12_mean": [0.5, 0.4, 0.3],
         })
         result = plot_heatmap(str(run_dir), step=0, observable_prefix="P_")
         assert Path(result["path"]).exists()

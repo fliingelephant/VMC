@@ -83,7 +83,7 @@ def check_feasibility(config: dict) -> dict:
     notes: list[str] = []
 
     # Determine model family
-    if gauge_group and gauge_group != "none":
+    if gauge_group and gauge_group.upper() != "NONE":
         if not gauge_group.upper().startswith("Z"):
             return {
                 "feasible": False,

@@ -72,15 +72,13 @@ def plot_convergence(run_dir: str, keys: list[str] | None = None) -> dict:
 def _extract_grid(series: dict, step: int, prefix: str) -> tuple[list[list[float]], int, int]:
     """Extract a 2D grid from flat observable keys at a given step index.
 
-    Handles both underscore-separated (P_0_0_mean) and concatenated (P_00_mean) naming.
+    Keys must use underscore-separated naming: {prefix}{row}_{col}_mean.
     """
-    # Find matching keys and extract row/col
-    pattern_underscore = re.compile(rf"^{re.escape(prefix)}(\d+)_(\d+)_mean$")
-    pattern_concat = re.compile(rf"^{re.escape(prefix)}(\d)(\d)_mean$")
+    pattern = re.compile(rf"^{re.escape(prefix)}(\d+)_(\d+)_mean$")
 
     coords: dict[tuple[int, int], float] = {}
     for key, values in series.items():
-        m = pattern_underscore.match(key) or pattern_concat.match(key)
+        m = pattern.match(key)
         if m:
             r, c = int(m.group(1)), int(m.group(2))
             coords[(r, c)] = values[step]

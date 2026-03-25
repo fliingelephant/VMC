@@ -138,6 +138,7 @@ def main() -> None:
         sampler_key=jax.random.key(args.seed),
         n_samples=args.n_samples,
         n_chains=args.n_chains,
+        full_gradient=args.full_gradient,
     )
 
     g_tok = format(args.g, ".3f").replace(".", "p")

@@ -214,6 +214,7 @@ def run_single_quench(args, tau_q: float) -> None:
         sampler_key=jax.random.key(args.seed + 17),
         n_samples=args.n_samples,
         n_chains=args.n_chains,
+        full_gradient=args.full_gradient,
     )
 
     tau_q_tok = format(tau_q, ".4f").replace(".", "p")

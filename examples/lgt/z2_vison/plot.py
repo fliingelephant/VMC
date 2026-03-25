@@ -82,22 +82,21 @@ def plot_fig5a(
     except ModuleNotFoundError as exc:
         raise RuntimeError("matplotlib is required for plotting.") from exc
 
-    with open(peps_json_path) as f:
-        peps_data = json.load(f)
-
-    series = peps_data["series"]
-    peps_time = series["time"]
-    # Extract per-plaquette means from the series
-    plaq_keys = [f"P_{r}{c}_mean" for r, c in FIG5A_PLAQUETTES]
-    peps_values = [
-        [series[key][i] for key in plaq_keys]
-        for i in range(len(peps_time))
+    # Read JSONL metrics from run directory
+    rows = [
+        json.loads(line)
+        for line in (peps_json_path / "metrics.jsonl").read_text().strip().split("\n")
+        if line.strip()
     ]
+    plaq_keys = [f"P_{r}{c}_mean" for r, c in FIG5A_PLAQUETTES]
+    peps_time = [row["time"] for row in rows]
+    peps_values = [[row[key] for key in plaq_keys] for row in rows]
 
     exact_time = exact_result["time"]
     exact_values = exact_result["selected_plaquette_mean"]
 
-    config = peps_data.get("config", {}).get("extra", {})
+    from vmc.workflow import read_config
+    config = read_config(peps_json_path).get("extra", {})
     L = config.get("L", "?")
     g = config.get("g", "?")
 
@@ -137,7 +136,7 @@ def main() -> None:
         description="Plot Fig. 5(a) — GI-PEPS vs exact vison propagation.",
     )
     parser.add_argument("--input", type=Path, required=True,
-                        help="Path to runner JSON from dynamics.py")
+                        help="Path to dynamics run directory")
     parser.add_argument("--exact-cache", type=Path,
                         default=DEFAULT_EXACT_OPEN_DATA_CACHE)
     parser.add_argument("--exact-url", default=DEFAULT_EXACT_OPEN_DATA_URL)

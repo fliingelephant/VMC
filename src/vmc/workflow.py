@@ -258,7 +258,7 @@ def run(
     driver,
     *,
     n_steps: int | None = None,
-    T: float | None = None,
+    T_final: float | None = None,
     run_dir: str | Path,
     observable_names: tuple[str, ...] = (),
     log_every: int = 10,
@@ -269,15 +269,16 @@ def run(
 ) -> None:
     """Run a TDVP trajectory with periodic logging and checkpointing.
 
-    Specify exactly one of ``n_steps`` or ``T``:
+    Specify exactly one of ``n_steps`` or ``T_final``:
 
     - ``n_steps``: run this many steps (ground-state optimization).
-    - ``T``: run for this duration from the current time (dynamics).
+    - ``T_final``: run until this absolute time (dynamics). On resume,
+      computes remaining time from the checkpoint.
 
     Args:
         driver: TDVPDriver instance.
         n_steps: Number of steps to run.
-        T: Duration to evolve (from current driver.t).
+        T_final: Target final time (absolute).
         run_dir: Output directory for checkpoints.
         observable_names: Names for driver observables (for logging keys).
         log_every: Log metrics every N steps.
@@ -286,10 +287,10 @@ def run(
         extra_config: Additional config to save in checkpoint JSON.
         out: Logger instance. Default: ConsoleLog().
     """
-    if n_steps is not None and T is not None:
-        raise TypeError("Specify n_steps or T, not both.")
-    if n_steps is None and T is None:
-        raise TypeError("Specify n_steps or T.")
+    if n_steps is not None and T_final is not None:
+        raise TypeError("Specify n_steps or T_final, not both.")
+    if n_steps is None and T_final is None:
+        raise TypeError("Specify n_steps or T_final.")
 
     run_dir = Path(run_dir)
     series: dict[str, list] = {}
@@ -306,11 +307,13 @@ def run(
 
     start_step = driver.step_count
 
-    if T is not None:
-        t_end = driver.t + T
-        total_new_steps = math.ceil(T / driver.dt)
+    if T_final is not None:
+        remaining = T_final - driver.t
+        if remaining <= 1e-12 * max(1.0, abs(T_final)):
+            logger.info("Already at t=%.6f >= T_final=%.6f.", driver.t, T_final)
+            return
+        total_new_steps = math.ceil(remaining / driver.dt)
     else:
-        t_end = None
         total_new_steps = n_steps
 
     target_step = start_step + total_new_steps
@@ -318,7 +321,7 @@ def run(
     _log_config_table(
         driver,
         n_steps=total_new_steps,
-        t_end=t_end,
+        t_end=T_final,
         run_dir=str(run_dir),
         observable_names=observable_names,
         log_every=log_every,

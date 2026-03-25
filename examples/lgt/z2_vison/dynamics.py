@@ -68,7 +68,7 @@ def main() -> None:
     hamiltonian = build_z2_hamiltonian(shape, h=h, g=g)
     plaquettes = selected_open_plaquettes(shape)
     observables = build_selected_plaquette_observables(shape, plaquettes)
-    plaq_names = tuple(f"P_{r}{c}" for r, c in plaquettes)
+    plaq_names = tuple(f"P_{r}_{c}" for r, c in plaquettes)
 
     driver = TDVPDriver(
         model,

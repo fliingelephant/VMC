@@ -14,9 +14,6 @@ from flax import nnx
 
 from vmc.workflow import (
     DEFAULT_METRICS_CONFIG,
-    ConsoleLog,
-    JsonLog,
-    CompositeLog,
     add_common_args,
     resolve_solver,
     run,
@@ -102,13 +99,9 @@ def test_run_resume():
 def test_run_with_jsonl_logger():
     driver = _make_tiny_driver()
     with tempfile.TemporaryDirectory() as tmpdir:
-        jsonl_path = Path(tmpdir) / "metrics.jsonl"
-        run(
-            driver, n_steps=3, run_dir=tmpdir,
-            log_every=1, save_every=3,
-            out=CompositeLog(ConsoleLog(), JsonLog(jsonl_path)),
-        )
+        run(driver, n_steps=3, run_dir=tmpdir, log_every=1, save_every=3)
         import json
+        jsonl_path = Path(tmpdir) / "metrics.jsonl"
         lines = [json.loads(line) for line in jsonl_path.read_text().strip().split("\n")]
         assert len(lines) == 3
         assert "energy_mean" in lines[0]

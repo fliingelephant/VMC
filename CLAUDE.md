@@ -93,9 +93,9 @@ Follow [Google Python Style Guide](https://google.github.io/styleguide/pyguide.h
 - **Match theory first.** Verify Gauss-law conventions, term geometry (one-site/horizontal/vertical/plaquette), and sampling/energy formulas against the papers in `notes/`; if ambiguous, consult the notes and ask rather than guessing.
 - **Think twice.** For complicated or important algorithms, think twice before implementing.
 - **Uncertain correctness.** Implementation might be totally incorrect; for uncertain behavior, refer to notes or ask the user.
-- **Unified eval API (core).** `_value`, `_grad`, and `_value_and_grad` are the only evaluation entrypoints; every other evaluation is a variant of these (plum-dispatched for MPS/PEPS). Avoid manual-dispatch name variants, `log_*` helpers, or `*_fn` wrappers.
 - **Sampling gradients.** When a sampler records gradients, compute value+Jacobian for each proposal together and keep gradients only for accepted proposals.
 - **Let it crash**: no defensive parameter checks; assume correct wiring and let errors surface.
+- **Efficiency is top priority.** Never sacrifice efficiency or write a temporary version. At equivalent efficiency, target the most slim, clean, and decoupled implementation.
 - **Occupancy (0/1) internally**, spin (±1) only at NetKet API boundaries.
 
 ### Style
@@ -116,3 +116,8 @@ Follow [Google Python Style Guide](https://google.github.io/styleguide/pyguide.h
 
 - Use Python `logging` module, not `print()`.
 - **Guard expensive debug computations** with `logger.isEnabledFor(logging.DEBUG)`.
+
+### Collaboration
+
+- **Discuss before editing.** When reviewing PR comments or issues, first understand the essential semantics — what can vs cannot change, what the design actually requires — before proposing any fix. Do not edit until alignment is reached.
+- **First principles only.** No legacy considerations, code fallbacks, or patch-style fixes. Understand the essential nature of the problem, then apply the most clean, simple, and logistically canonical fix. This applies to automated reviewer suggestions too — evaluate whether the current behavior is correct by design before treating a suggestion as a bug.

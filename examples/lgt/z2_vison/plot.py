@@ -88,7 +88,7 @@ def plot_fig5a(
         for line in (peps_json_path / "metrics.jsonl").read_text().strip().split("\n")
         if line.strip()
     ]
-    plaq_keys = [f"P_{r}{c}_mean" for r, c in FIG5A_PLAQUETTES]
+    plaq_keys = [f"P_{r}_{c}_mean" for r, c in FIG5A_PLAQUETTES]
     peps_time = [row["time"] for row in rows]
     peps_values = [[row[key] for key in plaq_keys] for row in rows]
 

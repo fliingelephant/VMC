@@ -49,6 +49,11 @@ def smoke_test(
     No default args are injected — the caller provides exactly the CLI
     args the target script accepts via ``overrides``.
 
+    For scripts using ``vmc.workflow.run``, always pass ``--output`` pointing
+    to a temporary directory. Fresh runs wipe ``run_dir``, so omitting
+    ``--output`` lets the script fall back to its default ``data/...`` path
+    and delete real experiment results.
+
     Returns {"passed": bool, "returncode": int, "stdout": str, "stderr": str}.
     """
     script = Path(script_path).resolve()

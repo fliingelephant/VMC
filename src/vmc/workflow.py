@@ -20,6 +20,7 @@ import abc
 import argparse
 import json
 import logging
+import os
 import platform
 import socket
 import time
@@ -224,7 +225,8 @@ def run(
     Per-step metrics are written by the ``out`` logger (default: ConsoleLog).
     """
     if not logging.root.handlers:
-        logging.basicConfig(level=logging.INFO, format="%(message)s")
+        level = getattr(logging, os.environ.get("VMC_LOG_LEVEL", "INFO").upper(), logging.INFO)
+        logging.basicConfig(level=level, format="%(message)s")
     if n_steps is not None and T_final is not None:
         raise TypeError("Specify n_steps or T_final, not both.")
     if n_steps is None and T_final is None:

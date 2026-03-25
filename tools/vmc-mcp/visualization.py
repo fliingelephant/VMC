@@ -10,10 +10,18 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 
-def _load_series(run_dir: str) -> dict:
-    """Load the series data from a runner checkpoint JSON."""
-    with open(Path(run_dir) / "latest.json") as f:
-        return json.load(f).get("series", {})
+def _load_series(run_dir: str) -> dict[str, list]:
+    """Load series data from metrics.jsonl into columnar format."""
+    rows = [
+        json.loads(line)
+        for line in (Path(run_dir) / "metrics.jsonl").read_text().strip().split("\n")
+        if line.strip()
+    ]
+    series: dict[str, list] = {}
+    for row in rows:
+        for key, value in row.items():
+            series.setdefault(key, []).append(value)
+    return series
 
 
 def plot_convergence(run_dir: str, keys: list[str] | None = None) -> dict:

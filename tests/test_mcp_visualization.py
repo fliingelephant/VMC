@@ -13,21 +13,20 @@ if _tools_dir not in sys.path:
 from visualization import plot_convergence, plot_heatmap, animate
 
 
-def _make_mock_run_dir(tmpdir: str, extra_series: dict | None = None) -> Path:
-    """Create minimal runner output for testing."""
+def _make_mock_run_dir(tmpdir: str, extra_fields: dict | None = None) -> Path:
+    """Create minimal runner output (JSONL) for testing."""
     run_dir = Path(tmpdir)
-    series = {
-        "step": [1, 2, 3],
-        "time": [0.01, 0.02, 0.03],
-        "energy_mean": [-0.5, -0.6, -0.65],
-        "energy_error": [0.1, 0.05, 0.02],
-        "energy_variance": [0.5, 0.3, 0.1],
-    }
-    if extra_series:
-        series.update(extra_series)
-    (run_dir / "latest.json").write_text(
-        json.dumps({"step": 3, "time": 0.03, "series": series})
-    )
+    base = [
+        {"step": 1, "time": 0.01, "energy_mean": -0.5, "energy_error": 0.1, "energy_variance": 0.5},
+        {"step": 2, "time": 0.02, "energy_mean": -0.6, "energy_error": 0.05, "energy_variance": 0.3},
+        {"step": 3, "time": 0.03, "energy_mean": -0.65, "energy_error": 0.02, "energy_variance": 0.1},
+    ]
+    if extra_fields:
+        for i, row in enumerate(base):
+            for key, values in extra_fields.items():
+                row[key] = values[i]
+    lines = [json.dumps(row) for row in base]
+    (run_dir / "metrics.jsonl").write_text("\n".join(lines) + "\n")
     return run_dir
 
 

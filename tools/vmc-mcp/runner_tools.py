@@ -6,11 +6,37 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+import orbax.checkpoint as ocp
+
+
+def _load_jsonl(path: Path) -> list[dict]:
+    """Load all lines from a JSONL file."""
+    return [json.loads(line) for line in path.read_text().strip().split("\n") if line.strip()]
+
+
+def _jsonl_to_columnar(rows: list[dict]) -> dict[str, list]:
+    """Convert JSONL rows to columnar series dict."""
+    series: dict[str, list] = {}
+    for row in rows:
+        for key, value in row.items():
+            series.setdefault(key, []).append(value)
+    return series
+
 
 def read_checkpoint_metadata(run_dir: str) -> dict:
-    """Read parsed metadata from a runner checkpoint."""
-    with open(Path(run_dir) / "latest.json") as f:
-        return json.load(f)
+    """Read checkpoint metadata and series from a run directory."""
+    run_dir_path = Path(run_dir)
+    mgr = ocp.CheckpointManager(
+        run_dir_path, options=ocp.CheckpointManagerOptions(read_only=True),
+    )
+    meta = mgr.metadata()
+    config = dict(meta.custom_metadata) if hasattr(meta, "custom_metadata") else {}
+    series = _jsonl_to_columnar(_load_jsonl(run_dir_path / "metrics.jsonl"))
+    return {
+        "step": mgr.latest_step(),
+        "config": config,
+        "series": series,
+    }
 
 
 def smoke_test(
@@ -23,9 +49,6 @@ def smoke_test(
     No default args are injected — the caller provides exactly the CLI
     args the target script accepts via ``overrides``. Output is directed
     to a temporary directory via --output.
-
-    For two-stage workflows, pass chain_state as the ground-state output
-    directory to use as --state for dynamics scripts.
 
     Returns {"passed": bool, "returncode": int, "stdout": str, "stderr": str}.
     """
@@ -44,27 +67,17 @@ def smoke_test(
         if chain_state:
             args.extend(["--state", str(chain_state)])
 
-        try:
-            result = subprocess.run(
-                ["uv", "run", "python", str(script)] + args,
-                cwd=script.parent,
-                capture_output=True,
-                text=True,
-                timeout=300,
-            )
-            passed = result.returncode == 0
-            returncode = result.returncode
-            stdout = result.stdout[-2000:] if result.stdout else ""
-            stderr = result.stderr[-2000:] if result.stderr else ""
-        except subprocess.TimeoutExpired:
-            passed = False
-            returncode = -1
-            stdout = ""
-            stderr = "Smoke test timed out after 300 seconds."
+        result = subprocess.run(
+            ["uv", "run", "python", str(script)] + args,
+            cwd=script.parent,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
 
     return {
-        "passed": passed,
-        "returncode": returncode,
-        "stdout": stdout,
-        "stderr": stderr,
+        "passed": result.returncode == 0,
+        "returncode": result.returncode,
+        "stdout": result.stdout[-2000:] if result.stdout else "",
+        "stderr": result.stderr[-2000:] if result.stderr else "",
     }

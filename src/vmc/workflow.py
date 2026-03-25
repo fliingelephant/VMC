@@ -147,35 +147,12 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
 # Checkpointing (Orbax CheckpointManager)
 # ---------------------------------------------------------------------------
 
-def _driver_state(driver) -> dict:
-    """Extract the checkpointable state from a driver."""
-    config = driver._sampler_configuration
-    # Flatten to (n_chains, n_sites) — driver.run() reshapes to this form
-    if config.ndim > 2:
-        config = config.reshape(config.shape[0], -1)
-    return {
-        "tensors": {
-            str(row): {str(col): t for col, t in rd.items()}
-            for row, rd in driver._tensors.items()
-        },
-        "sampler_key": driver._sampler_key,
-        "sampler_configuration": config,
-    }
+_ITEM_NAMES = ("tensors", "sampler")
 
 
-def _restore_driver(driver, state: dict) -> None:
-    """Restore driver state from a checkpoint dict."""
-    saved_config = state["sampler_configuration"]
-    if saved_config.shape[0] != driver.n_chains:
-        raise ValueError(
-            f"Checkpoint n_chains={saved_config.shape[0]} != "
-            f"driver n_chains={driver.n_chains}."
-        )
-    for row, rd in driver._tensors.items():
-        for col in rd:
-            driver._tensors[row][col] = state["tensors"][str(row)][str(col)]
-    driver._sampler_key = state["sampler_key"]
-    driver._sampler_configuration = saved_config
+def _str_keys(tensors: dict) -> dict:
+    """Convert int-keyed tensor dict to string keys for orbax."""
+    return {str(r): {str(c): t for c, t in rd.items()} for r, rd in tensors.items()}
 
 
 def load_model_from_checkpoint(run_dir, model):
@@ -183,27 +160,21 @@ def load_model_from_checkpoint(run_dir, model):
     from flax import nnx
 
     run_dir = Path(run_dir)
-    mgr = ocp.CheckpointManager(run_dir, options=ocp.CheckpointManagerOptions(read_only=True))
-    step = mgr.latest_step()
-
+    mgr = ocp.CheckpointManager(
+        run_dir, item_names=_ITEM_NAMES,
+        options=ocp.CheckpointManagerOptions(read_only=True),
+    )
     graphdef, params, model_state = nnx.split(model, nnx.Param, ...)
-    tensors = nnx.to_pure_dict(params)["tensors"]
-    target = {
-        "tensors": {
-            str(row): {str(col): t for col, t in rd.items()}
-            for row, rd in tensors.items()
-        },
-    }
-    # Use PyTreeCheckpointer for partial restore (CheckpointManager doesn't support it)
-    ckpt_dir = run_dir / str(step) / "default"
-    ckptr = ocp.PyTreeCheckpointer()
-    restored = ckptr.restore(ckpt_dir, item=target, partial_restore=True)
+    target = _str_keys(nnx.to_pure_dict(params)["tensors"])
+    restored = mgr.restore(mgr.latest_step(), args=ocp.args.Composite(
+        tensors=ocp.args.StandardRestore(target),
+    ))
     loaded = {
         row: {col: restored["tensors"][str(row)][str(col)] for col in rd}
-        for row, rd in tensors.items()
+        for row, rd in nnx.to_pure_dict(params)["tensors"].items()
     }
-    metadata = mgr.metadata()
-    meta_dict = dict(metadata.custom_metadata) if hasattr(metadata, 'custom_metadata') else {}
+    meta = mgr.metadata()
+    meta_dict = dict(meta.custom_metadata) if hasattr(meta, "custom_metadata") else {}
     return nnx.merge(graphdef, {"tensors": loaded}, model_state), meta_dict
 
 
@@ -252,25 +223,36 @@ def run(
     run_metadata = _extract_config(driver, extra_config)
     run_metadata["runtime"] = runtime
 
-    # Create CheckpointManager
     mgr = ocp.CheckpointManager(
         run_dir,
+        item_names=_ITEM_NAMES,
         metadata=run_metadata,
         options=ocp.CheckpointManagerOptions(max_to_keep=2, save_interval_steps=1),
     )
 
-    # Resume from existing checkpoint
     if resume and mgr.latest_step() is not None:
         latest = mgr.latest_step()
-        state = _driver_state(driver)
-        restored = mgr.restore(latest, args=ocp.args.StandardRestore(state))
-        _restore_driver(driver, restored)
+        config = driver._sampler_configuration
+        if config.ndim > 2:
+            config = config.reshape(config.shape[0], -1)
+        restored = mgr.restore(latest, args=ocp.args.Composite(
+            tensors=ocp.args.StandardRestore(_str_keys(driver._tensors)),
+            sampler=ocp.args.StandardRestore({"key": driver._sampler_key, "configuration": config}),
+        ))
+        saved_config = restored["sampler"]["configuration"]
+        if saved_config.shape[0] != driver.n_chains:
+            raise ValueError(
+                f"Checkpoint n_chains={saved_config.shape[0]} != "
+                f"driver n_chains={driver.n_chains}."
+            )
+        for row, rd in driver._tensors.items():
+            for col in rd:
+                driver._tensors[row][col] = restored["tensors"][str(row)][str(col)]
+        driver._sampler_key = restored["sampler"]["key"]
+        driver._sampler_configuration = saved_config
         driver.step_count = latest
-        # Validate config on resume
         saved_meta = mgr.metadata()
-        saved_extra = {}
-        if hasattr(saved_meta, 'custom_metadata'):
-            saved_extra = saved_meta.custom_metadata.get("extra", {})
+        saved_extra = getattr(saved_meta, "custom_metadata", {}).get("extra", {})
         if extra_config and saved_extra and extra_config != saved_extra:
             logger.warning(
                 "Resume config differs from checkpoint. "
@@ -318,7 +300,13 @@ def run(
         if step % log_every == 0 or step == target_step:
             out(step, item)
         if step % save_every == 0 or step == target_step:
-            mgr.save(step, args=ocp.args.StandardSave(_driver_state(driver)))
+            config = driver._sampler_configuration
+            if config.ndim > 2:
+                config = config.reshape(config.shape[0], -1)
+            mgr.save(step, args=ocp.args.Composite(
+                tensors=ocp.args.StandardSave(_str_keys(driver._tensors)),
+                sampler=ocp.args.StandardSave({"key": driver._sampler_key, "configuration": config}),
+            ))
             mgr.wait_until_finished()
             out.flush()
 

@@ -1,7 +1,6 @@
 """Visualization tools for PEPS-tVMC runner output."""
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 
@@ -9,19 +8,12 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
+from runner_tools import _load_jsonl, _jsonl_to_columnar
+
 
 def _load_series(run_dir: str) -> dict[str, list]:
     """Load series data from metrics.jsonl into columnar format."""
-    rows = [
-        json.loads(line)
-        for line in (Path(run_dir) / "metrics.jsonl").read_text().strip().split("\n")
-        if line.strip()
-    ]
-    series: dict[str, list] = {}
-    for row in rows:
-        for key, value in row.items():
-            series.setdefault(key, []).append(value)
-    return series
+    return _jsonl_to_columnar(_load_jsonl(Path(run_dir) / "metrics.jsonl"))
 
 
 def plot_convergence(run_dir: str, keys: list[str] | None = None) -> dict:

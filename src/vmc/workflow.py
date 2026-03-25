@@ -318,8 +318,8 @@ def run(
     for _ in range(total_new_steps):
         driver.run(driver.dt)
         step = driver.step_count
-        item = _build_step_item(driver, observable_names)
         if step % log_every == 0 or step == target_step:
+            item = _build_step_item(driver, observable_names)
             out(step, item)
         if step % save_every == 0 or step == target_step:
             mgr.save(step, args=ocp.args.Composite(

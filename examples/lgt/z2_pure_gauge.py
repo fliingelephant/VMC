@@ -106,7 +106,6 @@ def main() -> None:
     args.boundary_dim = args.boundary_dim or 3 * args.bond_dim
 
     shape = (args.L, args.L)
-    boundary_dim = args.boundary_dim
     hamiltonian = build_z2_hamiltonian(shape, args.h, args.g)
     observables = (
         build_mean_plaquette_observable(shape),
@@ -121,7 +120,7 @@ def main() -> None:
             degeneracy_per_charge=(args.bond_dim, args.bond_dim),
             charge_of_site=(0,),
         ),
-        contraction_strategy=Variational(boundary_dim),
+        contraction_strategy=Variational(args.boundary_dim),
     )
 
     driver = TDVPDriver(

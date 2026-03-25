@@ -16,6 +16,7 @@ import argparse  # noqa: E402
 import jax  # noqa: E402
 
 from vmc.drivers import ImaginaryTimeUnit, TDVPDriver  # noqa: E402
+from vmc.gauge import GaugeConfig  # noqa: E402
 from vmc.preconditioners import DirectSolve, SRPreconditioner  # noqa: E402
 
 from vmc.workflow import DEFAULT_METRICS_CONFIG, SOLVERS, SPACES, add_common_args, run  # noqa: E402
@@ -40,27 +41,26 @@ def main() -> None:
         solver_space="minsr", save_every=20, log_every=10,
     )
     args = parser.parse_args()
+    args.boundary_dim = args.boundary_dim or 3 * args.bond_dim
 
     shape = (args.L, args.L)
-    boundary_dim = 3 * args.bond_dim
     model = build_model(
         shape,
         bond_dim=args.bond_dim,
-        boundary_dim=boundary_dim,
+        boundary_dim=args.boundary_dim,
         boundary_sweeps=args.boundary_sweeps,
         seed=args.seed,
     )
     hamiltonian = build_z2_higgs_hamiltonian(
         shape, h=args.h, g=args.g, J=args.J, sigma_z_field=args.sigma_z_field,
     )
-    space = SPACES[args.solver_space]()
     driver = TDVPDriver(
         model, hamiltonian,
         preconditioner=SRPreconditioner(
             space=SPACES[args.solver_space](),
             strategy=DirectSolve(solver=SOLVERS[args.solver]),
-            space=space,
             diag_shift=args.diag_shift,
+            gauge_config=GaugeConfig() if args.gauge_removal else None,
             metrics_config=DEFAULT_METRICS_CONFIG,
         ),
         dt=args.dt,
@@ -85,7 +85,7 @@ def main() -> None:
             "h": args.h, "g": args.g, "J": args.J,
             "sigma_z_field": args.sigma_z_field,
             "bond_dim": args.bond_dim,
-            "boundary_dim": boundary_dim,
+            "boundary_dim": args.boundary_dim,
             "boundary_sweeps": args.boundary_sweeps,
             "seed": args.seed,
         },

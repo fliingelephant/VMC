@@ -34,6 +34,7 @@ from vmc.operators import (  # noqa: E402
     TimeDependentHamiltonian,
 )
 from vmc.peps import PEPS, Variational  # noqa: E402
+from vmc.gauge import GaugeConfig  # noqa: E402
 from vmc.preconditioners import DirectSolve, SRPreconditioner  # noqa: E402
 
 from vmc.workflow import (  # noqa: E402
@@ -205,8 +206,9 @@ def run_single_quench(args, tau_q: float) -> None:
         observables=observables,
         preconditioner=SRPreconditioner(
             space=SPACES[args.solver_space](),
-            diag_shift=args.diag_shift,
             strategy=DirectSolve(solver=SOLVERS[args.solver]),
+            diag_shift=args.diag_shift,
+            gauge_config=GaugeConfig() if args.gauge_removal else None,
             metrics_config=DEFAULT_METRICS_CONFIG,
         ),
         dt=args.dt,
@@ -243,10 +245,15 @@ def main() -> None:
     parser.add_argument("--L", type=int, default=7)
     parser.add_argument("--tau-q", type=float, nargs="+", default=[0.8])
     add_common_args(parser)
-    parser.set_defaults(bond_dim=4, boundary_dim=16, diag_shift=1e-8)
+    parser.set_defaults(bond_dim=4, diag_shift=1e-8)
     args = parser.parse_args()
+    args.boundary_dim = args.boundary_dim or args.bond_dim ** 2
 
+    base_output = args.output
     for tau_q in args.tau_q:
+        if base_output and len(args.tau_q) > 1:
+            tau_q_tok = format(tau_q, ".4f").replace(".", "p")
+            args.output = str(Path(base_output) / f"tauq{tau_q_tok}")
         run_single_quench(args, tau_q)
 
 

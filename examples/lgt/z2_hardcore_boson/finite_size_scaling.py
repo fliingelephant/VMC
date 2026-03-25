@@ -13,6 +13,7 @@ import argparse  # noqa: E402
 import jax  # noqa: E402
 
 from vmc.drivers import ImaginaryTimeUnit, TDVPDriver  # noqa: E402
+from vmc.gauge import GaugeConfig  # noqa: E402
 from vmc.preconditioners import DirectSolve, SRPreconditioner  # noqa: E402
 
 from vmc.workflow import DEFAULT_METRICS_CONFIG, SOLVERS, SPACES, add_common_args, run  # noqa: E402
@@ -47,6 +48,7 @@ def main() -> None:
         log_every=50, save_every=50,
     )
     args = parser.parse_args()
+    args.boundary_dim = args.boundary_dim or 3 * args.bond_dim_per_charge
 
     shape = (args.L, args.L)
     particle_number = half_filling(shape)
@@ -62,7 +64,7 @@ def main() -> None:
         shape,
         particle_number=particle_number,
         bond_dim_per_charge=args.bond_dim_per_charge,
-        boundary_dim=3 * args.bond_dim_per_charge,
+        boundary_dim=args.boundary_dim,
         boundary_sweeps=args.boundary_sweeps,
         seed=args.seed,
     )
@@ -76,6 +78,7 @@ def main() -> None:
             space=SPACES[args.solver_space](),
             strategy=DirectSolve(solver=SOLVERS[args.solver]),
             diag_shift=args.diag_shift,
+            gauge_config=GaugeConfig() if args.gauge_removal else None,
             metrics_config=DEFAULT_METRICS_CONFIG,
         ),
         dt=args.dt,

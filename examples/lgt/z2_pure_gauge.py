@@ -18,9 +18,10 @@ from flax import nnx  # noqa: E402
 
 from vmc.drivers import ImaginaryTimeUnit, TDVPDriver  # noqa: E402
 from vmc.operators import PlaquetteOperator  # noqa: E402
-from vmc.peps import ZipUp  # noqa: E402
+from vmc.peps import Variational  # noqa: E402
 from vmc.peps.gi import GILocalHamiltonian, GIPEPS, GIPEPSConfig  # noqa: E402
 from vmc.peps.gi.local_terms import LinkDiagonalTerm, build_electric_terms  # noqa: E402
+from vmc.gauge import GaugeConfig  # noqa: E402
 from vmc.preconditioners import DirectSolve, SRPreconditioner  # noqa: E402
 
 from vmc.workflow import DEFAULT_METRICS_CONFIG, SOLVERS, SPACES, add_common_args, run  # noqa: E402
@@ -102,9 +103,10 @@ def main() -> None:
         log_every=1,
     )
     args = parser.parse_args()
+    args.boundary_dim = args.boundary_dim or 3 * args.bond_dim
 
     shape = (args.L, args.L)
-    boundary_dim = 3 * args.bond_dim
+    boundary_dim = args.boundary_dim
     hamiltonian = build_z2_hamiltonian(shape, args.h, args.g)
     observables = (
         build_mean_plaquette_observable(shape),
@@ -119,7 +121,7 @@ def main() -> None:
             degeneracy_per_charge=(args.bond_dim, args.bond_dim),
             charge_of_site=(0,),
         ),
-        contraction_strategy=ZipUp(truncate_bond_dimension=boundary_dim),
+        contraction_strategy=Variational(boundary_dim),
     )
 
     driver = TDVPDriver(
@@ -130,6 +132,7 @@ def main() -> None:
             space=SPACES[args.solver_space](),
             strategy=DirectSolve(solver=SOLVERS[args.solver]),
             diag_shift=args.diag_shift,
+            gauge_config=GaugeConfig() if args.gauge_removal else None,
             metrics_config=DEFAULT_METRICS_CONFIG,
         ),
         dt=args.dt,

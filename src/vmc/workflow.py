@@ -136,7 +136,7 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--n-chains", type=int, default=1024)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--bond-dim", type=int, default=4)
-    parser.add_argument("--boundary-dim", type=int, default=16)
+    parser.add_argument("--boundary-dim", type=int, default=None)
     parser.add_argument("--dt", type=float, default=0.01)
     parser.add_argument("--diag-shift", type=float, default=1e-4)
     parser.add_argument("--solver", choices=("cholesky", "svd", "cg"), default="cholesky")

@@ -22,9 +22,10 @@ from flax import nnx  # noqa: E402
 
 from vmc.drivers import TDVPDriver, ImaginaryTimeUnit  # noqa: E402
 from vmc.operators import PlaquetteOperator  # noqa: E402
-from vmc.peps import ZipUp  # noqa: E402
+from vmc.peps import Variational  # noqa: E402
 from vmc.peps.gi.local_terms import GILocalHamiltonian, build_electric_terms  # noqa: E402
 from vmc.peps.gi.model import GIPEPS, GIPEPSConfig  # noqa: E402
+from vmc.gauge import GaugeConfig  # noqa: E402
 from vmc.preconditioners import DirectSolve, SRPreconditioner  # noqa: E402
 
 from vmc.workflow import DEFAULT_METRICS_CONFIG, SOLVERS, SPACES, add_common_args, run  # noqa: E402
@@ -65,6 +66,7 @@ def main() -> None:
         full_gradient=True, log_every=5, save_every=100,
     )
     args = parser.parse_args()
+    args.boundary_dim = args.boundary_dim or 3 * args.bond_dim
 
     shape = (args.L, args.L)
     model = GIPEPS(
@@ -74,7 +76,7 @@ def main() -> None:
             degeneracy_per_charge=(args.bond_dim, args.bond_dim, args.bond_dim),
             charge_of_site=(0,),
         ),
-        contraction_strategy=ZipUp(truncate_bond_dimension=3 * args.bond_dim),
+        contraction_strategy=Variational(args.boundary_dim),
     )
     hamiltonian = build_z3_hamiltonian(shape, h=args.h, g=args.g)
 
@@ -84,6 +86,7 @@ def main() -> None:
             space=SPACES[args.solver_space](),
             strategy=DirectSolve(solver=SOLVERS[args.solver]),
             diag_shift=args.diag_shift,
+            gauge_config=GaugeConfig() if args.gauge_removal else None,
             metrics_config=DEFAULT_METRICS_CONFIG,
         ),
         dt=args.dt,

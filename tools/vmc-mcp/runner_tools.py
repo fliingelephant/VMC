@@ -63,13 +63,16 @@ def smoke_test(
     if chain_state:
         args.extend(["--state", str(chain_state)])
 
-    result = subprocess.run(
-        ["uv", "run", "python", str(script)] + args,
-        cwd=script.parent,
-        capture_output=True,
-        text=True,
-        timeout=300,
-    )
+    try:
+        result = subprocess.run(
+            ["uv", "run", "python", str(script)] + args,
+            cwd=script.parent,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        return {"passed": False, "returncode": -1, "stdout": "", "stderr": "Timeout after 300s"}
 
     return {
         "passed": result.returncode == 0,

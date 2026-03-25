@@ -21,6 +21,7 @@ import argparse
 import json
 import logging
 import platform
+import shutil
 import socket
 import time
 from pathlib import Path
@@ -231,11 +232,11 @@ def run(
         raise TypeError("Specify n_steps or T_final.")
 
     run_dir = Path(run_dir)
+    if not resume and run_dir.exists():
+        shutil.rmtree(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
 
     if out is None:
-        if not resume:
-            (run_dir / "metrics.jsonl").unlink(missing_ok=True)
         out = CompositeLog(ConsoleLog(), JsonLog(run_dir / "metrics.jsonl"))
 
     runtime = _collect_runtime()

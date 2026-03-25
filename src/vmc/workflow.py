@@ -20,14 +20,12 @@ import abc
 import argparse
 import json
 import logging
-import math
 import platform
 import socket
 import time
 from pathlib import Path
 
 import jax
-import jax.numpy as jnp
 import numpy as np
 import orbax.checkpoint as ocp
 
@@ -35,6 +33,12 @@ from vmc.operators.time_dependent import TimeDependentHamiltonian
 from vmc.preconditioners import MetricsConfig, solve_cg, solve_cholesky, solve_svd
 
 logger = logging.getLogger(__name__)
+
+__all__ = [
+    "AbstractLog", "ConsoleLog", "JsonLog", "CompositeLog",
+    "add_common_args", "resolve_solver", "run",
+    "load_model_from_checkpoint", "DEFAULT_METRICS_CONFIG",
+]
 
 SOLVERS = {"cholesky": solve_cholesky, "svd": solve_svd, "cg": solve_cg}
 
@@ -215,7 +219,7 @@ def run(
     run_dir.mkdir(parents=True, exist_ok=True)
 
     if out is None:
-        out = ConsoleLog()
+        out = CompositeLog(ConsoleLog(), JsonLog(run_dir / "metrics.jsonl"))
 
     runtime = _collect_runtime()
 
@@ -232,12 +236,12 @@ def run(
 
     if resume and mgr.latest_step() is not None:
         latest = mgr.latest_step()
-        config = driver._sampler_configuration
-        if config.ndim > 2:
-            config = config.reshape(config.shape[0], -1)
         restored = mgr.restore(latest, args=ocp.args.Composite(
             tensors=ocp.args.StandardRestore(_str_keys(driver._tensors)),
-            sampler=ocp.args.StandardRestore({"key": driver._sampler_key, "configuration": config}),
+            sampler=ocp.args.StandardRestore({
+                "key": driver._sampler_key,
+                "configuration": driver._sampler_configuration.reshape(driver.n_chains, -1),
+            }),
         ))
         saved_config = restored["sampler"]["configuration"]
         if saved_config.shape[0] != driver.n_chains:
@@ -291,6 +295,7 @@ def run(
         extra_config=extra_config,
         start_step=start_step,
         target_step=target_step,
+        runtime=runtime,
     )
 
     for _ in range(total_new_steps):
@@ -300,12 +305,12 @@ def run(
         if step % log_every == 0 or step == target_step:
             out(step, item)
         if step % save_every == 0 or step == target_step:
-            config = driver._sampler_configuration
-            if config.ndim > 2:
-                config = config.reshape(config.shape[0], -1)
             mgr.save(step, args=ocp.args.Composite(
                 tensors=ocp.args.StandardSave(_str_keys(driver._tensors)),
-                sampler=ocp.args.StandardSave({"key": driver._sampler_key, "configuration": config}),
+                sampler=ocp.args.StandardSave({
+                    "key": driver._sampler_key,
+                    "configuration": driver._sampler_configuration.reshape(driver.n_chains, -1),
+                }),
             ))
             mgr.wait_until_finished()
             out.flush()
@@ -334,6 +339,7 @@ def _build_step_item(driver, observable_names: tuple[str, ...]) -> dict:
     energy = driver.energy
     metrics = driver.metrics
     item = {
+        "step": int(driver.step_count),
         "time": float(driver.t),
         "energy_mean": float(energy.mean.real),
         "energy_error": float(energy.error_of_mean.real),
@@ -350,11 +356,8 @@ def _build_step_item(driver, observable_names: tuple[str, ...]) -> dict:
 
 
 def _json_default(obj):
-    if isinstance(obj, (np.integer,)):
-        return int(obj)
-    if isinstance(obj, (np.floating,)):
-        v = float(obj)
-        return None if not math.isfinite(v) else v
+    if hasattr(obj, "item"):
+        return obj.item()
     if isinstance(obj, np.ndarray):
         return obj.tolist()
     raise TypeError(f"Not JSON serializable: {type(obj)}")
@@ -382,13 +385,12 @@ def _extract_config(driver, extra):
 
 def _log_config_table(
     driver, *, n_steps, t_end, run_dir, observable_names,
-    log_every, save_every, resume, extra_config, start_step, target_step,
+    log_every, save_every, resume, extra_config, start_step, target_step, runtime,
 ):
     model = driver.model
     lines = []
 
-    dev = jax.devices()[0]
-    lines.append(("Device", f"{dev.platform} ({dev.device_kind})"))
+    lines.append(("Device", runtime.get("platform", "?")))
 
     model_name = type(model).__name__
     shape = getattr(model, "shape", None)

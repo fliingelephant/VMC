@@ -234,6 +234,8 @@ def run(
     run_dir.mkdir(parents=True, exist_ok=True)
 
     if out is None:
+        if not resume:
+            (run_dir / "metrics.jsonl").unlink(missing_ok=True)
         out = CompositeLog(ConsoleLog(), JsonLog(run_dir / "metrics.jsonl"))
 
     runtime = _collect_runtime()

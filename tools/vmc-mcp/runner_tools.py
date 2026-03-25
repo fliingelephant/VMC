@@ -30,7 +30,8 @@ def read_checkpoint_metadata(run_dir: str) -> dict:
     )
     meta = mgr.metadata()
     config = dict(meta.custom_metadata) if hasattr(meta, "custom_metadata") else {}
-    series = _jsonl_to_columnar(_load_jsonl(run_dir_path / "metrics.jsonl"))
+    metrics_path = run_dir_path / "metrics.jsonl"
+    series = _jsonl_to_columnar(_load_jsonl(metrics_path)) if metrics_path.exists() else {}
     return {
         "step": mgr.latest_step(),
         "config": config,

@@ -60,7 +60,7 @@ def main() -> None:
 
     shape = (L, L)
     model = build_model(shape, bond_dim=bond_dim, seed=seed)
-    model, _ = load_model_from_checkpoint(gs_config, model)
+    model, _ = load_model_from_checkpoint(args.state, model)
     model = create_bottom_left_vison(model)
 
     hamiltonian = build_z2_hamiltonian(shape, h=h, g=g)

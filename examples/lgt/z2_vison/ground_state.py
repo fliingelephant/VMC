@@ -9,7 +9,6 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from vmc import config  # noqa: F401, E402
@@ -21,7 +20,7 @@ import jax  # noqa: E402
 from vmc.drivers import ImaginaryTimeUnit, TDVPDriver  # noqa: E402
 from vmc.preconditioners import SRPreconditioner  # noqa: E402
 
-from runner import DEFAULT_METRICS_CONFIG, add_common_args, run  # noqa: E402
+from vmc.workflow import DEFAULT_METRICS_CONFIG, add_common_args, run  # noqa: E402
 from physics import build_model, build_z2_hamiltonian  # noqa: E402
 
 

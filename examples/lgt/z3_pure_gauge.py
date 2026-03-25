@@ -9,10 +9,8 @@ Reference: Wu & Liu, Phys. Rev. Lett. 135, 130401 (2025), Fig 2(a,b)
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from vmc import config  # noqa: F401, E402
 
@@ -29,7 +27,7 @@ from vmc.peps.gi.local_terms import GILocalHamiltonian, build_electric_terms  # 
 from vmc.peps.gi.model import GIPEPS, GIPEPSConfig  # noqa: E402
 from vmc.preconditioners import SRPreconditioner  # noqa: E402
 
-from runner import DEFAULT_METRICS_CONFIG, add_common_args, run  # noqa: E402
+from vmc.workflow import DEFAULT_METRICS_CONFIG, add_common_args, run  # noqa: E402
 
 
 def build_z3_hamiltonian(

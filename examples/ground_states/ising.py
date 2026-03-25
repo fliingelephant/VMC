@@ -6,10 +6,8 @@ commented out independently.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from vmc import config  # noqa: F401, E402 - JAX config must be imported first
 
@@ -38,7 +36,7 @@ from vmc.qgt import ParameterSpace, SlicedJacobian
 from vmc.qgt.jacobian import SliceOrdering
 from vmc.utils import _tree_add_scaled
 
-from runner import DEFAULT_METRICS_CONFIG  # noqa: E402
+from vmc.workflow import DEFAULT_METRICS_CONFIG  # noqa: E402
 
 
 L = 10

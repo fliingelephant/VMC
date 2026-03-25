@@ -22,30 +22,16 @@ if "xla_gpu_force_compilation_parallelism" not in _xla_flags:
     os.environ["XLA_FLAGS"] = f"{_xla_flags} --xla_gpu_force_compilation_parallelism=16".strip()
 
 
-def setup_logging() -> None:
-    """Configure logging based on environment variables.
+def setup_logging(level: int = logging.INFO) -> None:
+    """Configure logging for an application entry point.
 
-    Control log level via VMC_LOG_LEVEL environment variable.
-
-    Examples:
-        # Default (WARNING level) - skip expensive debug computations
-        python main.py
-
-        # Debug mode - compute and log everything
-        VMC_LOG_LEVEL=DEBUG python main.py
-
-        # Info mode - basic progress information
-        VMC_LOG_LEVEL=INFO python main.py
+    Call this from your script's main(), not at import time.
+    The library should not configure logging — that's the application's job.
     """
-    level_name = os.environ.get("VMC_LOG_LEVEL", "WARNING").upper()
-    level = getattr(logging, level_name, logging.WARNING)
-
     logging.basicConfig(
         level=level,
-        format="%(name)s - %(levelname)s - %(message)s",
+        format="%(asctime)s %(message)s",
+        datefmt="%H:%M:%S",
+        force=True,
     )
-
-
-# Configure logging on import
-setup_logging()
 

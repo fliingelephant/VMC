@@ -1,10 +1,9 @@
-"""Tests for examples/runner.py."""
+"""Tests for vmc.workflow."""
 from __future__ import annotations
 
 from vmc import config  # noqa: F401
 
 import json
-import sys
 import tempfile
 from pathlib import Path
 
@@ -13,9 +12,7 @@ import jax.numpy as jnp
 import numpy as np
 from flax import nnx
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "examples"))
-
-from runner import (  # noqa: E402
+from vmc.workflow import (
     DEFAULT_METRICS_CONFIG,
     add_common_args,
     load_checkpoint,

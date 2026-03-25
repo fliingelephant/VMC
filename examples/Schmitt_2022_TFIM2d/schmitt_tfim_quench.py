@@ -14,10 +14,8 @@ bond dimension D.
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from vmc import config  # noqa: F401, E402
 
@@ -38,7 +36,7 @@ from vmc.operators import (  # noqa: E402
 from vmc.peps import PEPS, Variational  # noqa: E402
 from vmc.preconditioners import DirectSolve, SRPreconditioner  # noqa: E402
 
-from runner import (  # noqa: E402
+from vmc.workflow import (  # noqa: E402
     DEFAULT_METRICS_CONFIG,
     add_common_args,
     resolve_solver,

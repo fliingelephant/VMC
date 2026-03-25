@@ -303,7 +303,7 @@ def run(
         if remaining <= 1e-12 * max(1.0, abs(T_final)):
             logger.info("Already at t=%.6f >= T_final=%.6f.", driver.t, T_final)
             return
-        total_new_steps = int(round(remaining / driver.dt))
+        total_new_steps = math.ceil(remaining / driver.dt)
     elif n_steps is not None:
         total_new_steps = n_steps
     else:

@@ -12,7 +12,6 @@ _SMOKE_DEFAULTS = {
     "--n-chains": "4",
     "--bond-dim": "2",
     "--boundary-dim": "4",
-    "--L": "3",
     "--log-every": "1",
     "--save-every": "2",
 }

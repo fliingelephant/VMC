@@ -220,6 +220,8 @@ def run(
     Checkpoints are managed by Orbax CheckpointManager (atomic, step-numbered).
     Per-step metrics are written by the ``out`` logger (default: ConsoleLog).
     """
+    if not logging.root.handlers:
+        logging.basicConfig(level=logging.INFO, format="%(message)s")
     if n_steps is not None and T_final is not None:
         raise TypeError("Specify n_steps or T_final, not both.")
     if n_steps is None and T_final is None:

@@ -21,8 +21,6 @@ TERM_MODEL_COMPAT = {
     },
 }
 
-GAUGE_GROUPS = {"Z2": 2, "Z3": 3, "Z4": 4}
-
 # Map user-friendly term names to canonical operator class names
 TERM_ALIASES: dict[str, str | tuple[str, ...]] = {
     "electric": "LinkDiagonalTerm",
@@ -86,13 +84,13 @@ def check_feasibility(config: dict) -> dict:
 
     # Determine model family
     if gauge_group and gauge_group != "none":
-        if gauge_group not in GAUGE_GROUPS:
+        if not gauge_group.upper().startswith("Z"):
             return {
                 "feasible": False,
                 "suggested_model": "",
                 "reason": (
                     f"Gauge group {gauge_group!r} is not supported. "
-                    f"Only Abelian Z_N groups are supported: {list(GAUGE_GROUPS)}."
+                    f"Only Abelian Z_N groups are supported."
                 ),
                 "missing_features": [f"{gauge_group} gauge group"],
                 "notes": notes,

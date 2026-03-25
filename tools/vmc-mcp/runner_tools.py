@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import subprocess
-import tempfile
 from pathlib import Path
 
 import orbax.checkpoint as ocp
@@ -47,33 +46,29 @@ def smoke_test(
     """Run a script with tiny parameters and check it doesn't crash.
 
     No default args are injected — the caller provides exactly the CLI
-    args the target script accepts via ``overrides``. Output is directed
-    to a temporary directory via --output.
+    args the target script accepts via ``overrides``.
 
     Returns {"passed": bool, "returncode": int, "stdout": str, "stderr": str}.
     """
     script = Path(script_path).resolve()
     args_dict = dict(overrides) if overrides else {}
+    args = []
+    for key, value in args_dict.items():
+        if isinstance(value, bool):
+            if value:
+                args.append(str(key))
+        else:
+            args.extend([str(key), str(value)])
+    if chain_state:
+        args.extend(["--state", str(chain_state)])
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        args_dict.setdefault("--output", tmpdir)
-        args = []
-        for key, value in args_dict.items():
-            if isinstance(value, bool):
-                if value:
-                    args.append(str(key))
-            else:
-                args.extend([str(key), str(value)])
-        if chain_state:
-            args.extend(["--state", str(chain_state)])
-
-        result = subprocess.run(
-            ["uv", "run", "python", str(script)] + args,
-            cwd=script.parent,
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
+    result = subprocess.run(
+        ["uv", "run", "python", str(script)] + args,
+        cwd=script.parent,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
 
     return {
         "passed": result.returncode == 0,

@@ -34,7 +34,13 @@ def smoke_test(
 
     with tempfile.TemporaryDirectory() as tmpdir:
         args_dict.setdefault("--output", tmpdir)
-        args = [str(item) for pair in args_dict.items() for item in pair]
+        args = []
+        for key, value in args_dict.items():
+            if isinstance(value, bool):
+                if value:
+                    args.append(str(key))
+            else:
+                args.extend([str(key), str(value)])
         if chain_state:
             args.extend(["--state", str(chain_state)])
 

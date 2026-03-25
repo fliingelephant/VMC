@@ -169,12 +169,16 @@ def save_checkpoint(run_dir, driver, step, *, series=None, runtime=None, **metad
         "sampler_key": driver._sampler_key,
         "sampler_configuration": driver._sampler_configuration,
     }
+    import shutil
     ckptr = ocp.PyTreeCheckpointer()
     ckpt_path = run_dir / "latest"
+    ckpt_tmp = run_dir / "_latest_new"
+    if ckpt_tmp.exists():
+        shutil.rmtree(ckpt_tmp)
+    ckptr.save(ckpt_tmp, state)
     if ckpt_path.exists():
-        import shutil
         shutil.rmtree(ckpt_path)
-    ckptr.save(ckpt_path, state)
+    ckpt_tmp.rename(ckpt_path)
 
     json_data = {
         "step": int(step),

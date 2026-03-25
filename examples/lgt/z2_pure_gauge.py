@@ -152,6 +152,7 @@ def main() -> None:
         observable_names=("plaquette", "z_h", "z_v"),
         log_every=args.log_every,
         save_every=args.save_every,
+        resume=args.resume,
         extra_config={
             "gauge_group": "Z2", "L": args.L,
             "h": args.h, "g": args.g,

@@ -225,6 +225,7 @@ def run_single_quench(args, tau_q: float) -> None:
         observable_names=obs_names,
         log_every=args.log_every,
         save_every=args.save_every,
+        resume=args.resume,
         extra_config={
             "L": args.L, "tau_q": tau_q, "gc": GC,
             "initial_state": "product |+x>",

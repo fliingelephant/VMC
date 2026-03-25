@@ -44,9 +44,9 @@ Call MCP `tool_check_feasibility` with the structured config built from Step 2.
 4. For two-stage workflows: draft both ground_state.py and dynamics.py.
 5. The script MUST:
    - `from vmc import config` before any JAX imports
-   - Use `runner.run()` for the main loop
-   - Use `DEFAULT_METRICS_CONFIG` from runner
-   - Use `resolve_solver` from runner for solver choice
+   - Use `vmc.workflow.run()` for the main loop
+   - Use `DEFAULT_METRICS_CONFIG` from vmc.workflow
+   - Use `resolve_solver` from vmc.workflow for solver choice
    - Follow the `sys.path.insert` pattern from existing examples
    - Include a docstring explaining what physics it simulates
 

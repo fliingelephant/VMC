@@ -1,6 +1,6 @@
 ---
 name: visualize
-description: Visualize PEPS-tVMC simulation results from runner output. Produces convergence plots, 2D spatial heatmaps, and time-evolution GIF animations with physical interpretation. Use when the user wants to plot results, see convergence, make heatmaps, or animate dynamics.
+description: Visualize PEPS-tVMC simulation results from simulation output. Produces convergence plots, 2D spatial heatmaps, and time-evolution GIF animations with physical interpretation. Use when the user wants to plot results, see convergence, make heatmaps, or animate dynamics.
 ---
 
 # Visualize

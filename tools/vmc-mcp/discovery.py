@@ -196,7 +196,7 @@ def list_solvers() -> list[dict]:
 # 5. list_examples
 # ---------------------------------------------------------------------------
 
-_SKIP_BASENAMES = {"runner.py", "__init__.py", "physics.py", "common.py", "plot.py"}
+_SKIP_BASENAMES = {"__init__.py", "physics.py", "common.py", "plot.py"}
 
 
 def _extract_docstring(filepath: str) -> str:

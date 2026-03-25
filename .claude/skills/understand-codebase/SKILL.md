@@ -11,7 +11,7 @@ Answer questions about the PEPS-tVMC codebase — architecture, capabilities, AP
 
 - **Capability question** ("what gauge groups are supported?", "can this do fermions?") → Use MCP discovery + compatibility tools
 - **Architecture question** ("how does contraction work?", "what's the cache-turnover pattern?") → Read relevant source code + CLAUDE.md
-- **API question** ("how do I add a new operator?", "how does the runner work?") → Read source code + examples
+- **API question** ("how do I add a new operator?", "how does the workflow module work?") → Read source code + examples
 - **Physics question** ("what's the difference between SR and minSR?", "why gauge removal?") → Read papers via `/read-notes` + EXPERIENCE.md
 
 ## Step 2: Gather context

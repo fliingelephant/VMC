@@ -14,6 +14,7 @@ Usage::
     run(driver, n_steps=200, run_dir="data/my_run",
         out=CompositeLog(ConsoleLog(), JsonLog("data/my_run/metrics.jsonl")))
 """
+
 from __future__ import annotations
 
 import abc
@@ -37,10 +38,18 @@ from vmc.qgt import ParameterSpace, SampleSpace
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "AbstractLog", "ConsoleLog", "JsonLog", "CompositeLog",
-    "add_common_args", "resolve_solver", "run",
-    "load_model_from_checkpoint", "read_config",
-    "DEFAULT_METRICS_CONFIG", "SOLVERS", "SPACES",
+    "AbstractLog",
+    "ConsoleLog",
+    "JsonLog",
+    "CompositeLog",
+    "add_common_args",
+    "resolve_solver",
+    "run",
+    "load_model_from_checkpoint",
+    "read_config",
+    "DEFAULT_METRICS_CONFIG",
+    "SOLVERS",
+    "SPACES",
 ]
 
 SOLVERS = {"cholesky": solve_cholesky, "svd": solve_svd, "cg": solve_cg}
@@ -57,6 +66,7 @@ DEFAULT_METRICS_CONFIG = MetricsConfig(
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
+
 
 class AbstractLog(abc.ABC):
     """Base class for simulation loggers."""
@@ -81,7 +91,9 @@ class ConsoleLog(AbstractLog):
         parts = []
         for v in item.values():
             if isinstance(v, float):
-                parts.append(f"{v:14.4e}" if abs(v) < 1e-2 or abs(v) > 1e4 else f"{v:14.6f}")
+                parts.append(
+                    f"{v:14.4e}" if abs(v) < 1e-2 or abs(v) > 1e4 else f"{v:14.6f}"
+                )
             elif isinstance(v, int):
                 parts.append(f"{v:14d}")
             else:
@@ -126,6 +138,7 @@ class CompositeLog(AbstractLog):
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def resolve_solver(name: str):
     """Map a solver name to the corresponding function."""
     return SOLVERS[name]
@@ -140,15 +153,21 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--boundary-dim", type=int, default=None)
     parser.add_argument("--dt", type=float, default=0.01)
     parser.add_argument("--diag-shift", type=float, default=1e-4)
-    parser.add_argument("--solver", choices=("cholesky", "svd", "cg"), default="cholesky")
+    parser.add_argument(
+        "--solver", choices=("cholesky", "svd", "cg"), default="cholesky"
+    )
     parser.add_argument("--solver-space", choices=("sr", "minsr"), default="sr")
     parser.add_argument("--full-gradient", action="store_true")
     parser.add_argument("--gauge-removal", action="store_true")
     parser.add_argument("--log-every", type=int, default=10)
     parser.add_argument("--save-every", type=int, default=50)
     parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--output", type=str, default=None,
-                        help="Output directory for checkpoints and series")
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Output directory for checkpoints and series",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +180,8 @@ _ITEM_NAMES = ("tensors", "sampler")
 def read_config(run_dir: str | Path) -> dict:
     """Read run config from checkpoint metadata without loading tensors."""
     mgr = ocp.CheckpointManager(
-        Path(run_dir), item_names=_ITEM_NAMES,
+        Path(run_dir),
+        item_names=_ITEM_NAMES,
         options=ocp.CheckpointManagerOptions(read_only=True),
     )
     meta = mgr.metadata()
@@ -179,14 +199,18 @@ def load_model_from_checkpoint(run_dir, model):
 
     run_dir = Path(run_dir)
     mgr = ocp.CheckpointManager(
-        run_dir, item_names=_ITEM_NAMES,
+        run_dir,
+        item_names=_ITEM_NAMES,
         options=ocp.CheckpointManagerOptions(read_only=True),
     )
     graphdef, params, model_state = nnx.split(model, nnx.Param, ...)
     target = _str_keys(nnx.to_pure_dict(params)["tensors"])
-    restored = mgr.restore(mgr.latest_step(), args=ocp.args.Composite(
-        tensors=ocp.args.StandardRestore(target),
-    ))
+    restored = mgr.restore(
+        mgr.latest_step(),
+        args=ocp.args.Composite(
+            tensors=ocp.args.StandardRestore(target),
+        ),
+    )
     loaded = {
         row: {col: restored["tensors"][str(row)][str(col)] for col in rd}
         for row, rd in nnx.to_pure_dict(params)["tensors"].items()
@@ -199,6 +223,7 @@ def load_model_from_checkpoint(run_dir, model):
 # ---------------------------------------------------------------------------
 # Run loop
 # ---------------------------------------------------------------------------
+
 
 def run(
     driver,
@@ -252,16 +277,25 @@ def run(
         options=ocp.CheckpointManagerOptions(max_to_keep=2, save_interval_steps=1),
     )
 
-    if resume and mgr.latest_step() is not None:
+    if resume:
+        if mgr.latest_step() is None:
+            raise ValueError(f"--resume but no checkpoint found in {run_dir}")
         latest = mgr.latest_step()
-        restored = mgr.restore(latest, args=ocp.args.Composite(
-            tensors=ocp.args.StandardRestore(_str_keys(driver._tensors)),
-            sampler=ocp.args.StandardRestore({
-                "key": driver._sampler_key,
-                "configuration": driver._sampler_configuration.reshape(driver.n_chains, -1),
-                "t": jax.numpy.asarray(driver.t),
-            }),
-        ))
+        restored = mgr.restore(
+            latest,
+            args=ocp.args.Composite(
+                tensors=ocp.args.StandardRestore(_str_keys(driver._tensors)),
+                sampler=ocp.args.StandardRestore(
+                    {
+                        "key": driver._sampler_key,
+                        "configuration": driver._sampler_configuration.reshape(
+                            driver.n_chains, -1
+                        ),
+                        "t": jax.numpy.asarray(driver.t),
+                    }
+                ),
+            ),
+        )
         saved_config = restored["sampler"]["configuration"]
         if saved_config.shape[0] != driver.n_chains:
             raise ValueError(
@@ -276,12 +310,28 @@ def run(
         driver.step_count = latest
         driver.t = float(restored["sampler"]["t"])
         saved_meta = mgr.metadata()
-        saved_extra = getattr(saved_meta, "custom_metadata", {}).get("extra", {})
-        if extra_config and saved_extra and extra_config != saved_extra:
-            logger.warning(
-                "Resume config differs from checkpoint. "
-                "Saved: %s, Current: %s", saved_extra, extra_config,
-            )
+        saved_cfg = dict(getattr(saved_meta, "custom_metadata", {}))
+        for key in (
+            "model",
+            "shape",
+            "dt",
+            "n_samples",
+            "n_chains",
+            "full_gradient",
+            "solver_space",
+            "diag_shift",
+            "extra",
+        ):
+            saved_val = saved_cfg.get(key)
+            current_val = run_metadata.get(key)
+            if (
+                saved_val is not None
+                and current_val is not None
+                and saved_val != current_val
+            ):
+                logger.warning(
+                    "Resume: %s changed: %s -> %s", key, saved_val, current_val
+                )
 
     start_step = driver.step_count
 
@@ -325,14 +375,21 @@ def run(
             item = _build_step_item(driver, observable_names)
             out(step, item)
         if step % save_every == 0 or step == target_step:
-            mgr.save(step, args=ocp.args.Composite(
-                tensors=ocp.args.StandardSave(_str_keys(driver._tensors)),
-                sampler=ocp.args.StandardSave({
-                    "key": driver._sampler_key,
-                    "configuration": driver._sampler_configuration.reshape(driver.n_chains, -1),
-                    "t": jax.numpy.asarray(driver.t),
-                }),
-            ))
+            mgr.save(
+                step,
+                args=ocp.args.Composite(
+                    tensors=ocp.args.StandardSave(_str_keys(driver._tensors)),
+                    sampler=ocp.args.StandardSave(
+                        {
+                            "key": driver._sampler_key,
+                            "configuration": driver._sampler_configuration.reshape(
+                                driver.n_chains, -1
+                            ),
+                            "t": jax.numpy.asarray(driver.t),
+                        }
+                    ),
+                ),
+            )
             mgr.wait_until_finished()
             out.flush()
 
@@ -342,6 +399,7 @@ def run(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
 
 def _collect_runtime() -> dict:
     """Collect runtime environment metadata."""
@@ -370,7 +428,12 @@ def _build_step_item(driver, observable_names: tuple[str, ...]) -> dict:
         stat = driver.observable_stats[i]
         item[f"{name}_mean"] = float(stat.mean.real)
         item[f"{name}_error"] = float(stat.error_of_mean.real)
-    for key in ("FS_norm_squared", "TDVP_residual", "SR_solve_residual", "step_wall_time"):
+    for key in (
+        "FS_norm_squared",
+        "TDVP_residual",
+        "SR_solve_residual",
+        "step_wall_time",
+    ):
         if key in metrics:
             item[key] = float(metrics[key])
     return item
@@ -397,7 +460,9 @@ def _extract_config(driver, extra):
     }
     prec = driver.preconditioner
     space = getattr(prec, "space", None)
-    cfg["solver_space"] = "minsr" if space and "Sample" in type(space).__name__ else "sr"
+    cfg["solver_space"] = (
+        "minsr" if space and "Sample" in type(space).__name__ else "sr"
+    )
     cfg["diag_shift"] = prec.diag_shift
     if extra:
         cfg["extra"] = extra
@@ -405,8 +470,19 @@ def _extract_config(driver, extra):
 
 
 def _log_config_table(
-    driver, *, n_steps, t_end, run_dir, observable_names,
-    log_every, save_every, resume, extra_config, start_step, target_step, runtime,
+    driver,
+    *,
+    n_steps,
+    t_end,
+    run_dir,
+    observable_names,
+    log_every,
+    save_every,
+    resume,
+    extra_config,
+    start_step,
+    target_step,
+    runtime,
 ):
     model = driver.model
     lines = []
@@ -429,9 +505,7 @@ def _log_config_table(
     elif hasattr(model, "bond_dim"):
         lines.append(("Bond dim", str(model.bond_dim)))
 
-    n_params = sum(
-        t.size for rd in driver._tensors.values() for t in rd.values()
-    )
+    n_params = sum(t.size for rd in driver._tensors.values() for t in rd.values())
     lines.append(("Parameters", f"{n_params:,}"))
 
     strategy = getattr(model, "strategy", None)
@@ -455,7 +529,9 @@ def _log_config_table(
 
     tu = type(driver.time_unit).__name__
     time_label = "imaginary" if "Imaginary" in tu else "real"
-    lines.append(("Integrator", f"{type(driver.integrator).__name__} ({time_label} time)"))
+    lines.append(
+        ("Integrator", f"{type(driver.integrator).__name__} ({time_label} time)")
+    )
     lines.append(("dt", str(driver.dt)))
     lines.append(("t0", f"{driver.t:.6f}"))
 
@@ -499,7 +575,9 @@ def _log_config_table(
     if resume:
         logger.info(f"{'Checkpoint':<{w}}step {start_step}, t = {driver.t:.6f}")
         if t_end is not None:
-            logger.info(f"{'Remaining':<{w}}{n_steps} steps (t: {driver.t:.6f} -> {t_end:.6f})")
+            logger.info(
+                f"{'Remaining':<{w}}{n_steps} steps (t: {driver.t:.6f} -> {t_end:.6f})"
+            )
         else:
             logger.info(f"{'Remaining':<{w}}{n_steps} steps -> step {target_step}")
     else:

@@ -6,15 +6,6 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-_SMOKE_DEFAULTS = {
-    "--n-samples": "32",
-    "--n-chains": "4",
-    "--bond-dim": "2",
-    "--boundary-dim": "4",
-    "--log-every": "1",
-    "--save-every": "2",
-}
-
 
 def read_checkpoint_metadata(run_dir: str) -> dict:
     """Read parsed metadata from a runner checkpoint."""
@@ -29,19 +20,20 @@ def smoke_test(
 ) -> dict:
     """Run a script with tiny parameters and check it doesn't crash.
 
-    Output is directed to a temporary directory via --output, so no user
-    data is affected. For two-stage workflows, pass chain_state as the
-    ground-state output directory to use as --state for dynamics scripts.
+    No default args are injected — the caller provides exactly the CLI
+    args the target script accepts via ``overrides``. Output is directed
+    to a temporary directory via --output.
+
+    For two-stage workflows, pass chain_state as the ground-state output
+    directory to use as --state for dynamics scripts.
 
     Returns {"passed": bool, "returncode": int, "stdout": str, "stderr": str}.
     """
     script = Path(script_path).resolve()
-    args_dict = dict(_SMOKE_DEFAULTS)
-    if overrides:
-        args_dict.update(overrides)
+    args_dict = dict(overrides) if overrides else {}
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        args_dict["--output"] = tmpdir
+        args_dict.setdefault("--output", tmpdir)
         args = [str(item) for pair in args_dict.items() for item in pair]
         if chain_state:
             args.extend(["--state", str(chain_state)])

@@ -309,10 +309,17 @@ def run(
 
     if T_final is not None:
         remaining = T_final - driver.t
-        if remaining <= 1e-12 * max(1.0, abs(T_final)):
+        n_exact = remaining / driver.dt
+        n_rounded = round(n_exact)
+        if abs(n_exact - n_rounded) > 0.01:
+            raise ValueError(
+                f"T_final={T_final} from t={driver.t:.6f} is not an integer "
+                f"multiple of dt={driver.dt} (remaining/dt = {n_exact:.6f})."
+            )
+        if n_rounded <= 0:
             logger.info("Already at t=%.6f >= T_final=%.6f.", driver.t, T_final)
             return
-        total_new_steps = math.ceil(remaining / driver.dt)
+        total_new_steps = n_rounded
     else:
         total_new_steps = n_steps
 

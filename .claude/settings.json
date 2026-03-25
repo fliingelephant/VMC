@@ -15,6 +15,15 @@
             "command": "jq -r '.tool_response.filePath // .tool_input.file_path' | { read -r f; [[ \"$f\" == *.py ]] && uv run ruff format \"$f\" 2>/dev/null || true; }"
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.command' | grep -q 'git push' && gh pr view --json number -q .number >/dev/null 2>&1 && gh pr comment --body '@codex review' 2>/dev/null || true"
+          }
+        ]
       }
     ]
   }

@@ -194,7 +194,10 @@ def load_model_from_checkpoint(run_dir, model):
             for row, rd in tensors.items()
         },
     }
-    restored = mgr.restore(step, args=ocp.args.StandardRestore(target), partial_restore=True)
+    # Use PyTreeCheckpointer for partial restore (CheckpointManager doesn't support it)
+    ckpt_dir = run_dir / str(step) / "default"
+    ckptr = ocp.PyTreeCheckpointer()
+    restored = ckptr.restore(ckpt_dir, item=target, partial_restore=True)
     loaded = {
         row: {col: restored["tensors"][str(row)][str(col)] for col in rd}
         for row, rd in tensors.items()

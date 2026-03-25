@@ -27,6 +27,7 @@ from vmc.workflow import (  # noqa: E402
     DEFAULT_METRICS_CONFIG,
     add_common_args,
     load_model_from_checkpoint,
+    read_config,
     run,
 )
 from physics import (  # noqa: E402
@@ -49,16 +50,8 @@ def main() -> None:
     parser.set_defaults(bond_dim=3, dt=0.01, diag_shift=1e-8)
     args = parser.parse_args()
 
-    # Load ground state from runner checkpoint
-    gs_config = args.state
-    dummy_model = build_model(
-        (2, 2), bond_dim=args.bond_dim, seed=args.seed,
-    )
-    # Read metadata to get actual shape/bond_dim
-    import json
-    with open(Path(gs_config) / "latest.json") as f:
-        metadata = json.load(f)
-    gs_extra = metadata.get("config", {}).get("extra", {})
+    # Read ground-state config from checkpoint metadata
+    gs_extra = read_config(args.state).get("extra", {})
     L = int(gs_extra.get("L", args.L if hasattr(args, "L") else 6))
     bond_dim = int(gs_extra.get("bond_dim", args.bond_dim))
     h = float(gs_extra.get("h", 1.0))

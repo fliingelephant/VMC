@@ -10,7 +10,6 @@ Wu & Nys (2026) Fig. 4:
 from __future__ import annotations
 
 import sys
-import json
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -29,6 +28,7 @@ from vmc.workflow import (  # noqa: E402
     DEFAULT_METRICS_CONFIG,
     add_common_args,
     load_model_from_checkpoint,
+    read_config,
     run,
 )
 from physics import (  # noqa: E402
@@ -59,10 +59,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # Load ground state from runner checkpoint
-    with open(Path(args.state) / "latest.json") as f:
-        metadata = json.load(f)
-    extra = metadata.get("config", {}).get("extra", {})
+    # Read ground-state config from checkpoint metadata
+    extra = read_config(args.state).get("extra", {})
     L = int(extra["L"])
     h = float(extra["h"])
     g = float(extra["g"])

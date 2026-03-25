@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "AbstractLog", "ConsoleLog", "JsonLog", "CompositeLog",
     "add_common_args", "resolve_solver", "run",
-    "load_model_from_checkpoint", "DEFAULT_METRICS_CONFIG",
+    "load_model_from_checkpoint", "read_config", "DEFAULT_METRICS_CONFIG",
 ]
 
 SOLVERS = {"cholesky": solve_cholesky, "svd": solve_svd, "cg": solve_cg}
@@ -154,6 +154,16 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
 _ITEM_NAMES = ("tensors", "sampler")
 
 
+def read_config(run_dir: str | Path) -> dict:
+    """Read run config from checkpoint metadata without loading tensors."""
+    mgr = ocp.CheckpointManager(
+        Path(run_dir), item_names=_ITEM_NAMES,
+        options=ocp.CheckpointManagerOptions(read_only=True),
+    )
+    meta = mgr.metadata()
+    return dict(meta.custom_metadata) if hasattr(meta, "custom_metadata") else {}
+
+
 def _str_keys(tensors: dict) -> dict:
     """Convert int-keyed tensor dict to string keys for orbax."""
     return {str(r): {str(c): t for c, t in rd.items()} for r, rd in tensors.items()}
@@ -241,6 +251,7 @@ def run(
             sampler=ocp.args.StandardRestore({
                 "key": driver._sampler_key,
                 "configuration": driver._sampler_configuration.reshape(driver.n_chains, -1),
+                "t": jax.numpy.asarray(driver.t),
             }),
         ))
         saved_config = restored["sampler"]["configuration"]
@@ -255,6 +266,7 @@ def run(
         driver._sampler_key = restored["sampler"]["key"]
         driver._sampler_configuration = saved_config
         driver.step_count = latest
+        driver.t = float(restored["sampler"]["t"])
         saved_meta = mgr.metadata()
         saved_extra = getattr(saved_meta, "custom_metadata", {}).get("extra", {})
         if extra_config and saved_extra and extra_config != saved_extra:
@@ -310,6 +322,7 @@ def run(
                 sampler=ocp.args.StandardSave({
                     "key": driver._sampler_key,
                     "configuration": driver._sampler_configuration.reshape(driver.n_chains, -1),
+                    "t": jax.numpy.asarray(driver.t),
                 }),
             ))
             mgr.wait_until_finished()

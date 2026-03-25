@@ -21,10 +21,11 @@ import argparse  # noqa: E402
 import jax  # noqa: E402
 
 from vmc.drivers import RK4, RealTimeUnit, TDVPDriver  # noqa: E402
-from vmc.preconditioners import SRPreconditioner  # noqa: E402
-from vmc.qgt import ParameterSpace, SampleSpace  # noqa: E402
+from vmc.preconditioners import DirectSolve, SRPreconditioner  # noqa: E402
 
-from vmc.workflow import (  # noqa: E402
+from vmc.workflow import (
+    SOLVERS, SPACES,  # noqa: E402
+    SOLVERS, SPACES,
     DEFAULT_METRICS_CONFIG,
     add_common_args,
     load_model_from_checkpoint,
@@ -94,11 +95,13 @@ def main() -> None:
     observables = build_all_plaquette_observables(shape)
     plaq_names = plaquette_observable_names(shape)
 
-    space = SampleSpace() if args.solver_space == "minsr" else ParameterSpace()
+    space = SPACES[args.solver_space]()
     driver = TDVPDriver(
         model, hamiltonian,
         observables=observables,
         preconditioner=SRPreconditioner(
+            space=SPACES[args.solver_space](),
+            strategy=DirectSolve(solver=SOLVERS[args.solver]),
             space=space,
             diag_shift=args.diag_shift,
             metrics_config=DEFAULT_METRICS_CONFIG,

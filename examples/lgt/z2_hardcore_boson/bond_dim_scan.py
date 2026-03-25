@@ -13,10 +13,9 @@ import argparse  # noqa: E402
 import jax  # noqa: E402
 
 from vmc.drivers import ImaginaryTimeUnit, TDVPDriver  # noqa: E402
-from vmc.preconditioners import DirectSolve, SRPreconditioner, solve_cholesky  # noqa: E402
-from vmc.qgt import ParameterSpace  # noqa: E402
+from vmc.preconditioners import DirectSolve, SRPreconditioner  # noqa: E402
 
-from vmc.workflow import DEFAULT_METRICS_CONFIG, add_common_args, run  # noqa: E402
+from vmc.workflow import DEFAULT_METRICS_CONFIG, SOLVERS, SPACES, add_common_args, run  # noqa: E402
 from common import (  # noqa: E402
     DEFAULT_G, DEFAULT_H, DEFAULT_J, DEFAULT_M,
     build_model, build_z2_hardcore_boson_hamiltonian,
@@ -60,8 +59,8 @@ def main() -> None:
     driver = TDVPDriver(
         model, hamiltonian,
         preconditioner=SRPreconditioner(
-            space=ParameterSpace(),
-            strategy=DirectSolve(solver=solve_cholesky),
+            space=SPACES[args.solver_space](),
+            strategy=DirectSolve(solver=SOLVERS[args.solver]),
             diag_shift=args.diag_shift,
             metrics_config=DEFAULT_METRICS_CONFIG,
         ),

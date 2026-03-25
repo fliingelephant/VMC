@@ -18,9 +18,9 @@ import argparse  # noqa: E402
 import jax  # noqa: E402
 
 from vmc.drivers import ImaginaryTimeUnit, TDVPDriver  # noqa: E402
-from vmc.preconditioners import SRPreconditioner  # noqa: E402
+from vmc.preconditioners import DirectSolve, SRPreconditioner  # noqa: E402
 
-from vmc.workflow import DEFAULT_METRICS_CONFIG, add_common_args, run  # noqa: E402
+from vmc.workflow import DEFAULT_METRICS_CONFIG, SOLVERS, SPACES, add_common_args, run  # noqa: E402
 from physics import build_model, build_z2_hamiltonian  # noqa: E402
 
 
@@ -44,6 +44,8 @@ def main() -> None:
         model,
         hamiltonian,
         preconditioner=SRPreconditioner(
+            space=SPACES[args.solver_space](),
+            strategy=DirectSolve(solver=SOLVERS[args.solver]),
             diag_shift=args.diag_shift,
             metrics_config=DEFAULT_METRICS_CONFIG,
         ),

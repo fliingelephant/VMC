@@ -16,10 +16,9 @@ import argparse  # noqa: E402
 import jax  # noqa: E402
 
 from vmc.drivers import ImaginaryTimeUnit, TDVPDriver  # noqa: E402
-from vmc.preconditioners import SRPreconditioner  # noqa: E402
-from vmc.qgt import ParameterSpace, SampleSpace  # noqa: E402
+from vmc.preconditioners import DirectSolve, SRPreconditioner  # noqa: E402
 
-from vmc.workflow import DEFAULT_METRICS_CONFIG, add_common_args, run  # noqa: E402
+from vmc.workflow import DEFAULT_METRICS_CONFIG, SOLVERS, SPACES, add_common_args, run  # noqa: E402
 from physics import build_model, build_z2_higgs_hamiltonian  # noqa: E402
 
 
@@ -54,10 +53,12 @@ def main() -> None:
     hamiltonian = build_z2_higgs_hamiltonian(
         shape, h=args.h, g=args.g, J=args.J, sigma_z_field=args.sigma_z_field,
     )
-    space = SampleSpace() if args.solver_space == "minsr" else ParameterSpace()
+    space = SPACES[args.solver_space]()
     driver = TDVPDriver(
         model, hamiltonian,
         preconditioner=SRPreconditioner(
+            space=SPACES[args.solver_space](),
+            strategy=DirectSolve(solver=SOLVERS[args.solver]),
             space=space,
             diag_shift=args.diag_shift,
             metrics_config=DEFAULT_METRICS_CONFIG,

@@ -38,8 +38,9 @@ from vmc.preconditioners import DirectSolve, SRPreconditioner  # noqa: E402
 
 from vmc.workflow import (  # noqa: E402
     DEFAULT_METRICS_CONFIG,
+    SOLVERS,
+    SPACES,
     add_common_args,
-    resolve_solver,
     run,
 )
 
@@ -203,8 +204,9 @@ def run_single_quench(args, tau_q: float) -> None:
         build_schmitt_smooth_tfim(shape, tau_q, GC),
         observables=observables,
         preconditioner=SRPreconditioner(
+            space=SPACES[args.solver_space](),
             diag_shift=args.diag_shift,
-            strategy=DirectSolve(solver=resolve_solver(args.solver)),
+            strategy=DirectSolve(solver=SOLVERS[args.solver]),
             metrics_config=DEFAULT_METRICS_CONFIG,
         ),
         dt=args.dt,

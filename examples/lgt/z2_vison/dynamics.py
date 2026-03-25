@@ -21,9 +21,10 @@ import argparse  # noqa: E402
 import jax  # noqa: E402
 
 from vmc.drivers import RK4, RealTimeUnit, TDVPDriver  # noqa: E402
-from vmc.preconditioners import SRPreconditioner  # noqa: E402
+from vmc.preconditioners import DirectSolve, SRPreconditioner  # noqa: E402
 
-from vmc.workflow import (  # noqa: E402
+from vmc.workflow import (
+    SOLVERS, SPACES,  # noqa: E402
     DEFAULT_METRICS_CONFIG,
     add_common_args,
     load_model_from_checkpoint,
@@ -73,6 +74,8 @@ def main() -> None:
         hamiltonian,
         observables=observables,
         preconditioner=SRPreconditioner(
+            space=SPACES[args.solver_space](),
+            strategy=DirectSolve(solver=SOLVERS[args.solver]),
             diag_shift=args.diag_shift,
             metrics_config=DEFAULT_METRICS_CONFIG,
         ),

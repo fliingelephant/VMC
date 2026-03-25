@@ -31,16 +31,19 @@ import orbax.checkpoint as ocp
 
 from vmc.operators.time_dependent import TimeDependentHamiltonian
 from vmc.preconditioners import MetricsConfig, solve_cg, solve_cholesky, solve_svd
+from vmc.qgt import ParameterSpace, SampleSpace
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
     "AbstractLog", "ConsoleLog", "JsonLog", "CompositeLog",
     "add_common_args", "resolve_solver", "run",
-    "load_model_from_checkpoint", "read_config", "DEFAULT_METRICS_CONFIG",
+    "load_model_from_checkpoint", "read_config",
+    "DEFAULT_METRICS_CONFIG", "SOLVERS", "SPACES",
 ]
 
 SOLVERS = {"cholesky": solve_cholesky, "svd": solve_svd, "cg": solve_cg}
+SPACES = {"sr": ParameterSpace, "minsr": SampleSpace}
 
 DEFAULT_METRICS_CONFIG = MetricsConfig(
     record_FS_norm=True,

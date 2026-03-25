@@ -29,9 +29,9 @@ from vmc.operators import PlaquetteOperator  # noqa: E402
 from vmc.peps import ZipUp  # noqa: E402
 from vmc.peps.gi.local_terms import GILocalHamiltonian, build_electric_terms  # noqa: E402
 from vmc.peps.gi.model import GIPEPS, GIPEPSConfig  # noqa: E402
-from vmc.preconditioners import SRPreconditioner  # noqa: E402
+from vmc.preconditioners import DirectSolve, SRPreconditioner  # noqa: E402
 
-from vmc.workflow import DEFAULT_METRICS_CONFIG, add_common_args, run  # noqa: E402
+from vmc.workflow import DEFAULT_METRICS_CONFIG, SOLVERS, SPACES, add_common_args, run  # noqa: E402
 
 
 def build_odd_z2_hamiltonian(
@@ -85,6 +85,8 @@ def main() -> None:
     driver = TDVPDriver(
         model, hamiltonian,
         preconditioner=SRPreconditioner(
+            space=SPACES[args.solver_space](),
+            strategy=DirectSolve(solver=SOLVERS[args.solver]),
             diag_shift=args.diag_shift,
             metrics_config=DEFAULT_METRICS_CONFIG,
         ),

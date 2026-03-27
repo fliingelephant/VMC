@@ -92,10 +92,7 @@ Follow [Google Python Style Guide](https://google.github.io/styleguide/pyguide.h
 - **Least redundancy is top priority.** Reuse environments/transfers within a row or row-pair; evaluate gradients and energy together in the same pass; avoid rebuilding row/2-row transfers or per-site assembled tensors multiple times; only materialize extra boundaries when they reduce total compute.
 - **Match theory first.** Verify Gauss-law conventions, term geometry (one-site/horizontal/vertical/plaquette), and sampling/energy formulas against the papers in `notes/`; if ambiguous, consult the notes and ask rather than guessing.
 - **Think twice.** For complicated or important algorithms, think twice before implementing.
-- **Uncertain correctness.** Implementation might be totally incorrect; for uncertain behavior, refer to notes or ask the user.
-- **Unified eval API (core).** `_value`, `_grad`, and `_value_and_grad` are the only evaluation entrypoints; every other evaluation is a variant of these (plum-dispatched for MPS/PEPS). Avoid manual-dispatch name variants, `log_*` helpers, or `*_fn` wrappers.
 - **Sampling gradients.** When a sampler records gradients, compute value+Jacobian for each proposal together and keep gradients only for accepted proposals.
-- **Let it crash**: no defensive parameter checks; assume correct wiring and let errors surface.
 - **Occupancy (0/1) internally**, spin (±1) only at NetKet API boundaries.
 
 ### Style
@@ -116,4 +113,4 @@ Follow [Google Python Style Guide](https://google.github.io/styleguide/pyguide.h
 
 - Use Python `logging` module, not `print()`.
 - **Guard expensive debug computations** with `logger.isEnabledFor(logging.DEBUG)`.
-- Control via `VMC_LOG_LEVEL` environment variable.
+

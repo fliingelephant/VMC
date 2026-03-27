@@ -1,4 +1,7 @@
-"""One half-filled bond-dimension point for the Z2 hard-core-boson paper scan."""
+"""Z2 Higgs ground-state optimization with parity-sector GI-PEPS.
+
+Targets Wu & Nys (2026) Fig. 4 ground-state preparation.
+"""
 from __future__ import annotations
 
 import sys
@@ -17,46 +20,39 @@ from vmc.gauge import GaugeConfig  # noqa: E402
 from vmc.preconditioners import DirectSolve, SRPreconditioner  # noqa: E402
 
 from vmc.workflow import DEFAULT_METRICS_CONFIG, SOLVERS, SPACES, add_common_args, run  # noqa: E402
-from common import (  # noqa: E402
-    DEFAULT_G, DEFAULT_H, DEFAULT_J, DEFAULT_M,
-    build_model, build_z2_hardcore_boson_hamiltonian,
-    coupling_suffix, half_filling,
-)
+from physics import build_model, build_z2_higgs_hamiltonian  # noqa: E402
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Run one half-filled bond-dimension point for the Z2 hard-core-boson paper scan.",
+        description="Optimize Z2 Higgs ground state with parity-sector GI-PEPS.",
     )
-    parser.add_argument("--L", type=int, default=16)
-    parser.add_argument("--bond-dim-per-charge", type=int, default=6)
-    parser.add_argument("--h", type=float, default=DEFAULT_H)
-    parser.add_argument("--g", type=float, default=DEFAULT_G)
-    parser.add_argument("--J", type=float, default=DEFAULT_J)
-    parser.add_argument("--m", type=float, default=DEFAULT_M)
+    parser.add_argument("--L", type=int, default=8)
+    parser.add_argument("--h", type=float, default=1.0)
+    parser.add_argument("--g", type=float, default=0.1)
+    parser.add_argument("--J", type=float, default=0.1)
+    parser.add_argument("--sigma-z-field", type=float, default=1.0)
     parser.add_argument("--boundary-sweeps", type=int, default=2)
     add_common_args(parser)
     parser.add_argument("--n-steps", type=int, default=200)
     parser.set_defaults(
-        n_samples=4096, n_chains=64, n_steps=200,
-        dt=0.01, diag_shift=1e-4, seed=42,
-        log_every=50, save_every=50,
+        bond_dim=2, dt=0.005, diag_shift=1e-4,
+        n_steps=200, n_samples=4096, n_chains=512,
+        solver_space="minsr", save_every=20, log_every=10,
     )
     args = parser.parse_args()
-    args.boundary_dim = args.boundary_dim or 3 * args.bond_dim_per_charge
+    args.boundary_dim = args.boundary_dim or 3 * args.bond_dim
 
     shape = (args.L, args.L)
-    particle_number = half_filling(shape)
     model = build_model(
         shape,
-        particle_number=particle_number,
-        bond_dim_per_charge=args.bond_dim_per_charge,
+        bond_dim=args.bond_dim,
         boundary_dim=args.boundary_dim,
         boundary_sweeps=args.boundary_sweeps,
         seed=args.seed,
     )
-    hamiltonian = build_z2_hardcore_boson_hamiltonian(
-        shape, h=args.h, g=args.g, J=args.J, m=args.m,
+    hamiltonian = build_z2_higgs_hamiltonian(
+        shape, h=args.h, g=args.g, J=args.J, sigma_z_field=args.sigma_z_field,
     )
     driver = TDVPDriver(
         model, hamiltonian,
@@ -74,21 +70,24 @@ def main() -> None:
         n_chains=args.n_chains,
         full_gradient=args.full_gradient,
     )
-    default_dir = (
-        Path(__file__).resolve().parent / "data" / "bond_dim_scan"
-        / f"L{args.L}_Dk{args.bond_dim_per_charge}_{coupling_suffix(h=args.h, g=args.g, J=args.J, m=args.m)}"
-    )
+
+    g_tok = format(args.g, ".3f").replace(".", "p")
+    J_tok = format(args.J, ".3f").replace(".", "p")
     run(
         driver,
         n_steps=args.n_steps,
-        run_dir=args.output or str(default_dir),
+        run_dir=args.output or f"data/z2_vison_higgs/L{args.L}_g{g_tok}_J{J_tok}_Dk{args.bond_dim}",
         log_every=args.log_every,
         save_every=args.save_every,
         resume=args.resume,
         extra_config={
-            "L": args.L, "particle_number": particle_number,
-            "h": args.h, "g": args.g, "J": args.J, "m": args.m,
-            "bond_dim_per_charge": args.bond_dim_per_charge,
+            "model": "z2_vison_higgs", "L": args.L,
+            "h": args.h, "g": args.g, "J": args.J,
+            "sigma_z_field": args.sigma_z_field,
+            "bond_dim": args.bond_dim,
+            "boundary_dim": args.boundary_dim,
+            "boundary_sweeps": args.boundary_sweeps,
+            "seed": args.seed,
         },
     )
 

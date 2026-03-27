@@ -6,11 +6,13 @@ commented out independently.
 
 from __future__ import annotations
 
-from vmc import config  # noqa: F401 - JAX config must be imported first
-
-import json
-import time
 from pathlib import Path
+
+
+from vmc import config  # noqa: F401, E402 - JAX config must be imported first
+
+import json  # noqa: E402
+import time  # noqa: E402
 
 import jax
 import jax.numpy as jnp
@@ -26,7 +28,6 @@ from vmc.peps import PEPS, build_mc_kernels
 from vmc.peps.common.strategy import Variational
 from vmc.preconditioners import (
     DirectSolve,
-    MetricsConfig,
     SRPreconditioner,
     solve_cholesky,
 )
@@ -34,6 +35,8 @@ from vmc.preconditioners.preconditioners import _adjoint_matvec, _reorder_update
 from vmc.qgt import ParameterSpace, SlicedJacobian
 from vmc.qgt.jacobian import SliceOrdering
 from vmc.utils import _tree_add_scaled
+
+from vmc.workflow import DEFAULT_METRICS_CONFIG  # noqa: E402
 
 
 L = 10
@@ -63,12 +66,7 @@ SR_ADAPTIVE_DT_MIN = 1e-4
 SR_ADAPTIVE_DT_MAX = 1.5 * SR_FIXED_DT
 SR_ADAPTIVE_MAX_STEPS = 1000
 
-SR_METRICS_CONFIG = MetricsConfig(
-    record_FS_norm=True,
-    record_TDVP_residual=True,
-    record_SR_solve_residual=True,
-    record_step_wall_time=True,
-)
+SR_METRICS_CONFIG = DEFAULT_METRICS_CONFIG
 
 
 def build_ising_2d(

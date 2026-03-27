@@ -1,0 +1,30 @@
+{
+  "mcpServers": {
+    "vmc": {
+      "command": "uv",
+      "args": ["run", "--directory", "${projectRoot}", "python", "tools/vmc-mcp/server.py"]
+    }
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_response.filePath // .tool_input.file_path' | { read -r f; [[ \"$f\" == *.py ]] && uv run ruff format \"$f\" 2>/dev/null || true; }"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "REPO=$(git remote get-url origin 2>/dev/null | sed 's/.*github.com[:/]//') && jq -r '.tool_response // \"\"' | grep -qF \"$REPO\" && gh pr view --json number -q .number >/dev/null 2>&1 && gh pr comment --body '@codex review' 2>/dev/null || true"
+          }
+        ]
+      }
+    ]
+  }
+}

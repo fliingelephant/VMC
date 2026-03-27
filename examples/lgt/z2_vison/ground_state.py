@@ -1,4 +1,9 @@
-"""3x3 quoted-ED benchmark for Z2 gauge fields coupled to hard-core bosons."""
+"""Z2 pure gauge ground-state optimization with GI-PEPS.
+
+Reproduces the ground-state preparation for Wu & Liu (2025) Fig. 5:
+  --L 6  --bond-dim 3  -> Fig 5a (6x6)
+  --L 10 --bond-dim 4  -> Fig 5b (10x10)
+"""
 from __future__ import annotations
 
 import sys
@@ -17,48 +22,28 @@ from vmc.gauge import GaugeConfig  # noqa: E402
 from vmc.preconditioners import DirectSolve, SRPreconditioner  # noqa: E402
 
 from vmc.workflow import DEFAULT_METRICS_CONFIG, SOLVERS, SPACES, add_common_args, run  # noqa: E402
-from common import build_model, build_z2_hardcore_boson_hamiltonian  # noqa: E402
-
-
-L = 3
-SHAPE = (L, L)
-PARTICLE_NUMBER = 2
-H_COUPLING = 1.0
-G_COUPLING = 0.33
-J_COUPLING = 0.5
-M_COUPLING = 0.0
-BOND_DIM_PER_CHARGE = 3
-BOUNDARY_DIM = 9
-QUOTED_ED_ENERGY_PER_SITE = -0.4707135061
+from physics import build_model, build_z2_hamiltonian  # noqa: E402
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Run the 3x3 quoted-ED benchmark for Z2 hard-core bosons.",
+        description="Optimize Z2 pure gauge ground state with GI-PEPS.",
     )
-    parser.add_argument("--boundary-sweeps", type=int, default=2)
+    parser.add_argument("--L", type=int, default=6)
+    parser.add_argument("--h", type=float, default=1.0)
+    parser.add_argument("--g", type=float, default=0.1)
     add_common_args(parser)
     parser.add_argument("--n-steps", type=int, default=200)
-    parser.set_defaults(
-        n_samples=4096, n_chains=64, n_steps=200,
-        dt=0.01, diag_shift=1e-4, seed=42,
-        log_every=50, save_every=50,
-    )
+    parser.set_defaults(bond_dim=3, dt=0.005, diag_shift=1e-6, n_steps=400)
     args = parser.parse_args()
 
-    model = build_model(
-        SHAPE,
-        particle_number=PARTICLE_NUMBER,
-        bond_dim_per_charge=BOND_DIM_PER_CHARGE,
-        boundary_dim=BOUNDARY_DIM,
-        boundary_sweeps=args.boundary_sweeps,
-        seed=args.seed,
-    )
-    hamiltonian = build_z2_hardcore_boson_hamiltonian(
-        SHAPE, h=H_COUPLING, g=G_COUPLING, J=J_COUPLING, m=M_COUPLING,
-    )
+    shape = (args.L, args.L)
+    model = build_model(shape, bond_dim=args.bond_dim, seed=args.seed)
+    hamiltonian = build_z2_hamiltonian(shape, h=args.h, g=args.g)
+
     driver = TDVPDriver(
-        model, hamiltonian,
+        model,
+        hamiltonian,
         preconditioner=SRPreconditioner(
             space=SPACES[args.solver_space](),
             strategy=DirectSolve(solver=SOLVERS[args.solver]),
@@ -73,17 +58,19 @@ def main() -> None:
         n_chains=args.n_chains,
         full_gradient=args.full_gradient,
     )
+
+    g_tok = format(args.g, ".3f").replace(".", "p")
     run(
         driver,
         n_steps=args.n_steps,
-        run_dir=args.output or str(Path(__file__).resolve().parent / "data" / "benchmark_3x3"),
+        run_dir=args.output or f"data/z2_vison/L{args.L}_g{g_tok}_Dk{args.bond_dim}",
         log_every=args.log_every,
         save_every=args.save_every,
         resume=args.resume,
         extra_config={
-            "quoted_ed_energy_per_site": QUOTED_ED_ENERGY_PER_SITE,
-            "particle_number": PARTICLE_NUMBER,
-            "h": H_COUPLING, "g": G_COUPLING, "J": J_COUPLING, "m": M_COUPLING,
+            "gauge_group": "Z2", "L": args.L,
+            "h": args.h, "g": args.g,
+            "bond_dim": args.bond_dim, "seed": args.seed,
         },
     )
 

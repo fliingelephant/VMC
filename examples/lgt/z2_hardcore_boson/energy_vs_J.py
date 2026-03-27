@@ -1,146 +1,95 @@
 """One half-filled energy-vs-J point for the Z2 hard-core-boson paper scan."""
 from __future__ import annotations
 
-import argparse
+import sys
 from pathlib import Path
 
-if __package__ in (None, ""):
-    from common import (
-        DEFAULT_BOUNDARY_SWEEPS,
-        DEFAULT_DIAG_SHIFT,
-        DEFAULT_DT,
-        DEFAULT_G,
-        DEFAULT_H,
-        DEFAULT_J,
-        coupling_suffix,
-        DEFAULT_LOG_EVERY,
-        DEFAULT_M,
-        DEFAULT_SAVE_EVERY,
-        build_ground_state_driver,
-        format_token,
-        half_filling,
-        maybe_resume,
-        prepare_run_dir,
-        run_ground_state_steps,
-    )
-else:
-    from .common import (
-        DEFAULT_BOUNDARY_SWEEPS,
-        DEFAULT_DIAG_SHIFT,
-        DEFAULT_DT,
-        DEFAULT_G,
-        DEFAULT_H,
-        DEFAULT_J,
-        coupling_suffix,
-        DEFAULT_LOG_EVERY,
-        DEFAULT_M,
-        DEFAULT_SAVE_EVERY,
-        build_ground_state_driver,
-        format_token,
-        half_filling,
-        maybe_resume,
-        prepare_run_dir,
-        run_ground_state_steps,
-    )
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from vmc import config  # noqa: F401, E402
 
-DEFAULT_L = 16
-DEFAULT_G_POINT = DEFAULT_G
-DEFAULT_J_POINT = DEFAULT_J
-DEFAULT_DK = 6
-DEFAULT_N_SAMPLES = 4096
-DEFAULT_N_CHAINS = 64
-DEFAULT_N_STEPS = 200
-DEFAULT_SEED = 42
+import argparse  # noqa: E402
 
+import jax  # noqa: E402
 
-def _run_dir(args: argparse.Namespace) -> Path:
-    return (
-        Path(__file__).resolve().parent
-        / "data"
-        / "energy_vs_J"
-        / (
-            f"L{args.L}_{coupling_suffix(h=args.h, g=args.g, J=args.J, m=args.m)}"
-            f"_Dk{args.bond_dim_per_charge}"
-        )
-    )
+from vmc.drivers import ImaginaryTimeUnit, TDVPDriver  # noqa: E402
+from vmc.gauge import GaugeConfig  # noqa: E402
+from vmc.preconditioners import DirectSolve, SRPreconditioner  # noqa: E402
 
-
-def _problem(args: argparse.Namespace, particle_number: int) -> dict:
-    return {
-        "script": "energy_vs_J",
-        "shape": [args.L, args.L],
-        "particle_number": particle_number,
-        "h": args.h,
-        "g": args.g,
-        "J": args.J,
-        "m": args.m,
-        "bond_dim_per_charge": args.bond_dim_per_charge,
-        "boundary_dimension": 3 * args.bond_dim_per_charge,
-        "boundary_sweeps": args.boundary_sweeps,
-        "n_samples": args.n_samples,
-        "n_chains": args.n_chains,
-        "dt": args.dt,
-        "diag_shift": args.diag_shift,
-        "seed": args.seed,
-    }
-
-
-def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Run one half-filled energy-vs-J point for the Z2 hard-core-boson paper scan.",
-    )
-    parser.add_argument("--L", type=int, default=DEFAULT_L)
-    parser.add_argument("--g", type=float, default=DEFAULT_G_POINT)
-    parser.add_argument("--J", type=float, default=DEFAULT_J_POINT)
-    parser.add_argument("--h", type=float, default=DEFAULT_H)
-    parser.add_argument("--m", type=float, default=DEFAULT_M)
-    parser.add_argument("--bond-dim-per-charge", type=int, default=DEFAULT_DK)
-    parser.add_argument("--n-samples", type=int, default=DEFAULT_N_SAMPLES)
-    parser.add_argument("--n-chains", type=int, default=DEFAULT_N_CHAINS)
-    parser.add_argument("--n-steps", type=int, default=DEFAULT_N_STEPS)
-    parser.add_argument("--dt", type=float, default=DEFAULT_DT)
-    parser.add_argument("--diag-shift", type=float, default=DEFAULT_DIAG_SHIFT)
-    parser.add_argument("--boundary-sweeps", type=int, default=DEFAULT_BOUNDARY_SWEEPS)
-    parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
-    parser.add_argument("--log-every", type=int, default=DEFAULT_LOG_EVERY)
-    parser.add_argument("--save-every", type=int, default=DEFAULT_SAVE_EVERY)
-    parser.add_argument("--resume", action="store_true")
-    return parser.parse_args()
+from vmc.workflow import DEFAULT_METRICS_CONFIG, SOLVERS, SPACES, add_common_args, run  # noqa: E402
+from common import (  # noqa: E402
+    DEFAULT_G, DEFAULT_H, DEFAULT_J, DEFAULT_M,
+    build_model, build_z2_hardcore_boson_hamiltonian,
+    coupling_suffix, half_filling,
+)
 
 
 def main() -> None:
-    args = _parse_args()
+    parser = argparse.ArgumentParser(
+        description="Run one half-filled energy-vs-J point for the Z2 hard-core-boson paper scan.",
+    )
+    parser.add_argument("--L", type=int, default=16)
+    parser.add_argument("--bond-dim-per-charge", type=int, default=6)
+    parser.add_argument("--h", type=float, default=DEFAULT_H)
+    parser.add_argument("--g", type=float, default=DEFAULT_G)
+    parser.add_argument("--J", type=float, default=DEFAULT_J)
+    parser.add_argument("--m", type=float, default=DEFAULT_M)
+    parser.add_argument("--boundary-sweeps", type=int, default=2)
+    add_common_args(parser)
+    parser.add_argument("--n-steps", type=int, default=200)
+    parser.set_defaults(
+        n_samples=4096, n_chains=64, n_steps=200,
+        dt=0.01, diag_shift=1e-4, seed=42,
+        log_every=50, save_every=50,
+    )
+    args = parser.parse_args()
+    args.boundary_dim = args.boundary_dim or 3 * args.bond_dim_per_charge
+
     shape = (args.L, args.L)
     particle_number = half_filling(shape)
-    problem = _problem(args, particle_number)
-    driver = build_ground_state_driver(
-        shape=shape,
-        h=args.h,
-        g=args.g,
-        J=args.J,
-        m=args.m,
+    model = build_model(
+        shape,
         particle_number=particle_number,
         bond_dim_per_charge=args.bond_dim_per_charge,
-        boundary_dim=3 * args.bond_dim_per_charge,
+        boundary_dim=args.boundary_dim,
         boundary_sweeps=args.boundary_sweeps,
         seed=args.seed,
+    )
+    hamiltonian = build_z2_hardcore_boson_hamiltonian(
+        shape, h=args.h, g=args.g, J=args.J, m=args.m,
+    )
+    driver = TDVPDriver(
+        model, hamiltonian,
+        preconditioner=SRPreconditioner(
+            space=SPACES[args.solver_space](),
+            strategy=DirectSolve(solver=SOLVERS[args.solver]),
+            diag_shift=args.diag_shift,
+            gauge_config=GaugeConfig() if args.gauge_removal else None,
+            metrics_config=DEFAULT_METRICS_CONFIG,
+        ),
+        dt=args.dt,
+        time_unit=ImaginaryTimeUnit(),
+        sampler_key=jax.random.key(args.seed),
         n_samples=args.n_samples,
         n_chains=args.n_chains,
-        dt=args.dt,
-        diag_shift=args.diag_shift,
+        full_gradient=args.full_gradient,
     )
-    run_dir = prepare_run_dir(_run_dir(args), resume=args.resume)
-    maybe_resume(run_dir, problem=problem, driver=driver, resume=args.resume, label="energy_vs_J")
-    run_ground_state_steps(
-        label="energy_vs_J",
-        driver=driver,
-        run_dir=run_dir,
-        problem=problem,
+    default_dir = (
+        Path(__file__).resolve().parent / "data" / "energy_vs_J"
+        / f"L{args.L}_{coupling_suffix(h=args.h, g=args.g, J=args.J, m=args.m)}_Dk{args.bond_dim_per_charge}"
+    )
+    run(
+        driver,
         n_steps=args.n_steps,
+        run_dir=args.output or str(default_dir),
         log_every=args.log_every,
         save_every=args.save_every,
-        energy_scale=shape[0] * shape[1],
+        resume=args.resume,
+        extra_config={
+            "L": args.L, "particle_number": particle_number,
+            "h": args.h, "g": args.g, "J": args.J, "m": args.m,
+            "bond_dim_per_charge": args.bond_dim_per_charge,
+        },
     )
 
 

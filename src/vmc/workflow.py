@@ -391,9 +391,9 @@ def run(
                     ),
                 ),
             )
-            mgr.wait_until_finished()
             out.flush()
 
+    mgr.wait_until_finished()
     logger.info("Run complete: %d steps, t=%.6f", target_step, driver.t)
 
 

@@ -83,35 +83,29 @@ Plaquette-flip move: propose `s → s'` where `s'` differs from `s` on the 4 bor
 
 ## 3. Module layout
 
+Mirror the existing `src/vmc/peps/gi/` footprint (5 files):
+
 ```
 src/vmc/peps/su2_gi/
   __init__.py
-  group.py           # GaugeGroup protocol + SU2 impl + CG/6j tables
-  block_table.py     # precompute allowed-block tables per lattice position
-  intertwiner.py     # intertwiner basis I^{(ι)} in s-channel tree decomposition
-  model.py           # SU2GIPEPS nnx.Module, sample rep, init / random_physical_configuration
-  block_ops.py       # sector-aware block gather, brick assembly, per-sector vmapped QR
-  contraction.py     # block-aware boundary-MPS: env build, _apply_mpo_variational_su2
+  group.py           # SU2 + CG + {6j} + intertwiner basis + per-position block tables
+  model.py           # SU2GIPEPS nnx.Module: tensors, sample rep, flatten/unflatten, apply
+  contraction.py     # SU(2)-specific MPO brick assembly, boundary-MPS Variational+QR, env ops
+  local_terms.py     # PlaquetteSU2Term, LinkCasimirTerm, precomputed amplitude tables
   kernels.py         # build_mc_kernels dispatch (init_cache, transition, estimate)
-  local_terms.py     # PlaquetteSU2Term, LinkCasimirTerm
-  compat.py          # flatten/unflatten sample, apply(), ...
 ```
 
 **No shared code with `src/vmc/peps/gi/`**; no refactor of existing code.
 
 ### Reuse precisely from `src/vmc/peps/common/`
 
-The following **lift verbatim** because they operate at the "one brick per site" level and are oblivious to how the brick was built:
+Sector-structured bricks require sector-aware contractions, so the `common/` primitives cannot be lifted verbatim. The SU(2) `contraction.py` re-implements the three operations its callers need, following the existing shape of the common primitives but walking a static sector axis:
 
-- `_apply_mpo_from_below` (`contraction.py:60`) — when passed block-structured tensors as pytree leaves per sector.
-- `_compute_right_envs` (`contraction.py:69`) — same.
-- `_contract_bottom`, `_contract_2row_2col`, `_contract_2row_1col` — pure einsum, work on block leaves.
+- `_build_row_mpo_su2` — SU(2) analog of `common/contraction.py:_build_row_mpo`; assembles the reduced-only per-sector brick from the sample.
+- `_apply_mpo_variational_su2` — SU(2) analog of `common/strategy.py:_apply_mpo_variational`; per-sector QR `vmap`ed over a static sector axis. No SVD.
+- `_estimate_sweep_su2` — SU(2) analog of `common/energy.py:_estimate_sweep`; indexing differs because there is no matter physical index.
 
-The following **need SU(2)-specific replacements** because they assume a physical-index slice into a dense site tensor:
-
-- `_build_row_mpo` (`contraction.py:23`) → `_build_row_mpo_su2` in `block_ops.py`. Inputs the sample irrep indices, outputs per-site brick of block structure.
-- `_apply_mpo_variational` (`strategy.py:174`) → `_apply_mpo_variational_su2` in `contraction.py`. Sector-aware Variational+QR.
-- `_estimate_sweep` (from `common/energy.py`) → SU(2) variant; indexing by sample differs because there is no matter physical index.
+`_contract_bottom` / `_contract_2row_2col` / `_contract_2row_1col` are pure einsum reductions on fully-contracted scalars and lift verbatim.
 
 **Kernel dispatch registration** follows the pattern in `src/vmc/peps/gi/kernels.py:43` — the driver registers the SU(2) kernel via `import vmc.peps.su2_gi.kernels  # noqa: F401` next to the existing GI registration in `src/vmc/drivers/tdvp.py:32`.
 
@@ -142,7 +136,7 @@ Concrete `SU2(j_max)` uses **Condon–Shortley convention** throughout. CG coeff
 - **$\mathbb Z_N$**: identical to U(1) but with mod-$N$ arithmetic in `fuse`/`dual`.
 - **SU(3)**: `fuse` returns multiplicity-weighted Littlewood–Richardson decomposition; `cg` carries the `mult` axis. The protocol is adequate but **the contraction layer currently assumes SU(2)-style multiplicity-at-vertex only**; extending to SU(3) requires handling multiplicity at every 2-way fusion (deferred).
 
-### 4.2 Intertwiner basis (`intertwiner.py`)
+### 4.2 Intertwiner basis (in `group.py`)
 
 For each 4-leg irrep tuple `(j_l, j_u, j_r, j_d)` with target singlet, fix the intertwiner basis in the **s-channel tree decomposition**:
 
@@ -151,25 +145,13 @@ I^{(j_m)}_{m_l m_u m_r m_d} = Σ_{m_m} CG(j_l, j_u → j_m)[m_l, m_u, m_m]
                               · CG(j_r^*, j_d^* → j_m)[m_r, m_d, m_m]·(−1)^{normalization}
 ```
 
-where `j_m` runs over the intermediate irreps of `(j_l ⊗ j_u) ∩ (j_r* ⊗ j_d*)*`. For `(½)^⊗⁴`, `j_m ∈ {0, 1}` gives the two intertwiners; other tuples have ≤ 1 intertwiner. This basis is orthonormal under $\sum_m I^{(\iota)} I^{(\iota')*} = δ_{\iota \iota'}$ and is used consistently by `block_table`, `block_ops`, and `local_terms`.
+where `j_m` runs over the intermediate irreps of `(j_l ⊗ j_u) ∩ (j_r* ⊗ j_d*)*`. For `(½)^⊗⁴`, `j_m ∈ {0, 1}` gives the two intertwiners; other tuples have ≤ 1 intertwiner. This basis is orthonormal under $\sum_m I^{(\iota)} I^{(\iota')*} = δ_{\iota \iota'}$ and consumed uniformly by the block-table enumeration, the contraction layer, and `local_terms.py`.
 
-### 4.3 Block table (`block_table.py`)
+### 4.3 Block table (in `group.py`)
 
-For each lattice position `(r, c)` enumerate the allowed singlet-fusion tuples:
+For each lattice position `(r, c)`, `block_table(r, c)` enumerates the allowed `((j_l, j_u, j_r, j_d), ι)` pairs — each 4-tuple whose fusion contains a singlet (or the target `Q_x`), and each intertwiner `ι` within that tuple. Ordering is canonical (lexicographic on `(j_l, j_u, j_r, j_d, ι)`), giving every pair a small integer `block_id`. Boundary legs are fixed to `j = 0`.
 
-```python
-allowed_blocks[(r, c)] = tuple of (
-    (j_left, j_up, j_right, j_down),          # each ∈ group.irreps(); boundary legs fixed to j=0
-    iota                                       # 0 ≤ iota < intertwiner_multiplicity(tuple)
-)
-```
-
-Ordering is canonical (lexicographic on `(j_left, j_up, j_right, j_down, iota)`) so the block-id is a small integer. Two static lookup arrays cover build-time and sample-time access:
-
-- `block_id[r, c][j_l, j_u, j_r, j_d, iota] → int` for enumeration at model build; invalid (non-singlet) cells get sentinel `-1`.
-- `sector_to_iota_blocks[r, c][j_l, j_u, j_r, j_d] → jnp.int32[ι_max]` for sample-time gather (§5.1): returns the `≤ ι_max` block ids that share a given sector, padded with `-1` on unused slots so the downstream `jnp.take(..., mode='fill', fill_value=0)` zeroes out the padding.
-
-Sampling only indexes the second lookup and never hits invalid sector cells by construction.
+At sample time, the brick assembly (§5.1) needs the `≤ ι_max` `block_id`s that share a given sector. This is one `jnp.take` on a static lookup built from the enumeration; see §5.1 for the exact usage. No sampling path ever indexes an invalid sector.
 
 ### 4.4 `SU2GIPEPS` module (`model.py`)
 
@@ -186,11 +168,9 @@ class SU2GIPEPSConfig:
 class SU2GIPEPS(nnx.Module):
     # Variational parameters
     tensors: list[list[nnx.Param]]   # tensors[r][c] shape (N_blocks[r,c], D, D, D, D)
-    # Static metadata (NOT nnx.Param, baked into graphdef)
-    sector_to_iota_blocks: jax.Array # per (r, c): sector → (ι_max,) block-id gather table (§4.3, §5.1)
-    edge_coupling:    jax.Array      # scalar coupling per shared virtual-bond irrep (§5.2)
-    vertex_coupling:  jax.Array      # scalar coupling per (sector_L, sector_R, shared_legs) (§5.2)
-    plaquette_table:  Any            # precomputed plaquette matrix elements (§5.4)
+    # Static metadata (NOT nnx.Param, baked into graphdef via dataclass fields)
+    tables: SU2GITables              # group.py-built bundle: block lookup, intertwiner-
+                                     # derived contraction amplitudes, plaquette outcomes.
 ```
 
 Each `A[r][c]` block has shape `(D, D, D, D)`; all blocks share the same shape because of uniform `D_j = D` (MVP simplification). `N_blocks` is position-dependent and baked into model-build.
@@ -205,7 +185,7 @@ Sample representation: `jnp.int32` tensors `h_links[(n_rows, n_cols-1)]` and `v_
 
 ### 4.5 Boundary-MPS tensor layout
 
-Each boundary-MPS tensor stores **reduced-space blocks only**; all magnetic structure is handled analytically via precomputed coupling tables (§5.2). Stacked for `vmap`:
+Each boundary-MPS tensor stores **reduced-space blocks only**; magnetic structure enters through the intertwiner-derived amplitudes of §5.2. Stacked for `vmap`:
 
 ```python
 # One tensor per column of the boundary-MPS.
@@ -214,7 +194,7 @@ Each boundary-MPS tensor stores **reduced-space blocks only**; all magnetic stru
 bmps[r, c] : shape (N_bond_blocks[r, c], chi, D, chi)
 ```
 
-Every block has the same reduced shape `(χ, D, χ)` — the physical leg is the *reduced-index slice* of the PEPS vertical virtual bond, hence dim `D` uniformly (not `D · (2j_p + 1)`). The outer sector label `(j_l, j_p, j_r)` is static metadata consumed by the coupling tables. Magnetic multiplicity `(2j_l + 1)(2j_p + 1)(2j_r + 1)` is never stored — it is absorbed into scalar CG factors at contraction time.
+Every block has the same reduced shape `(χ, D, χ)` — dim `D` on the physical leg (reduced-index slice of the PEPS vertical bond, not `D · (2j_p + 1)`). The outer sector label `(j_l, j_p, j_r)` is static metadata; magnetic multiplicity `(2j_l+1)(2j_p+1)(2j_r+1)` enters only as scalar factors at contraction time.
 
 ### 4.6 Parameter count and efficiency accounting
 
@@ -240,55 +220,25 @@ The savings come from (i) never instantiating disallowed fusion blocks, (ii) per
 
 ## 5. Execution pipeline
 
-### 5.1 Sample → per-site MPO brick (reduced-only, sector-labeled)
+### 5.1 Sample → per-site MPO brick
 
-Sampling produces only the sector tuple `tup = (j_l, j_u, j_r, j_d)` per vertex — intertwiner multiplicity `ι` is **not sampled**; it is summed analytically at contraction time via precomputed intertwiner coefficients (§5.2).
+Sampling produces the sector tuple `tup = (j_l, j_u, j_r, j_d)` per vertex. Intertwiner multiplicity `ι` is **not sampled**: the `≤ ι_max` reduced blocks sharing the same sector are kept as a stacked axis on the brick and consumed by the contraction layer (§5.2), which folds the intertwiner structure into precomputed scalar amplitudes.
 
-Storage is *exactly* one `(D, D, D, D)` tensor per `(sector, ι)` pair — no padding, `9 D⁴` total per bulk site. A static per-position lookup returns the ≤ `ι_max` block ids for a given sector, using `-1` sentinel on unused slots; `jnp.take(..., mode='fill', fill_value=0)` returns a zero block where the sentinel fires:
+Storage: `A[r, c]` has shape `(N_blocks[r, c], D, D, D, D)` — one `(D, D, D, D)` block per allowed `(sector, ι)` pair, no padding, `9 D⁴` per bulk site at `j_max=½`. The runtime brick is
 
-```python
-tup = (s.j_left(r, c), s.j_up(r, c), s.j_right(r, c), s.j_down(r, c))
-iota_block_ids = sector_to_iota_blocks[r, c][tup]   # shape (iota_max,), static; -1 = unused
-iota_slab = jnp.take(A[r, c], iota_block_ids,        # shape (iota_max, D, D, D, D); invalid iota → 0
-                     axis=0, mode='fill', fill_value=0.0)
-```
+$$\text{brick}[r, c, s] = A[r, c]\bigl[\text{block\_ids}(tup)\bigr], \quad \text{shape}\;(\iota_\text{max}, D, D, D, D),$$
 
-`ι_max` is the global maximum over allowed sectors at position `(r, c)` (≤ 2 for `j_max=½`). The stored parameter array `A[r, c]` has shape `(N_blocks[r, c], D, D, D, D)` with `N_blocks` *exactly* the count of non-trivial `(sector, ι)` pairs — no padding, no mask on storage. The `ι_max` axis arises only in the runtime gather; unused slots carry zeros and contribute nothing.
+gathered via `jnp.take` with `mode='fill'` so that sectors with fewer than `ι_max` intertwiners get zero-padded slots (no branch, no dynamic shape). The sector label `tup` is carried alongside the brick as static metadata.
 
-**The runtime brick is the reduced slab `(ι_max, D, D, D, D)` plus the static sector label.** Magnetic structure is **never materialized on the brick** — it lives entirely in the coupling tables of §5.2.
+### 5.2 Boundary-MPS contraction
 
-*Conceptual form for test cross-check only* — never constructed at runtime:
+Every runtime object in the pipeline — PEPS brick, boundary-MPS site, left/right environments — stores **reduced-space blocks only** (dims `D` or `χ` per virtual leg). SU(2) covariance is handled by one class of precomputed static scalar tables, **intertwiner-derived amplitudes**, built once from the group's CG and `{6j}` tables and indexed by sector-label tuples: (a) along a shared virtual bond, the scalar summing magnetic indices of two adjacent intertwiners; (b) across a plaquette, the amplitude of each outcome (§5.4). Every per-sector einsum picks up one of these scalars and runs on reduced tensors.
 
-$$\text{brick}^{(\text{full})}_{(a_l m_l)(a_u m_u)(a_r m_r)(a_d m_d)} \;=\; \sum_{\iota} A^{[\text{sec\_id},\iota]}_{a_l a_u a_r a_d} \cdot I^{(\iota)}_{m_l m_u m_r m_d},$$
+**Row-MPO application (`_apply_mpo_from_below`):** enumerate `(j_l^\text{in}, j_p^\text{MPO}) → j_l^\text{out}` triples at model build; at runtime, per-sector einsums produce per-sector output blocks, weighted by the shared-bond amplitude. Disallowed fusions never instantiate.
 
-where `I^{(ι)}` is the intertwiner basis of §4.2. Test `test_su2_amplitude_matches_exact_dense` (§8.3) builds this once on a small lattice to verify the block-aware pipeline, but the production path stays at `(ι_max, D, D, D, D)` throughout.
+**Variational+QR compression (`_apply_mpo_variational_su2`):** mirrors `common/strategy.py:_apply_mpo_variational` — left-to-right QR init + iterative sweeps — with every tensor replaced by its reduced-only block version. Each sweep step stacks per-sector `θ` blocks into `(N_out_sectors, D_l · D, D_r)` and `vmap(_qr_compactwy)` over the sector axis, batching all sector QRs into one GPU call. Each sector is truncated to its static schedule entry `χ_j^\text{MPS}`; under the MVP uniform-`χ` convention `χ_j^\text{MPS} ≡ χ`, so shapes are identical across sectors and `vmap` is immediate.
 
-### 5.2 Block-aware boundary-MPS (reduced-only + analytical magnetic coupling)
-
-Every tensor in the pipeline — PEPS brick, boundary-MPS site, left/right environments — stores **reduced-space blocks only** (shape `(D,…,D)` or `(χ,…,χ)` per sector). The magnetic-index contractions that make the algorithm SU(2)-covariant are compiled into a small set of **coupling tables** built once at model init:
-
-```python
-# Edge coupling (brick × brick or brick × MPS along a shared virtual bond j):
-edge_coupling[j] : jax.Array        # shape (); ≡ 1/sqrt(2j+1) or unity under s-channel normalization
-
-# Vertex coupling (two intertwiners sharing 2 legs after a sweep step):
-# Packages the CG/{6j} sum over magnetic indices inherent in the sweep.
-# Depends only on sector labels of the two intertwiners; precomputed.
-vertex_coupling[(sector_L, sector_R, shared_legs)] : jax.Array
-```
-
-These coefficients are **tiny scalars (or small tensors) indexed by sector-label tuples** — not full matrices. All sector-label enumeration is static (derived from `group.fuse`); at runtime every per-sector einsum picks up one or two `edge_coupling` / `vertex_coupling` multiplicative factors and runs on pure reduced tensors.
-
-**Row-MPO application `_apply_mpo_from_below`:** for each output MPS site, enumerate the `(j_l^{in}, j_p^{MPO}) → j_l^{out}` triples once; at runtime, each allowed triple produces one per-sector einsum (reduced-only) multiplied by the appropriate coupling. Disallowed fusions are never instantiated.
-
-**Variational+QR compression (`_apply_mpo_variational_su2`):** mirrors `common/strategy.py:_apply_mpo_variational` (left-to-right QR init + iterative sweeps), with every tensor replaced by its reduced-only block version:
-
-1. **Initialization sweep.** For each site left → right: contract `θ = L · M · W · R` per sector; stack per-sector `θ` blocks into `(N_out_sectors, Dl·D, Dr)` and `vmap(_qr_compactwy)` over the sector axis → get per-sector `Q, R`. Truncate each sector to its allocated `χ_j^{MPS}` from the static schedule.
-2. **Iterative sweeps.** Environments `L̃, R̃` are block-structured. Each sweep step's optimal tensor computation and QR is `vmap`ed over sectors.
-
-Because per-sector block shapes are *static* (uniform `χ` and `D` on the reduced axes), `vmap(_qr_compactwy)` batches all sector QRs into a single GPU call on a `(N_sectors, ...)` array.
-
-**Static sector schedule.** Every boundary-MPS bond has a predetermined `{j: χ_j}` at model-build. `χ_j` defaults to the user-specified uniform `χ` (MVP). The schedule never changes during sweeps — no reallocation, no dynamic shapes, no `jit` recompile.
+**Static schedule.** Block counts, sector schedules, outcome lists, and intertwiner amplitudes are compile-time constants derived from `(group, shape, Q_x, D, χ)`. Nothing reshapes during sweeps; no `jit` recompile.
 
 ### 5.3 Per-sample `vmap`
 
@@ -325,9 +275,9 @@ Purely diagonal in the sample: for each link `ℓ` with sampled irrep `j_ℓ`, a
 
 Mirrors `src/vmc/peps/gi/kernels.py` structure with three differences: (i) no matter index, (ii) block-aware MPO bricks, (iii) gradient indexed by block-id.
 
-- **`init_cache`**: for each chain, build bottom envs by sweeping row-wise bottom→top. Uses `_build_row_mpo_su2` (block_ops.py) delegating to §5.1. Compression via `_apply_mpo_variational_su2` (contraction.py).
-- **`transition`**: plaquette-flip sequential sweep over row pairs, mirroring `_plaquette_sweep_row_pair` in `src/vmc/peps/gi/model.py:1134`. For each plaquette, propose an outcome drawn uniformly from the non-zero-amplitude outcome list of `Û□+Û†□` (symmetric proposal → no Hastings correction), Metropolis-accept on `|Ψ(s')/Ψ(s)|²`, update the 4 bricks in place, maintain left envs.
-- **`estimate`**: sweep rows top→bottom, compute diagonal energy (Casimir via `LinkCasimirTerm.energy`), transition-term energies (plaquette via §5.4), accumulate env-gradients `G = (1/Ψ) · ∂Ψ/∂A[r,c][b_id]`. Gradient collection follows `src/vmc/peps/gi/kernels.py:148-170` but indexes into the `N_blocks` axis rather than the `Nc` axis.
+- **`init_cache`**: for each chain, build bottom envs by sweeping row-wise bottom→top. Uses `_build_row_mpo_su2` delegating to §5.1. Compression via `_apply_mpo_variational_su2` (§5.2).
+- **`transition`**: plaquette-flip sequential sweep over row pairs, mirroring `_plaquette_sweep_row_pair` in `src/vmc/peps/gi/model.py:1134`. Within a row pair, maintain both *left* and *right* 2-row envs (`L_k^0, R_k^0`) and their single-plaquette-flipped variants (`L_k^1, R_k^1`) — this is the Liu–2021 auxiliary-tensor pattern (App. C, Fig. 10). For each plaquette, propose an outcome drawn uniformly from the non-zero-amplitude outcome list of `Û□+Û†□` (symmetric proposal → no Hastings correction), Metropolis-accept on `|Ψ(s')/Ψ(s)|²` computed via the precomputed envs, update the 4 bricks in place, and advance the left envs. Per-sweep cost `O(N · D⁴ · χ²)` following Liu 2021.
+- **`estimate`**: sweep rows top→bottom; for each row use the same `L_k^{0/1}`, `R_k^{0/1}` envs to compute plaquette matrix elements `⟨s'|Û□+Û†□|s⟩ · Ψ(s')/Ψ(s)` and accumulate `E_loc(S)`. Casimir is diagonal and adds zero-cost per link (§5.5). Gradients `G = (1/Ψ) · ∂Ψ/∂A[r,c][b_id]` accumulate alongside via the same envs (one defect-network pass, same as Liu 2021 Eq. 6). Gradient collection follows `src/vmc/peps/gi/kernels.py:148-170` but indexes into the `N_blocks` axis instead of `Nc`.
 
 ### 5.7 Driver & integrator plumbing
 
@@ -344,11 +294,11 @@ Both share the same sampling / `build_mc_kernels` / `SRPreconditioner` stack.
 
 **Hard invariants — must hold throughout:**
 
-1. **No padding, no mask on stored parameters.** Every `(sector, ι)` pair gets exactly `D⁴` reduced entries in `A[r, c]` — no unused slots, no magnetic multiplets materialized on tensors. Runtime gathers may expose a static `ι_max` axis, with `mode='fill'` producing zeros on unused ι slots; this is a compute pattern, not storage padding.
-2. **Static shapes.** Block counts, sector schedules, outcome lists, coupling tables — all compile-time constants derived from `(group, shape, Qx, D, χ)`.
-3. **`vmap`-friendly end to end.** Outer `vmap` over samples, inner `vmap` over sector axis during QR/env ops. No dict-of-varying-shape pytrees in hot paths.
-4. **QR-only.** No SVD. All compression via `_qr_compactwy` vmapped over sectors.
-5. **Magnetic structure is never tensor data.** `(2j+1)` multiplicities enter only as scalar coupling coefficients (§5.2) precomputed from CG/{6j} tables. No tensor leg in any runtime object carries a magnetic axis.
+1. **No padding, no mask on stored parameters.** Every `(sector, ι)` pair gets exactly `D⁴` reduced entries in `A[r, c]` — `9 D⁴` per bulk site at `j_max=½`. The `ι_max` axis on runtime gathers is a compute pattern (`mode='fill'` zeros unused slots), not storage padding.
+2. **Reduced-only runtime tensors.** Every PEPS brick, boundary-MPS block, and env carries only reduced dims (`D` / `χ`). `(2j+1)` magnetic multiplicities enter only through precomputed scalar amplitudes at contraction time (§5.2) — never as a tensor axis.
+3. **Static shapes.** Block counts, sector schedules, outcome lists, amplitude tables — all compile-time constants derived from `(group, shape, Q_x, D, χ)`.
+4. **`vmap`-friendly end to end.** Outer `vmap` over samples, inner `vmap` over sector axis during QR / env ops. No dict-of-varying-shape pytrees in hot paths.
+5. **QR-only.** No SVD. All compression via `_qr_compactwy` vmapped over sectors.
 
 **MVP simplifications (explicit):**
 
@@ -413,10 +363,10 @@ All non-`slow` tests run under `JAX_PLATFORM_NAME=cpu`, `pytest -m "not slow"`.
 | Risk | Mitigation |
 |------|------------|
 | **CG/{6j} convention errors** (sign / normalization vary between references) | Pin Condon–Shortley in `group.py`; cross-check against `sympy.physics.quantum.cg`; unit tests §8.1. |
-| **Intertwiner basis choice** affects what `ι` means in stored blocks | Fix s-channel tree decomposition (§4.2). Document prominently in `intertwiner.py`. |
+| **Intertwiner basis choice** affects what `ι` means in stored blocks | Fix s-channel tree decomposition (§4.2). Document prominently in `group.py`. |
 | **Plaquette outcome set grows** with `j_max` | Bounded at `j_max=½`; re-evaluate when lifting to `j_max ≥ 1`. |
 | **Sample-space ergodicity** of plaquette-only moves | Verified for open BC + singlet `Q_x=0`; test §8.4. For PBC (not MVP), Polyakov-loop-charged sectors would need additional moves. |
-| **Uniform `D_j` suboptimal at large `j_max`** | Known; deferred. Architecturally: heterogeneous `D_j` lives in `block_ops.py` as a pytree-of-blocks with per-sector `scan`. |
+| **Uniform `D_j` suboptimal at large `j_max`** | Known; deferred. Architecturally: heterogeneous `D_j` replaces stacked-array block storage in `contraction.py` with a pytree-of-blocks + per-sector `scan`. |
 | **GCF derivation** for non-Abelian not in Wu–Liu paper proper | Self-contained derivation in §2 GCF paragraph + doc in `group.py`: reduces to Schur's lemma on the reduced index. |
 | **`_apply_mpo_variational_su2` correctness** vs reference unfolded | Tested via §8.3 `test_su2_block_aware_matches_unfolded`. |
 | **Per-sector QR batching overhead** if block sizes are small | For `j_max=½`, `D≥2` gives blocks `≥ 16` — small but well within GPU batched QR efficiency. Profile during benchmark. |
@@ -441,14 +391,11 @@ All non-`slow` tests run under `JAX_PLATFORM_NAME=cpu`, `pytest -m "not slow"`.
 
 Follow-on implementation plan will cover this in detail. High-level:
 
-1. **`group.py`** (SU2 + CG) — testable in isolation (§8.1).
-2. **`intertwiner.py`** (s-channel basis) — testable (§8.2).
-3. **`block_table.py`** — testable against hand counts (§8.2).
-4. **`model.py` skeleton** (`SU2GIPEPS`, sample flatten/unflatten, `random_physical_configuration`).
-5. **`block_ops.py`** (§5.1 brick assembly, per-sector vmapped QR primitives).
-6. **`contraction.py`** (`_build_row_mpo_su2`, `_apply_mpo_variational_su2`, env ops).
-7. **`local_terms.py`** (`LinkCasimirTerm`, `PlaquetteSU2Term`, outcome table).
-8. **`kernels.py`** (`init_cache`, `transition`, `estimate`).
-9. **Driver plumbing** (one-line `noqa: F401` import).
-10. **Tests §8.1–8.6** in order.
-11. **Benchmark §10**.
+1. **`group.py`** — SU2 + CG + {6j} + intertwiner basis + per-position block table + intertwiner-derived amplitudes. Testable in isolation (§8.1–8.2).
+2. **`model.py` skeleton** — `SU2GIPEPS`, sample flatten/unflatten, `random_physical_configuration`.
+3. **`contraction.py`** — `_build_row_mpo_su2` (§5.1 brick assembly) + `_apply_mpo_variational_su2` (§5.2 per-sector `vmap`ed QR) + env ops.
+4. **`local_terms.py`** — `LinkCasimirTerm`, `PlaquetteSU2Term`, plaquette outcome table (§5.4).
+5. **`kernels.py`** — `init_cache`, `transition`, `estimate` (§5.6).
+6. **Driver plumbing** — one-line `noqa: F401` import.
+7. **Tests §8.1–8.6** in order.
+8. **Benchmark §10**.

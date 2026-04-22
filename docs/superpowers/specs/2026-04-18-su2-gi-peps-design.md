@@ -69,23 +69,25 @@ Intertwiner multiplicity `ι` counts the number of distinct fusions for a given 
 | `(½,½,½,½)`                                       | 1     | 2                 |
 | **total**                                         |       | **9 blocks**      |
 
-Boundary vertices: legs pointing outside the lattice are fixed to `j=0`; block count reduces accordingly (corner = 1, edge = 3 for `j_max=1/2`). Matter (`phys_dim ≥ 2`) or nonzero `Q_x` add additional blocks per vertex; the block table (§4.3) enumerates them uniformly.
+Boundary vertices: legs pointing outside the lattice are fixed to `j=0`; block count reduces accordingly. For `j_max=1/2`: corner has 2 active-leg pairs `{(0,0), (½,½)}` → **2 blocks**; edge has 4 active-leg triples `{(0,0,0), (½,½,0), (½,0,½), (0,½,½)}` → **4 blocks**. Matter (`phys_dim ≥ 2`) or nonzero `Q_x` add additional blocks per vertex; the block table (§4.3) enumerates them uniformly.
 
 ### GCF (why tensors are parameter-economical)
 
 Reduced link tensor factorizes as `B^j_{a_l a_r} = δ_{a_l a_r}` after gauge fixing. Derivation: Schur's lemma forces the bond-gauge freedom $X$ to be `⊕_j X^j` with `X^j ∈ GL(D_j)`; choosing `X^j = (𝓑^j)^{-1/2}` absorbs the full variational content of `B` into the adjacent `A`'s. **Post-GCF, link "tensors" are pure bookkeeping** — they are never stored or indexed; the fact that neighboring `A`'s share the same virtual irrep `j` on a common bond suffices.
 
-### Sampling basis
+### Sampling basis and variational state
 
 A sample `s` consists of:
 - `{j_ℓ}` — integer-labeled irreps per edge (indices into `group.irreps()`),
 - `{p_x}` — matter physical states per vertex (only when `phys_dim ≥ 2`).
 
-Magnetic indices `m` are *not* sampled — they are summed analytically via CG/intertwiner structure folded into the MPO bricks (see §5.1). Intertwiner labels `ι` are *not* sampled — they are summed at brick assembly with precomputed static weights (see §5.2). This is the standard symmetric-tensor "sample the charge, integrate the magnetic" convention.
+Magnetic indices `m` are *not* sampled — they are summed analytically via CG/intertwiner structure folded into the MPO bricks (see §5.1). Intertwiner labels `ι` are *not* sampled — they are consumed at brick assembly via a weighted sum over blocks (see §5.1–§5.2).
+
+**Variational state.** Sampling `{j_ℓ}` without `ι` defines a variational state in the **intertwiner-symmetric subspace** of the gauge-invariant Hilbert space. Define the orthonormal basis `|{j}⟩_sym = (1/√N_ι({j})) Σ_ι |{j}, {ι}⟩`, where `N_ι = ∏_x n_x(tup_x)` is the total intertwiner multiplicity. The correctly normalized amplitude is `Ψ_sym({j}) = ⟨{j}_sym|Ψ⟩ = (1/√N_ι) Σ_ι Ψ({j}, {ι})`. This normalization is achieved by absorbing a `1/√n_x` factor into each vertex's consumption weight (see §5.2), so the brick contraction directly produces `Ψ_sym`. The VMC samples `{j}` with `|Ψ_sym|²` and computes `E_loc` using intertwiner-symmetrized Hamiltonian matrix elements `⟨j_sym|H|j'_sym⟩` (see §5.4). This yields a correct variational upper bound `⟨Φ|H|Φ⟩/⟨Φ|Φ⟩ ≥ E_0` for the state `|Φ⟩ = Σ_j Ψ_sym(j) |j⟩_sym`. All intertwiner blocks contribute through the consumption weights and remain independently optimizable via SR/TDVP.
 
 ### Proposal moves (detailed balance)
 
-**Plaquette-flip move (scheme A, amplitude-weighted):** at plaquette `p` with input irreps `tup_in` on the 4 border links, look up the finite non-zero outcome list `outcomes(tup_in) = {(tup_out, A(tup_out))}` of `Û□ + Û†□` (§5.4). Propose `s'` by sampling outcome `tup_out` with probability `q(s→s') = |A(tup_out)|² / Z(s)` where `Z(s) = Σ_{tup'} |A(tup')|²`. By Hermiticity, `|⟨s'|Û|s⟩|² = |⟨s|Û|s'⟩|²`, but the normalizations differ: `q(s→s') / q(s'→s) = Z(s') / Z(s)`. **A Hastings correction is required.** Accept with
+**Plaquette-flip move (scheme A, amplitude-weighted):** at plaquette `p` with input irreps `tup_in` on the 4 border links, look up the finite non-zero outcome list `outcomes(tup_in) = {(tup_out, A_sym(tup_out))}` of `Û□ + Û†□` (§5.4). The amplitude `A_sym` is the **intertwiner-symmetrized** matrix element — summed over all corner-intertwiner pairs (see §5.4 for the formula). Propose `s'` by sampling outcome `tup_out` with probability `q(s→s') = |A_sym(tup_out)|² / Z(s)` where `Z(s) = Σ_{tup'} |A_sym(tup')|²`. By Hermiticity, `|⟨s'|Û|s⟩|² = |⟨s|Û|s'⟩|²`, but the normalizations differ: `q(s→s') / q(s'→s) = Z(s') / Z(s)`. **A Hastings correction is required.** Accept with
 
 ```
 min(1, |Ψ(s') / Ψ(s)|² · Z(s) / Z(s')).
@@ -126,8 +128,11 @@ Sector-structured bricks require sector-aware contractions, so the `common/` pri
 - `_build_row_mpo_su2` — SU(2) analog of `common/contraction.py:_build_row_mpo`; assembles the reduced-only per-sector brick from the sample, including the matter leg when `phys_dim ≥ 2`.
 - `_apply_mpo_variational_su2` — SU(2) analog of `common/strategy.py:_apply_mpo_variational`; per-sector QR `vmap`ed over a static sector axis. No SVD.
 - `_estimate_sweep_su2` — SU(2) analog of `common/energy.py:_estimate_sweep`; indexing differs because bricks carry sector blocks rather than a single dense tensor.
+- `_contract_bottom_su2` — block-sparse version: left-to-right contraction over bmps sites, summing over compatible bond-sector sequences. Each step is a per-sector einsum; the final result is a scalar (amplitude).
+- `_contract_2row_2col_su2`, `_contract_2row_1col_su2` — block-sparse versions: 2-row environments carry sector structure on bmps bonds. For each compatible sector combination, the einsum has the same structure as the common/ version but operates on per-sector blocks. Sum over compatible sectors yields the scalar window amplitude.
+- `_compute_right_envs_su2`, `_update_left_env_2row_su2` — block-sparse env update: at each column, the env tensor has sector indices on bmps-bond legs (fixed sector on MPO legs from the sample). Each column step is a per-sector einsum vmapped over compatible sector pairs.
 
-`_contract_bottom` / `_contract_2row_2col` / `_contract_2row_1col` are pure einsum reductions on fully-contracted scalars and lift verbatim.
+**No dense fallback.** All contraction primitives in `contraction.py` maintain block-sparsity. The common/ primitives are NOT reused; the SU(2) versions re-implement each operation with explicit sector-axis walking.
 
 **Kernel dispatch registration** follows the pattern in `src/vmc/peps/gi/kernels.py:43` — the driver registers the SU(2) kernel via `import vmc.peps.su2_gi.kernels  # noqa: F401` next to the existing GI registration in `src/vmc/drivers/tdvp.py:32`.
 
@@ -295,10 +300,10 @@ Every runtime object in the pipeline — PEPS brick, boundary-MPS site, left/rig
 **(i) Intertwiner-consumption weight `w[r, c](tup, p, ι)` (§5.1).** This scalar is the result of integrating the vertex's 4-leg (or 5-leg with matter) magnetic-index sum against the shared-bond magnetic-index contributions from the neighboring boundary-MPS, *excluding* the reduced-index contraction. Concretely,
 
 ```
-w[r, c](tup, p, ι) = [∏_ℓ attached to (r,c)  d_{j_ℓ}^{½}]  ·  f_x(tup, p, ι),
+w[r, c](tup, p, ι) = [1/√n_x(tup, p)] · [∏_ℓ attached to (r,c)  d_{j_ℓ}^{½}] · f_x(tup, p, ι),
 ```
 
-where `d_j = 2j + 1` and `f_x(tup, p, ι)` is the vertex-local spin-network value in the orthonormal recursive-binary-fusion basis of §4.2 — a product of `{6j}` (pure gauge) and `{9j}` (matter / nontrivial `Q_x`) symbols assembled by contracting CGs along the canonical s-channel tree. `group.py` computes this generically for any `(j_max, phys_dim, charge_of_site, Q_x)` at model-build time; no per-target hard-coded table.
+where `n_x(tup, p)` is the intertwiner multiplicity at vertex `(r, c)` for leg tuple `tup` and matter state `p`, `d_j = 2j + 1`, and `f_x(tup, p, ι)` is the vertex-local spin-network value in the orthonormal recursive-binary-fusion basis of §4.2. The `1/√n_x` factor ensures the brick contraction `Σ_ι w · A(ι)` directly produces the correctly normalized amplitude `Ψ_sym({j}) = ⟨{j}_sym|Ψ⟩` — no extra normalization at contraction time. `f_x` is a product of `{6j}` (pure gauge) and `{9j}` (matter / nontrivial `Q_x`) symbols assembled by contracting CGs along the canonical s-channel tree. `group.py` computes all three factors generically for any `(j_max, phys_dim, charge_of_site, Q_x)` at model-build time; no per-target hard-coded table.
 
 **(ii) Shared-bond dimension factor.** Each PEPS edge contributes exactly one `d_j` factor to the integrated spin-network value, partitioned as `d_j^{½}` absorbed into each of its two adjacent vertex weights (the `∏_ℓ d_{j_ℓ}^{½}` in §5.2(i)). PEPS edges internal to a row pair are fully accounted for by the two `w`-factors at their endpoints; **no additional edge-scalar** is inserted at contraction time for these. The one exception is edges crossing the boundary between the row-MPO and the boundary-MPS (the shared physical leg `j_p` of the bmps): here only one endpoint is a vertex (in the PEPS bulk); the other endpoint is the bmps site. The bmps side contributes the missing `d_{j_p}^{½}` factor, once per bmps site per row-MPO application. All other bmps virtual bonds are internal to the compressed environment and carry no extra scalar (the environment is pure block-reduced linear algebra).
 
@@ -322,20 +327,27 @@ class PlaquetteSU2Term(TransitionOperator):
 
 Evaluation dispatches on this term (following the `_eval_term` pattern in `src/vmc/peps/gi/model.py:866`). At runtime:
 
-1. **Precomputed outcome enumeration** (at model build). For each allowed plaquette input-irrep tuple `(j_1^{in}, j_2^{in}, j_3^{in}, j_4^{in})` — the 4 links around the plaquette — enumerate the finite set of non-zero output tuples `(j_1^{out}, j_2^{out}, j_3^{out}, j_4^{out})` with matrix element
+1. **Precomputed outcome enumeration** (at model build). For each allowed plaquette input-irrep tuple `(j_1^{in}, j_2^{in}, j_3^{in}, j_4^{in})` — the 4 links around the plaquette — enumerate the finite set of non-zero output tuples `(j_1^{out}, j_2^{out}, j_3^{out}, j_4^{out})`. The enumeration is generic in `j_max`: loop over input tuples allowed by `P_{j_max}`, apply each of the 2⁴ fundamental raise/lower patterns from `Û□` and `Û□†`, drop patterns violating `P_{j_max}`.
 
-   $$\langle s'| \hat U_\square + \hat U_\square^\dagger |s\rangle \;=\; \prod_{\text{corners}} C_{\text{corner}} \cdot \{6j\}_{\text{recoupling}}$$
+   **Intertwiner-symmetrized amplitude.** Since ι is not sampled, the sampling basis is `|{j}⟩_sym = (1/√N_ι) Σ_ι |{j}, {ι}⟩` (equal superposition over all intertwiner configurations). The correct matrix element in this basis is:
 
-   where each `C_corner` is a CG factor at the vertex contracted with the SU(2) fundamental-rep parallel transporter on the two border links meeting at that corner, and the `{6j}` factor arises from recoupling the intertwiner basis when link irreps shift. The enumeration is generic in `j_max`: loop over input tuples allowed by the truncation `P_{j_max}`, apply each of the 2⁴ fundamental raise/lower patterns from `Û□` and `Û□†`, drop patterns that violate `P_{j_max}`, accumulate the CG + {6j} product.
+   ```
+   A_sym(tup_in → tup_out) = [1/√(∏_c n_c(tup_in) · n_c(tup_out))]
+                             × Σ_{ι_corners, ι'_corners} ⟨tup_out, ι'|Û□ + Û†□|tup_in, ι⟩
+   ```
 
-2. **Static table + `lax.switch` dispatch.** Input tuples get integer ids `input_id ∈ [0, N_inputs)`. Each `input_id` has its own compile-time outcome list `outcomes[input_id] = [(tup_out_k, amp_k), …]` of length `n_k = len(outcomes[input_id])` — no padding to `max_outcomes`, no zero-amp slots. At runtime, `jax.lax.switch(input_id, branches)` dispatches to the branch compiled for that input tuple; each branch unrolls exactly its `n_k` outcomes. `Z_table[input_id] = Σ_k |amp_k|²` is the matching proposal-normalization lookup.
+   where `n_c(tup)` is the intertwiner multiplicity at corner `c` for the leg tuple induced by `tup` and the external (non-border) legs at that corner, and the sum runs over all corner-intertwiner pairs. Non-corner intertwiners cancel (they don't change and sum to `δ`). Each bare matrix element `⟨tup_out, ι'|Û|tup_in, ι⟩ = ∏_corners C_corner(ι, ι') · {6j}_recoupling` is a product of CG factors and {6j} symbols at the 4 corners. The sum is bounded by `∏_c n_c(tup_in) × n_c(tup_out)` terms — at most `(ι_max)^{2×4}` — and **precomputed once at model build** from the CG/{6j} tables.
+
+   For `j_max=½`: `ι_max=2`, so at most 256 terms per (input, output) pair. Each term is a product of {6j} symbols — no tensor contraction, pure scalar arithmetic.
+
+2. **Static table + `lax.switch` dispatch.** Input tuples get integer ids `input_id ∈ [0, N_inputs)`. Each `input_id` has its own compile-time outcome list `outcomes[input_id] = [(tup_out_k, amp_sym_k), …]` of length `n_k = len(outcomes[input_id])` — no padding, no zero-amp slots. At runtime, `jax.lax.switch(input_id, branches)` dispatches to the branch for that input tuple; each branch unrolls exactly its `n_k` outcomes. `Z_table[input_id] = Σ_k |amp_sym_k|²` is the matching proposal-normalization lookup.
 
 3. **Runtime evaluation per branch.** For each outcome `k` in the dispatched branch:
    - Rebuild the four updated MPO bricks via §5.1 with the outcome irreps (using the current matter states `{p_x}` at the 4 corners when `phys_dim ≥ 2`).
-   - Evaluate the 2×2 window via `_contract_2row_2col` (reused from `common/contraction.py:90`) using the *updated* bricks against the *current* 2-row envs.
-   - Weight by `amp_k` and sum.
+   - Evaluate the 2×2 window via `_contract_2row_2col_su2` using the *updated* bricks against the *current* block-sparse 2-row envs.
+   - Weight by `amp_sym_k` and sum.
 
-Cost per plaquette term: `O(n_k · contraction_cost)` where `n_k` is the *actual* outcome count for this input tuple (no padded zero-amp slots) — `(2j+1)` magnetic-multiplicity factors already collapsed into `amp_k` (§5.2). Matter-hopping outcome tables (when `phys_dim ≥ 2`) follow the same `lax.switch` pattern keyed by `(tup_in, p_x, p_y)`, mirroring the hopping amplitude pattern in `src/vmc/peps/gi/model.py:677-755`.
+Cost per plaquette term: `O(n_k · contraction_cost)` where `n_k` is the actual outcome count for this input tuple — `(2j+1)` magnetic-multiplicity factors and intertwiner-symmetrization already collapsed into `amp_sym_k` at model build. Matter-hopping outcome tables (when `phys_dim ≥ 2`) follow the same `lax.switch` pattern with analogous intertwiner-symmetrized amplitudes, keyed by `(tup_in, p_x, p_y)`, mirroring `src/vmc/peps/gi/model.py:677-755`.
 
 ### 5.5 Casimir / electric term (`LinkCasimirTerm`)
 
@@ -351,7 +363,7 @@ Mirrors `src/vmc/peps/gi/kernels.py` structure with three differences: (i) block
   2. **Matter hopping + link sweeps** (only when `phys_dim ≥ 2`): horizontal hopping per row, vertical hopping per row pair, and link-charge sweeps as in `_horizontal_link_sweep_row` / `_vertical_link_sweep_row_pair` (`src/vmc/peps/gi/model.py:1196`, `1287`). Each uses its own `_metropolis_hastings_accept` with the appropriate `proposal_ratio`.
 
   Per-sweep cost `O(N · D⁴ · χ²)` following Liu 2021.
-- **`estimate`**: sweep rows top→bottom; at each row, reuse the cached top/bottom envs to evaluate plaquette matrix elements `⟨s'|Û□+Û†□|s⟩ · Ψ(s')/Ψ(s)` (and matter-hopping matrix elements when `phys_dim ≥ 2`), accumulate `E_loc(S)`. Casimir is diagonal and adds zero-cost per link (§5.5). Gradients `G = (1/Ψ) · ∂Ψ/∂A[r,c][flat_id]` accumulate via the same envs in one defect-network pass (Liu 2021 Eq. 6). Gradient collection mirrors `src/vmc/peps/gi/kernels.py:148-170` but scatters into the single flat `total_blocks[r, c]` axis via the same `block_ids[r, c][p, tup]` indices used at brick assembly; no arithmetic index packing.
+- **`estimate`**: sweep rows top→bottom; at each row, reuse the cached block-sparse top/bottom envs to evaluate plaquette matrix elements using the intertwiner-symmetrized amplitudes `amp_sym_k` from §5.4, weighted by `Ψ_CW(s')/Ψ_CW(s)` via `_contract_2row_2col_su2`, accumulate `E_loc(S)`. Casimir is diagonal and adds zero-cost per link (§5.5). Gradients `G = (1/Ψ_CW) · ∂Ψ_CW/∂A[r,c][flat_id]` accumulate via the same block-sparse envs in one defect-network pass (Liu 2021 Eq. 6). Note `∂Ψ_CW/∂A[r,c](ι)` carries the consumption weight `w(ι)` (chain rule through the brick sum). Gradient collection mirrors `src/vmc/peps/gi/kernels.py:148-170` but scatters into the single flat `total_blocks[r, c]` axis via the same `block_ids[r, c][p, tup]` indices used at brick assembly; no arithmetic index packing.
 
 ### 5.7 Driver & integrator plumbing
 
@@ -411,7 +423,7 @@ Organize as `tests/test_su2_gi_*.py`.
 - `test_su2_intertwiner_orthonormal`: `∑_m I^{(ι)} I^{(ι')*} = δ_{ιι'}` per leg tuple, at `j_max ∈ {½, 1}`, `phys_dim ∈ {1, 2}`, `Q_x ∈ {0, ½}`.
 - `test_su2_block_count_vs_counted_enumeration`: `N_blocks[r, c, p]` matches an independent brute-force enumeration of Gauss-compatible `(tup, ι)` pairs for bulk / edge / corner vertices at `j_max ∈ {½, 1}`.
 - `test_su2_weight_w_vs_sympy`: `w[r, c](tup, p, ι)` matches a sympy-based reference (`sympy.physics.quantum.cg`, `sympy.physics.wigner.wigner_6j/9j`) for randomly sampled leg tuples across `j_max ∈ {½, 1}`, `phys_dim ∈ {1, 2}`, `Q_x ∈ {0, ½}`. No hand-tabulated numbers.
-- `test_su2_plaquette_amplitude_vs_sympy`: plaquette outcome amplitudes match an independent sympy CG + `wigner_6j` reference, same parameter grid.
+- `test_su2_plaquette_amplitude_sym_vs_sympy`: intertwiner-symmetrized plaquette amplitudes `A_sym(tup_in → tup_out)` match an independent sympy CG + `wigner_6j` reference that explicitly sums over corner-intertwiner pairs, same parameter grid.
 
 ### 8.3 End-to-end amplitude
 - `test_su2_amplitude_gauge_invariance`: vertex-local SU(2) rotation leaves `|Ψ(s)|²` unchanged on a `2×2` lattice.
@@ -450,6 +462,7 @@ All non-`slow` tests run under `JAX_PLATFORM_NAME=cpu`, `pytest -m "not slow"`.
 | **Uniform `D_j`** suboptimal at large `j_max` | Additive extension: stacked-array → pytree-of-blocks + per-sector `scan`; does not touch enumeration / weight / amplitude machinery. |
 | **GCF derivation** for non-Abelian not in Wu–Liu paper proper | Self-contained Schur's-lemma argument in §2 GCF paragraph + doc in `group.py`. Verify analytically that per-sector `GL(D_j)` gauge freedom on each bond does not absorb any intertwiner freedom (intertwiner lives on the vertex, bond gauge acts on a single leg). |
 | **Intertwiner-consumption weights** `w[r, c](tup, p, ι)` derivation | Closed-form recursive construction (§5.2) from the canonical s-channel tree; cross-checked against an independent sympy CG + `wigner_6j/9j` reference in §8.2 `test_su2_weight_w_vs_sympy` and end-to-end via `test_su2_amplitude_matches_exact_dense` (§8.3). No hand-coded tables. |
+| **Not sampling ι** restricts variational state | The state lives in the intertwiner-symmetric subspace `|{j}⟩_sym` (§2). Plaquette matrix elements use intertwiner-symmetrized amplitudes (§5.4). Variational freedom loss is bounded: `ι_max=2` for `j_max=½` → at most 1 out of 9 bulk blocks constrained. Full expressiveness recoverable by upgrading to ι-sampling later (additive change to sample rep + sweep moves; no structural change to tensors, block tables, or contraction). |
 | **`_apply_mpo_variational_su2` correctness** vs reference unfolded | Tested via §8.3 `test_su2_block_aware_matches_unfolded`. |
 | **Per-sector QR batching overhead** if block sizes are small | For `j_max=½`, `D≥2` gives blocks `≥ 16` — small but well within GPU batched QR efficiency. Profile during benchmark. |
 

@@ -1,15 +1,15 @@
 import jax.numpy as jnp
 
 from vmc.operators.local_terms import LocalHamiltonian, merge_operators, support_span
-from vmc.peps.su2_gi.group import SU2
-from vmc.peps.su2_gi.local_terms import (
+from vmc.peps.non_abelian_gi import (
     HorizontalLinkCasimirTerm,
-    PlaquetteSU2Term,
+    PlaquetteTerm,
     VerticalLinkCasimirTerm,
     build_link_casimir_terms,
     casimir_diagonal,
     link_casimir_energy,
 )
+from vmc.gauge_groups import SU2
 
 
 def test_link_casimir_energy_for_horizontal_and_vertical_terms():
@@ -68,7 +68,7 @@ def test_link_casimir_terms_bucket_as_diagonal_terms():
 
 
 def test_plaquette_su2_term_has_2x2_support_and_buckets_as_transition():
-    term = PlaquetteSU2Term(row=0, col=1)
+    term = PlaquetteTerm(row=0, col=1)
     hamiltonian = LocalHamiltonian(shape=(3, 3), terms=(term,))
 
     bucketed, _coeff_structure = merge_operators((hamiltonian,), (3, 3))

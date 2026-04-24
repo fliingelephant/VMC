@@ -2,17 +2,43 @@ import jax.numpy as jnp
 from flax import nnx
 
 from vmc.peps.common.strategy import NoTruncation
-from vmc.peps.su2_gi.compat import build_row_mpo
-from vmc.peps.su2_gi.model import SU2GIPEPS, SU2GIPEPSConfig
+from vmc.peps.non_abelian_gi import (
+    NonAbelianGIPEPS,
+    NonAbelianGIPEPSConfig,
+    build_row_mpo,
+)
+from vmc.gauge_groups import SU2
 from vmc.utils.utils import random_tensor
 
 
 def test_su2_gipeps_is_exported_from_public_peps_surface():
-    from vmc.peps import SU2GIPEPS as ExportedSU2GIPEPS
-    from vmc.peps import SU2GIPEPSConfig as ExportedSU2GIPEPSConfig
+    from vmc.peps import NonAbelianGIPEPS as ExportedNonAbelianGIPEPS
+    from vmc.peps import NonAbelianGIPEPSConfig as ExportedNonAbelianGIPEPSConfig
 
-    assert ExportedSU2GIPEPS is SU2GIPEPS
-    assert ExportedSU2GIPEPSConfig is SU2GIPEPSConfig
+    assert ExportedNonAbelianGIPEPS is NonAbelianGIPEPS
+    assert ExportedNonAbelianGIPEPSConfig is NonAbelianGIPEPSConfig
+
+
+def test_su2_gipeps_uses_generic_non_abelian_sampled_block_contract():
+    from vmc.peps.non_abelian_gi import (
+        NonAbelianGIPEPS,
+        PlaquetteMatrixTable,
+        PureGaugeTables,
+    )
+
+    model = NonAbelianGIPEPS(
+        rngs=nnx.Rngs(0),
+        config=NonAbelianGIPEPSConfig(
+            shape=(2, 2),
+            gauge_group=SU2(j_max_twice=1),
+            D=2,
+            chi=4,
+        ),
+    )
+
+    assert isinstance(model, NonAbelianGIPEPS)
+    assert isinstance(model.tables, PureGaugeTables)
+    assert isinstance(model.plaquette_matrix_tables[0][0], PlaquetteMatrixTable)
 
 
 def test_su2_kernel_dispatch_is_registered_from_public_peps_surface():
@@ -20,13 +46,18 @@ def test_su2_kernel_dispatch_is_registered_from_public_peps_surface():
     from vmc.peps import build_link_casimir_terms as exported_link_terms
     from vmc.peps import build_mc_kernels
 
-    model = SU2GIPEPS(
+    model = NonAbelianGIPEPS(
         rngs=nnx.Rngs(0),
-        config=SU2GIPEPSConfig(shape=(1, 2), j_max_twice=1, D=2, chi=4),
+        config=NonAbelianGIPEPSConfig(
+            shape=(1, 2),
+            gauge_group=SU2(j_max_twice=1),
+            D=2,
+            chi=4,
+        ),
     )
     operator = LocalHamiltonian(
         shape=model.shape,
-        terms=exported_link_terms(model.shape, model.group),
+        terms=exported_link_terms(model.shape, model.gauge_group),
     )
 
     init_cache, transition, estimate = build_mc_kernels(model, operator)
@@ -37,9 +68,14 @@ def test_su2_kernel_dispatch_is_registered_from_public_peps_surface():
 
 
 def test_su2_gipeps_initializes_boundary_aware_tensor_blocks():
-    model = SU2GIPEPS(
+    model = NonAbelianGIPEPS(
         rngs=nnx.Rngs(0),
-        config=SU2GIPEPSConfig(shape=(3, 3), j_max_twice=1, D=2, chi=4),
+        config=NonAbelianGIPEPSConfig(
+            shape=(3, 3),
+            gauge_group=SU2(j_max_twice=1),
+            D=2,
+            chi=4,
+        ),
     )
 
     assert model.tensors[0][0].get_value().shape == (2, 1, 2, 1, 2)
@@ -50,9 +86,14 @@ def test_su2_gipeps_initializes_boundary_aware_tensor_blocks():
 
 
 def test_su2_gipeps_initial_tensors_are_unbiased_random_blocks():
-    model = SU2GIPEPS(
+    model = NonAbelianGIPEPS(
         rngs=nnx.Rngs(0),
-        config=SU2GIPEPSConfig(shape=(2, 2), j_max_twice=1, D=2, chi=4),
+        config=NonAbelianGIPEPSConfig(
+            shape=(2, 2),
+            gauge_group=SU2(j_max_twice=1),
+            D=2,
+            chi=4,
+        ),
     )
     expected = random_tensor(
         nnx.Rngs(0),
@@ -64,18 +105,28 @@ def test_su2_gipeps_initial_tensors_are_unbiased_random_blocks():
 
 
 def test_su2_gipeps_closes_over_plaquette_link_transition_metadata():
-    model = SU2GIPEPS(
+    model = NonAbelianGIPEPS(
         rngs=nnx.Rngs(0),
-        config=SU2GIPEPSConfig(shape=(2, 2), j_max_twice=1, D=2, chi=4),
+        config=NonAbelianGIPEPSConfig(
+            shape=(2, 2),
+            gauge_group=SU2(j_max_twice=1),
+            D=2,
+            chi=4,
+        ),
     )
 
     assert model.plaquette_link_transitions.outputs(0, 0, 0, 0) == ((1, 1, 1, 1),)
 
 
 def test_su2_gipeps_closes_over_plaquette_matrix_metadata():
-    model = SU2GIPEPS(
+    model = NonAbelianGIPEPS(
         rngs=nnx.Rngs(0),
-        config=SU2GIPEPSConfig(shape=(2, 2), j_max_twice=1, D=2, chi=4),
+        config=NonAbelianGIPEPSConfig(
+            shape=(2, 2),
+            gauge_group=SU2(j_max_twice=1),
+            D=2,
+            chi=4,
+        ),
     )
 
     matrix_table = model.plaquette_matrix_tables[0][0]
@@ -90,8 +141,8 @@ def test_su2_gipeps_flatten_unflatten_roundtrip():
     v_links = jnp.array([[1, 0, 1]], dtype=jnp.int32)
     iotas = jnp.array([[0, 0, 0], [0, 0, 0]], dtype=jnp.int32)
 
-    flat = SU2GIPEPS.flatten_sample(h_links, v_links, iotas)
-    h_next, v_next, iotas_next = SU2GIPEPS.unflatten_sample(flat, shape)
+    flat = NonAbelianGIPEPS.flatten_sample(h_links, v_links, iotas)
+    h_next, v_next, iotas_next = NonAbelianGIPEPS.unflatten_sample(flat, shape)
 
     assert jnp.array_equal(h_next, h_links)
     assert jnp.array_equal(v_next, v_links)
@@ -99,13 +150,18 @@ def test_su2_gipeps_flatten_unflatten_roundtrip():
 
 
 def test_su2_gipeps_all_zero_sample_has_valid_shape_and_dtype():
-    model = SU2GIPEPS(
+    model = NonAbelianGIPEPS(
         rngs=nnx.Rngs(0),
-        config=SU2GIPEPSConfig(shape=(3, 2), j_max_twice=1, D=2, chi=4),
+        config=NonAbelianGIPEPSConfig(
+            shape=(3, 2),
+            gauge_group=SU2(j_max_twice=1),
+            D=2,
+            chi=4,
+        ),
     )
 
     sample = model.all_zero_sample()
-    h_links, v_links, iotas = SU2GIPEPS.unflatten_sample(sample, model.shape)
+    h_links, v_links, iotas = NonAbelianGIPEPS.unflatten_sample(sample, model.shape)
 
     assert sample.dtype == jnp.int32
     assert h_links.shape == (3, 1)
@@ -115,9 +171,14 @@ def test_su2_gipeps_all_zero_sample_has_valid_shape_and_dtype():
 
 
 def test_su2_gipeps_random_physical_configuration_returns_valid_batch():
-    model = SU2GIPEPS(
+    model = NonAbelianGIPEPS(
         rngs=nnx.Rngs(0),
-        config=SU2GIPEPSConfig(shape=(2, 2), j_max_twice=1, D=2, chi=4),
+        config=NonAbelianGIPEPSConfig(
+            shape=(2, 2),
+            gauge_group=SU2(j_max_twice=1),
+            D=2,
+            chi=4,
+        ),
     )
 
     samples = model.random_physical_configuration(
@@ -132,14 +193,19 @@ def test_su2_gipeps_random_physical_configuration_returns_valid_batch():
 
 
 def test_su2_gipeps_active_block_ids_from_sample():
-    model = SU2GIPEPS(
+    model = NonAbelianGIPEPS(
         rngs=nnx.Rngs(0),
-        config=SU2GIPEPSConfig(shape=(2, 2), j_max_twice=1, D=2, chi=4),
+        config=NonAbelianGIPEPSConfig(
+            shape=(2, 2),
+            gauge_group=SU2(j_max_twice=1),
+            D=2,
+            chi=4,
+        ),
     )
     h_links = jnp.array([[1], [1]], dtype=jnp.int32)
     v_links = jnp.array([[1, 1]], dtype=jnp.int32)
     iotas = jnp.zeros((2, 2), dtype=jnp.int32)
-    sample = SU2GIPEPS.flatten_sample(h_links, v_links, iotas)
+    sample = NonAbelianGIPEPS.flatten_sample(h_links, v_links, iotas)
 
     assert jnp.array_equal(
         model.active_block_ids(sample),
@@ -160,32 +226,42 @@ def test_su2_gipeps_active_block_ids_from_sample():
 
 
 def test_su2_gipeps_active_block_ids_reject_invalid_iota():
-    model = SU2GIPEPS(
+    model = NonAbelianGIPEPS(
         rngs=nnx.Rngs(0),
-        config=SU2GIPEPSConfig(shape=(2, 2), j_max_twice=1, D=2, chi=4),
+        config=NonAbelianGIPEPSConfig(
+            shape=(2, 2),
+            gauge_group=SU2(j_max_twice=1),
+            D=2,
+            chi=4,
+        ),
     )
     h_links = jnp.array([[1], [1]], dtype=jnp.int32)
     v_links = jnp.array([[1, 1]], dtype=jnp.int32)
     iotas = jnp.ones((2, 2), dtype=jnp.int32)
 
     try:
-        model.active_block_ids(SU2GIPEPS.flatten_sample(h_links, v_links, iotas))
+        model.active_block_ids(NonAbelianGIPEPS.flatten_sample(h_links, v_links, iotas))
     except ValueError as exc:
-        assert "Invalid SU(2) local block" in str(exc)
+        assert "Invalid non-Abelian local block" in str(exc)
     else:
         raise AssertionError("Expected invalid iota to be rejected.")
 
 
 def test_su2_gipeps_row_mpo_selects_active_blocks_in_common_axis_order():
-    model = SU2GIPEPS(
+    model = NonAbelianGIPEPS(
         rngs=nnx.Rngs(0),
-        config=SU2GIPEPSConfig(shape=(2, 2), j_max_twice=1, D=2, chi=4),
+        config=NonAbelianGIPEPSConfig(
+            shape=(2, 2),
+            gauge_group=SU2(j_max_twice=1),
+            D=2,
+            chi=4,
+        ),
         contraction_strategy=NoTruncation(),
     )
     h_links = jnp.array([[1], [1]], dtype=jnp.int32)
     v_links = jnp.array([[1, 1]], dtype=jnp.int32)
     iotas = jnp.zeros((2, 2), dtype=jnp.int32)
-    sample = SU2GIPEPS.flatten_sample(h_links, v_links, iotas)
+    sample = NonAbelianGIPEPS.flatten_sample(h_links, v_links, iotas)
     tensors = [[jnp.asarray(tensor) for tensor in row] for row in model.tensors]
 
     row_mpo = build_row_mpo(tensors, sample, model.shape, model.tables, row=0)
@@ -200,9 +276,14 @@ def test_su2_gipeps_row_mpo_selects_active_blocks_in_common_axis_order():
 
 
 def test_su2_gipeps_apply_contracts_one_site_selected_block():
-    model = SU2GIPEPS(
+    model = NonAbelianGIPEPS(
         rngs=nnx.Rngs(0),
-        config=SU2GIPEPSConfig(shape=(1, 1), j_max_twice=1, D=2, chi=4),
+        config=NonAbelianGIPEPSConfig(
+            shape=(1, 1),
+            gauge_group=SU2(j_max_twice=1),
+            D=2,
+            chi=4,
+        ),
         contraction_strategy=NoTruncation(),
     )
     tensors = [[jnp.asarray([[[[[3.0 + 2.0j]]]]], dtype=jnp.complex128)]]

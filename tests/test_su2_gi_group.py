@@ -2,14 +2,16 @@ import pytest
 import jax
 import jax.numpy as jnp
 
-from vmc.peps.su2_gi.group import (
-    SU2,
-    build_plaquette_matrix_table,
-    build_plaquette_link_transitions,
-    build_pure_gauge_tables,
+from vmc.gauge_groups import SU2
+from vmc.gauge_groups.su2 import (
     build_pure_gauge_vertex_blocks,
     clebsch_gordan,
     vertex_intertwiner_tensor,
+)
+from vmc.peps.non_abelian_gi import (
+    build_plaquette_link_transitions,
+    build_plaquette_matrix_table,
+    build_pure_gauge_tables,
 )
 
 
@@ -156,7 +158,7 @@ def test_pure_gauge_block_lookup_roundtrip():
 def test_pure_gauge_block_lookup_rejects_invalid_local_state():
     tables = build_pure_gauge_tables(SU2(j_max_twice=1), shape=(3, 3))
 
-    with pytest.raises(ValueError, match="No SU\\(2\\) vertex block"):
+    with pytest.raises(ValueError, match="No vertex block"):
         tables.block_id(1, 1, 1, 0, 0, 0, 0)
     with pytest.raises(IndexError, match="outside shape"):
         tables.block_id(3, 0, 0, 0, 0, 0, 0)
@@ -219,8 +221,9 @@ def test_plaquette_link_transition_topology_is_symmetric():
 
 
 def test_plaquette_matrix_table_has_static_jax_arrays_and_vacuum_outcome():
-    tables = build_pure_gauge_tables(SU2(j_max_twice=1), shape=(2, 2))
-    matrix_table = build_plaquette_matrix_table(tables, row=0, col=0)
+    group = SU2(j_max_twice=1)
+    tables = build_pure_gauge_tables(group, shape=(2, 2))
+    matrix_table = build_plaquette_matrix_table(group, tables, row=0, col=0)
     vacuum_blocks = (
         tables.block_id(0, 0, 0, 0, 0, 0, 0),
         tables.block_id(0, 1, 0, 0, 0, 0, 0),
@@ -241,8 +244,9 @@ def test_plaquette_matrix_table_has_static_jax_arrays_and_vacuum_outcome():
 
 
 def test_plaquette_matrix_table_is_hermitian_for_jmax_half():
-    tables = build_pure_gauge_tables(SU2(j_max_twice=1), shape=(2, 2))
-    matrix_table = build_plaquette_matrix_table(tables, row=0, col=0)
+    group = SU2(j_max_twice=1)
+    tables = build_pure_gauge_tables(group, shape=(2, 2))
+    matrix_table = build_plaquette_matrix_table(group, tables, row=0, col=0)
 
     for tl in range(tables.n_blocks(0, 0)):
         for tr in range(tables.n_blocks(0, 1)):
@@ -266,8 +270,9 @@ def test_plaquette_matrix_table_is_hermitian_for_jmax_half():
 
 
 def test_plaquette_matrix_table_proposal_weights_and_norms_follow_elements():
-    tables = build_pure_gauge_tables(SU2(j_max_twice=1), shape=(2, 2))
-    matrix_table = build_plaquette_matrix_table(tables, row=0, col=0)
+    group = SU2(j_max_twice=1)
+    tables = build_pure_gauge_tables(group, shape=(2, 2))
+    matrix_table = build_plaquette_matrix_table(group, tables, row=0, col=0)
     vacuum_blocks = (0, 0, 0, 0)
 
     element = matrix_table.matrix_elements[vacuum_blocks + (0,)]

@@ -1,4 +1,4 @@
-"""Pure-gauge SU(2) gauge-invariant PEPS model container."""
+"""Generic sampled-block non-Abelian gauge-invariant PEPS model."""
 from __future__ import annotations
 
 import vmc.config  # noqa: F401 - JAX config must be imported first
@@ -12,31 +12,29 @@ from flax import nnx
 
 from vmc.operators.local_terms import support_span
 from vmc.peps.common.strategy import ContractionStrategy, Variational
-from vmc.peps.su2_gi.compat import su2_gi_apply
-from vmc.peps.su2_gi.group import (
-    PureGaugeTables,
-    SU2,
+from vmc.peps.non_abelian_gi.builders import (
     build_plaquette_link_transitions,
     build_plaquette_matrix_tables,
     build_pure_gauge_tables,
 )
+from vmc.peps.non_abelian_gi.contraction import non_abelian_gi_apply
 from vmc.utils.utils import random_tensor
 
 if TYPE_CHECKING:
     from jax.typing import DTypeLike
 
-__all__ = ["SU2GIPEPS", "SU2GIPEPSConfig"]
+__all__ = ["NonAbelianGIPEPS", "NonAbelianGIPEPSConfig"]
 
 
 @dataclass(frozen=True)
-class SU2GIPEPSConfig:
-    """Configuration for the pure-gauge SU(2) GI-PEPS MVP."""
+class NonAbelianGIPEPSConfig:
+    """Configuration for a pure-gauge non-Abelian GI-PEPS."""
 
     shape: tuple[int, int]
-    j_max_twice: int
+    gauge_group: Any
     D: int
     chi: int
-    Qx_twice: Any = 0
+    target_charge: Any = 0
     dtype: "DTypeLike" = jnp.complex128
 
     def __post_init__(self) -> None:
@@ -47,12 +45,10 @@ class SU2GIPEPSConfig:
             raise ValueError("D must be positive.")
         if self.chi <= 0:
             raise ValueError("chi must be positive.")
-        if self.Qx_twice != 0:
-            raise NotImplementedError("Only pure-gauge singlet Qx_twice=0 is supported.")
 
 
-class SU2GIPEPS(nnx.Module):
-    """Pure-gauge SU(2) GI-PEPS with one sampled block per vertex."""
+class NonAbelianGIPEPS(nnx.Module):
+    """Pure-gauge non-Abelian GI-PEPS with one sampled block per vertex."""
 
     tensors: list[list[nnx.Param]] = nnx.data()
 
@@ -60,18 +56,30 @@ class SU2GIPEPS(nnx.Module):
         self,
         *,
         rngs: nnx.Rngs,
-        config: SU2GIPEPSConfig,
+        config: NonAbelianGIPEPSConfig,
         contraction_strategy: ContractionStrategy | None = None,
     ) -> None:
         self.config = config
         self.shape = (int(config.shape[0]), int(config.shape[1]))
-        self.group = SU2(config.j_max_twice)
+        self.gauge_group = config.gauge_group
         self.D = int(config.D)
         self.chi = int(config.chi)
         self.dtype = jnp.dtype(config.dtype)
-        self.tables = build_pure_gauge_tables(self.group, shape=self.shape)
-        self.plaquette_link_transitions = build_plaquette_link_transitions(self.group)
-        self.plaquette_matrix_tables = build_plaquette_matrix_tables(self.tables)
+
+        self.tables = build_pure_gauge_tables(
+            self.gauge_group,
+            shape=self.shape,
+            target_charge=config.target_charge,
+        )
+        self.plaquette_link_transitions = build_plaquette_link_transitions(
+            self.gauge_group
+        )
+        self.plaquette_matrix_tables = build_plaquette_matrix_tables(
+            self.gauge_group,
+            self.tables,
+        )
+        self.random_init_sweeps = int(getattr(self.gauge_group, "random_init_sweeps", 1))
+        self.n_irreps = int(self.tables.block_id_lookup.shape[2])
         if contraction_strategy is None:
             contraction_strategy = Variational(truncate_bond_dimension=self.chi)
         self.strategy = contraction_strategy
@@ -93,7 +101,7 @@ class SU2GIPEPS(nnx.Module):
         self.tensors = [
             [
                 nnx.Param(
-                    self._initial_site_tensor(rngs, self.tables, r, c),
+                    self._initial_site_tensor(rngs, r, c),
                     dtype=self.dtype,
                 )
                 for c in range(n_cols)
@@ -101,7 +109,7 @@ class SU2GIPEPS(nnx.Module):
             for r in range(n_rows)
         ]
 
-    apply = staticmethod(su2_gi_apply)
+    apply = staticmethod(non_abelian_gi_apply)
     eval_span = staticmethod(support_span)
 
     def _site_dims(
@@ -122,14 +130,13 @@ class SU2GIPEPS(nnx.Module):
     def _initial_site_tensor(
         self,
         rngs: nnx.Rngs,
-        tables: PureGaugeTables,
         r: int,
         c: int,
     ) -> jax.Array:
         n_rows, n_cols = self.shape
         return random_tensor(
             rngs,
-            (tables.n_blocks(r, c), *self._site_dims(r, c, n_rows, n_cols)),
+            (self.tables.n_blocks(r, c), *self._site_dims(r, c, n_rows, n_cols)),
             self.dtype,
         ) / jnp.sqrt(self.params_per_site[r * n_cols + c])
 
@@ -176,14 +183,14 @@ class SU2GIPEPS(nnx.Module):
     ) -> jax.Array:
         sample = self.all_zero_sample()
         n_rows, n_cols = self.shape
-        if n_rows < 2 or n_cols < 2 or self.group.j_max_twice == 0:
+        if n_rows < 2 or n_cols < 2 or self.random_init_sweeps <= 0:
             return jnp.broadcast_to(sample, (n_samples, sample.size))
         keys = jax.random.split(key, n_samples)
         return jax.vmap(self._single_random_physical_configuration)(keys)
 
     def _single_random_physical_configuration(self, key: jax.Array) -> jax.Array:
         h_links, v_links, iotas = self.unflatten_sample(self.all_zero_sample(), self.shape)
-        for _ in range(self.group.j_max_twice):
+        for _ in range(self.random_init_sweeps):
             for row in range(self.shape[0] - 1):
                 for col in range(self.shape[1] - 1):
                     key, update_key = jax.random.split(key)
@@ -252,16 +259,16 @@ class SU2GIPEPS(nnx.Module):
         h_links, v_links, iotas = self.unflatten_sample(sample, self.shape)
         if bool(
             jnp.any(h_links < 0)
-            | jnp.any(h_links > self.group.j_max_twice)
+            | jnp.any(h_links >= self.n_irreps)
             | jnp.any(v_links < 0)
-            | jnp.any(v_links > self.group.j_max_twice)
+            | jnp.any(v_links >= self.n_irreps)
             | jnp.any(iotas < 0)
             | jnp.any(iotas >= self.tables.max_iotas)
         ):
-            raise ValueError("Invalid SU(2) local block in sample.")
+            raise ValueError("Invalid non-Abelian local block in sample.")
         block_ids = self._active_block_ids_from_links(h_links, v_links, iotas)
         if bool(jnp.any(block_ids < 0)):
-            raise ValueError("Invalid SU(2) local block in sample.")
+            raise ValueError("Invalid non-Abelian local block in sample.")
         return block_ids
 
     def _active_block_ids_unchecked(self, sample: jax.Array) -> jax.Array:

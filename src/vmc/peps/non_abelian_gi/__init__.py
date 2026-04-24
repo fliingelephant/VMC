@@ -1,47 +1,46 @@
-"""SU(2) gauge-invariant PEPS modules."""
+"""Generic sampled-block non-Abelian gauge-invariant PEPS machinery."""
 from __future__ import annotations
 
-from vmc.peps.su2_gi.group import (
-    PlaquetteLinkTransitions,
-    PlaquetteMatrixTable,
-    PureGaugeTables,
-    SU2,
-    VertexBlock,
+from vmc.peps.non_abelian_gi.builders import (
     build_plaquette_link_transitions,
     build_plaquette_matrix_table,
     build_plaquette_matrix_tables,
     build_pure_gauge_tables,
-    build_pure_gauge_vertex_blocks,
 )
-from vmc.peps.su2_gi.kernels import build_mc_kernels
-from vmc.peps.su2_gi.local_terms import (
+from vmc.peps.non_abelian_gi.contraction import build_row_mpo, non_abelian_gi_apply
+from vmc.peps.non_abelian_gi.kernels import build_mc_kernels
+from vmc.peps.non_abelian_gi.local_terms import (
     HorizontalLinkCasimirTerm,
-    PlaquetteSU2Term,
+    PlaquetteTerm,
     VerticalLinkCasimirTerm,
     build_link_casimir_terms,
     casimir_diagonal,
     link_casimir_energy,
 )
-from vmc.peps.su2_gi.model import SU2GIPEPS, SU2GIPEPSConfig
+from vmc.peps.non_abelian_gi.model import NonAbelianGIPEPS, NonAbelianGIPEPSConfig
+from vmc.peps.non_abelian_gi.tables import (
+    PlaquetteLinkTransitions,
+    PlaquetteMatrixTable,
+    PureGaugeTables,
+)
 
 __all__ = [
     "HorizontalLinkCasimirTerm",
-    "PlaquetteSU2Term",
+    "NonAbelianGIPEPS",
+    "NonAbelianGIPEPSConfig",
     "PlaquetteLinkTransitions",
     "PlaquetteMatrixTable",
+    "PlaquetteTerm",
     "PureGaugeTables",
-    "SU2",
-    "SU2GIPEPS",
-    "SU2GIPEPSConfig",
     "VerticalLinkCasimirTerm",
     "build_link_casimir_terms",
     "build_mc_kernels",
     "build_plaquette_link_transitions",
     "build_plaquette_matrix_table",
     "build_plaquette_matrix_tables",
-    "casimir_diagonal",
-    "VertexBlock",
     "build_pure_gauge_tables",
-    "build_pure_gauge_vertex_blocks",
+    "build_row_mpo",
+    "casimir_diagonal",
     "link_casimir_energy",
+    "non_abelian_gi_apply",
 ]

@@ -1,4 +1,4 @@
-"""SU(2) symmetry metadata for gauge-invariant PEPS."""
+"""Truncated SU(2) gauge-group backend for non-Abelian GI-PEPS."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -7,6 +7,13 @@ import math
 
 import jax
 import jax.numpy as jnp
+
+import vmc.peps.non_abelian_gi.builders as builders
+from vmc.peps.non_abelian_gi.tables import (
+    PlaquetteLinkTransitions,
+    PlaquetteMatrixTable,
+    PureGaugeTables,
+)
 
 
 @dataclass(frozen=True)
@@ -20,6 +27,10 @@ class SU2:
             raise ValueError("j_max_twice must be an integer.")
         if self.j_max_twice < 0:
             raise ValueError("j_max_twice must be non-negative.")
+
+    @property
+    def random_init_sweeps(self) -> int:
+        return self.j_max_twice
 
     def irreps(self) -> tuple[int, ...]:
         """Return link irrep labels inside the Hilbert-space truncation."""
@@ -83,103 +94,6 @@ class VertexBlock:
     j_d: int
     iota: int
     internal_irreps: tuple[int, ...]
-
-
-@dataclass(frozen=True)
-class PureGaugeTables:
-    """Static pure-gauge SU(2) vertex block metadata."""
-
-    group: SU2
-    shape: tuple[int, int]
-    blocks: tuple[tuple[tuple[VertexBlock, ...], ...], ...]
-    _block_ids: tuple[tuple[dict[tuple[int, int, int, int, int], int], ...], ...]
-    max_iotas: int
-    block_id_lookup: jax.Array
-
-    def active_legs(self, r: int, c: int) -> tuple[bool, bool, bool, bool]:
-        """Return active ``(left, up, right, down)`` legs at a site."""
-        self._validate_site(r, c)
-        n_rows, n_cols = self.shape
-        return (c > 0, r > 0, c < n_cols - 1, r < n_rows - 1)
-
-    def n_blocks(self, r: int, c: int) -> int:
-        """Return the number of valid vertex blocks at a site."""
-        self._validate_site(r, c)
-        return len(self.blocks[r][c])
-
-    def block_id(
-        self,
-        r: int,
-        c: int,
-        j_l: int,
-        j_u: int,
-        j_r: int,
-        j_d: int,
-        iota: int,
-    ) -> int:
-        """Return the flat block id for a sampled local spin-network state."""
-        self._validate_site(r, c)
-        key = (j_l, j_u, j_r, j_d, iota)
-        if key not in self._block_ids[r][c]:
-            raise ValueError(f"No SU(2) vertex block for site {(r, c)} and key {key}.")
-        return self._block_ids[r][c][key]
-
-    def _validate_site(self, r: int, c: int) -> None:
-        n_rows, n_cols = self.shape
-        if not (0 <= r < n_rows and 0 <= c < n_cols):
-            raise IndexError(f"Site {(r, c)} is outside shape {self.shape}.")
-
-
-@dataclass(frozen=True)
-class PlaquetteLinkTransitions:
-    """Dense static plaquette-link topology table.
-
-    Link order is ``(top, right, bottom, left)``. The table records candidate
-    output link irreps from fusing each input link with the fundamental.
-    Magnetic matrix elements are intentionally not stored here.
-    """
-
-    output_links: jax.Array
-    counts: jax.Array
-    max_outputs: int
-
-    def outputs(
-        self,
-        j_top: int,
-        j_right: int,
-        j_bottom: int,
-        j_left: int,
-    ) -> tuple[tuple[int, int, int, int], ...]:
-        """Return valid output link tuples for one input plaquette."""
-        count = int(self.counts[j_top, j_right, j_bottom, j_left])
-        links = self.output_links[j_top, j_right, j_bottom, j_left, :count]
-        return tuple(tuple(int(value) for value in row) for row in links)
-
-
-@dataclass(frozen=True)
-class PlaquetteMatrixTable:
-    """Static plaquette matrix elements indexed by four corner block ids."""
-
-    output_links: jax.Array
-    output_iotas: jax.Array
-    output_block_ids: jax.Array
-    matrix_elements: jax.Array
-    proposal_weights: jax.Array
-    proposal_norms: jax.Array
-    counts: jax.Array
-    max_outputs: int
-
-    def find_outcome(
-        self,
-        input_blocks: tuple[int, int, int, int],
-        output_blocks: tuple[int, int, int, int],
-    ) -> int:
-        """Return the outcome slot for ``input_blocks -> output_blocks``."""
-        count = int(self.counts[input_blocks])
-        for out_idx in range(count):
-            if tuple(int(x) for x in self.output_block_ids[input_blocks + (out_idx,)]) == output_blocks:
-                return out_idx
-        return -1
 
 
 def _fuse_untruncated(a_twice: int, b_twice: int) -> tuple[int, ...]:
@@ -321,6 +235,7 @@ def _half_sum(*twice_values: int) -> int:
     return total // 2
 
 
+@builders.build_plaquette_link_transitions.dispatch
 def build_plaquette_link_transitions(group: SU2) -> PlaquetteLinkTransitions:
     """Build static plaquette link-output candidates from fundamental fusion."""
     n_irreps = len(group.irreps())
@@ -359,7 +274,9 @@ def build_plaquette_link_transitions(group: SU2) -> PlaquetteLinkTransitions:
     )
 
 
+@builders.build_plaquette_matrix_table.dispatch
 def build_plaquette_matrix_table(
+    group: SU2,
     tables: PureGaugeTables,
     *,
     row: int,
@@ -370,7 +287,7 @@ def build_plaquette_matrix_table(
     if not (0 <= row < n_rows - 1 and 0 <= col < n_cols - 1):
         raise IndexError(f"Plaquette {(row, col)} is outside shape {tables.shape}.")
 
-    link_transitions = build_plaquette_link_transitions(tables.group)
+    link_transitions = build_plaquette_link_transitions(group)
     site_coords = ((row, col), (row, col + 1), (row + 1, col), (row + 1, col + 1))
     block_counts = tuple(tables.n_blocks(r, c) for r, c in site_coords)
     outcomes_by_input: dict[
@@ -426,14 +343,16 @@ def build_plaquette_matrix_table(
     )
 
 
+@builders.build_plaquette_matrix_tables.dispatch
 def build_plaquette_matrix_tables(
+    group: SU2,
     tables: PureGaugeTables,
 ) -> tuple[tuple[PlaquetteMatrixTable, ...], ...]:
     """Build static plaquette matrix tables for all plaquettes."""
     n_rows, n_cols = tables.shape
     return tuple(
         tuple(
-            build_plaquette_matrix_table(tables, row=row, col=col)
+            build_plaquette_matrix_table(group, tables, row=row, col=col)
             for col in range(n_cols - 1)
         )
         for row in range(n_rows - 1)
@@ -764,13 +683,15 @@ def build_pure_gauge_vertex_blocks(
     return tuple(sorted(blocks))
 
 
+@builders.build_pure_gauge_tables.dispatch
 def build_pure_gauge_tables(
     group: SU2,
     *,
     shape: tuple[int, int],
-    target_twice: int = 0,
+    target_charge: int = 0,
 ) -> PureGaugeTables:
     """Build boundary-aware pure-gauge vertex block tables."""
+    target_twice = int(target_charge)
     n_rows, n_cols = shape
     if n_rows <= 0 or n_cols <= 0:
         raise ValueError("shape must have positive dimensions.")

@@ -5,19 +5,23 @@ import jax.numpy as jnp
 import pytest
 from flax import nnx
 
-import vmc.peps.su2_gi.kernels  # noqa: F401
 from vmc.core import make_mc_sampler
 from vmc.drivers import ImaginaryTimeUnit, TDVPDriver
 from vmc.peps.common.contraction import _contract_bottom
-from vmc.peps.su2_gi.kernels import _plaquette_candidate_samples
+from vmc.peps.non_abelian_gi.kernels import _plaquette_candidate_samples
 from vmc.operators.local_terms import LocalHamiltonian
 from vmc.operators.time_dependent import AffineSchedule, TimeDependentHamiltonian
 from vmc.peps.common.strategy import NoTruncation
 from vmc.preconditioners import DirectSolve, SRPreconditioner, solve_svd
 from vmc.peps.standard.kernels import Cache, Context, build_mc_kernels
-from vmc.peps.su2_gi.contraction import build_row_mpo
-from vmc.peps.su2_gi.local_terms import PlaquetteSU2Term, build_link_casimir_terms
-from vmc.peps.su2_gi.model import SU2GIPEPS, SU2GIPEPSConfig
+from vmc.peps.non_abelian_gi import (
+    NonAbelianGIPEPS,
+    NonAbelianGIPEPSConfig,
+    PlaquetteTerm,
+    build_link_casimir_terms,
+    build_row_mpo,
+)
+from vmc.gauge_groups import SU2
 from vmc.qgt import (
     Jacobian,
     ParameterSpace,
@@ -29,12 +33,27 @@ from vmc.qgt import (
 from vmc.qgt.qgt import _sliced_dense_blocks
 
 
+def _su2_config(
+    *,
+    shape: tuple[int, int],
+    j_max_twice: int,
+    D: int,
+    chi: int,
+) -> NonAbelianGIPEPSConfig:
+    return NonAbelianGIPEPSConfig(
+        shape=shape,
+        gauge_group=SU2(j_max_twice=j_max_twice),
+        D=D,
+        chi=chi,
+    )
+
+
 def _single_cache(cache: Cache) -> Cache:
     return jax.tree_util.tree_map(lambda x: x[0], cache)
 
 
 def _context_for_sample(
-    model: SU2GIPEPS,
+    model: NonAbelianGIPEPS,
     tensors: list[list[jax.Array]],
     sample: jax.Array,
 ) -> Context:
@@ -52,11 +71,11 @@ def _context_for_sample(
     return Context(amp=_contract_bottom(top_env), top_envs=tuple(top_envs))
 
 
-def _active_blocks(model: SU2GIPEPS, sample: jax.Array) -> tuple[int, ...]:
+def _active_blocks(model: NonAbelianGIPEPS, sample: jax.Array) -> tuple[int, ...]:
     return tuple(int(value) for value in model.active_block_ids(sample).reshape(-1))
 
 
-def _weighted_block_tensors(model: SU2GIPEPS) -> list[list[jax.Array]]:
+def _weighted_block_tensors(model: NonAbelianGIPEPS) -> list[list[jax.Array]]:
     return [
         [
             jnp.ones_like(jnp.asarray(tensor))
@@ -70,14 +89,14 @@ def _weighted_block_tensors(model: SU2GIPEPS) -> list[list[jax.Array]]:
 
 
 def _plaquette_candidate_sample(
-    model: SU2GIPEPS,
+    model: NonAbelianGIPEPS,
     sample: jax.Array,
     out_idx: int,
     *,
     row: int = 0,
     col: int = 0,
 ) -> jax.Array:
-    h_links, v_links, iotas = SU2GIPEPS.unflatten_sample(sample, model.shape)
+    h_links, v_links, iotas = NonAbelianGIPEPS.unflatten_sample(sample, model.shape)
     active_blocks = model.active_block_ids(sample)
     input_blocks = (
         int(active_blocks[row, col]),
@@ -98,12 +117,12 @@ def _plaquette_candidate_sample(
         strict=True,
     ):
         iotas = iotas.at[row + dr, col + dc].set(iota)
-    return SU2GIPEPS.flatten_sample(h_links, v_links, iotas)
+    return NonAbelianGIPEPS.flatten_sample(h_links, v_links, iotas)
 
 
-def _valid_samples(model: SU2GIPEPS) -> tuple[jax.Array, ...]:
+def _valid_samples(model: NonAbelianGIPEPS) -> tuple[jax.Array, ...]:
     n_rows, n_cols = model.shape
-    link_irreps = range(model.group.j_max_twice + 1)
+    link_irreps = range(model.gauge_group.j_max_twice + 1)
     samples = []
     for h_values in itertools.product(link_irreps, repeat=n_rows * (n_cols - 1)):
         h_links = jnp.asarray(h_values, dtype=jnp.int32).reshape(
@@ -139,7 +158,7 @@ def _valid_samples(model: SU2GIPEPS) -> tuple[jax.Array, ...]:
                 continue
             for iotas in itertools.product(*iota_choices):
                 samples.append(
-                    SU2GIPEPS.flatten_sample(
+                    NonAbelianGIPEPS.flatten_sample(
                         h_links,
                         v_links,
                         jnp.asarray(iotas, dtype=jnp.int32).reshape(model.shape),
@@ -149,7 +168,7 @@ def _valid_samples(model: SU2GIPEPS) -> tuple[jax.Array, ...]:
 
 
 def _plaquette_transition_probability(
-    model: SU2GIPEPS,
+    model: NonAbelianGIPEPS,
     tensors: list[list[jax.Array]],
     source: jax.Array,
     target: jax.Array,
@@ -187,7 +206,7 @@ def _plaquette_transition_probability(
 
 
 def _exact_pure_gauge_hamiltonian(
-    model: SU2GIPEPS,
+    model: NonAbelianGIPEPS,
     *,
     electric_coeff: float,
     plaquette_coeff: float,
@@ -196,9 +215,9 @@ def _exact_pure_gauge_hamiltonian(
     sample_keys = {tuple(sample.tolist()): idx for idx, sample in enumerate(samples)}
     hamiltonian = jnp.zeros((len(samples), len(samples)), dtype=jnp.complex128)
     for source_idx, sample in enumerate(samples):
-        h_links, v_links, _iotas = SU2GIPEPS.unflatten_sample(sample, model.shape)
+        h_links, v_links, _iotas = NonAbelianGIPEPS.unflatten_sample(sample, model.shape)
         electric = sum(
-            electric_coeff * model.group.casimir(int(link))
+            electric_coeff * model.gauge_group.casimir(int(link))
             for link in (*h_links.reshape(-1), *v_links.reshape(-1))
         )
         hamiltonian = hamiltonian.at[source_idx, source_idx].set(electric)
@@ -229,7 +248,7 @@ def _exact_pure_gauge_hamiltonian(
 
 
 def _loop_state_tensors_from_amplitudes(
-    model: SU2GIPEPS,
+    model: NonAbelianGIPEPS,
     amplitudes: jax.Array,
 ) -> list[list[jax.Array]]:
     root_amplitudes = jnp.exp(0.25 * jnp.log(amplitudes.astype(jnp.complex128)))
@@ -245,20 +264,20 @@ def _loop_state_tensors_from_amplitudes(
 
 
 def test_su2_diagonal_only_kernels_estimate_link_casimir_energy():
-    model = SU2GIPEPS(
+    model = NonAbelianGIPEPS(
         rngs=nnx.Rngs(0),
-        config=SU2GIPEPSConfig(shape=(2, 2), j_max_twice=1, D=2, chi=4),
+        config=_su2_config(shape=(2, 2), j_max_twice=1, D=2, chi=4),
         contraction_strategy=NoTruncation(),
     )
     operator = LocalHamiltonian(
         shape=model.shape,
-        terms=build_link_casimir_terms(model.shape, model.group),
+        terms=build_link_casimir_terms(model.shape, model.gauge_group),
     )
     init_cache, transition, estimate = build_mc_kernels(model, operator)
     h_links = jnp.array([[1], [0]], dtype=jnp.int32)
     v_links = jnp.array([[1, 0]], dtype=jnp.int32)
     iotas = jnp.zeros(model.shape, dtype=jnp.int32)
-    sample = SU2GIPEPS.flatten_sample(h_links, v_links, iotas)
+    sample = NonAbelianGIPEPS.flatten_sample(h_links, v_links, iotas)
     tensors = [[jnp.asarray(tensor) for tensor in row] for row in model.tensors]
 
     cache = init_cache(tensors, jnp.stack([sample]))
@@ -278,18 +297,18 @@ def test_su2_diagonal_only_kernels_estimate_link_casimir_energy():
 
 
 def test_su2_diagonal_only_kernels_apply_static_coefficients():
-    model = SU2GIPEPS(
+    model = NonAbelianGIPEPS(
         rngs=nnx.Rngs(0),
-        config=SU2GIPEPSConfig(shape=(1, 2), j_max_twice=1, D=2, chi=4),
+        config=_su2_config(shape=(1, 2), j_max_twice=1, D=2, chi=4),
         contraction_strategy=NoTruncation(),
     )
     operator = LocalHamiltonian(
         shape=model.shape,
-        terms=build_link_casimir_terms(model.shape, model.group),
+        terms=build_link_casimir_terms(model.shape, model.gauge_group),
         coeffs=(jnp.asarray(2.0),),
     )
     init_cache, transition, estimate = build_mc_kernels(model, operator)
-    sample = SU2GIPEPS.flatten_sample(
+    sample = NonAbelianGIPEPS.flatten_sample(
         jnp.array([[1]], dtype=jnp.int32),
         jnp.zeros((0, 2), dtype=jnp.int32),
         jnp.zeros(model.shape, dtype=jnp.int32),
@@ -309,20 +328,20 @@ def test_su2_diagonal_only_kernels_apply_static_coefficients():
 
 
 def test_su2_diagonal_only_kernels_apply_time_dependent_coefficients():
-    model = SU2GIPEPS(
+    model = NonAbelianGIPEPS(
         rngs=nnx.Rngs(0),
-        config=SU2GIPEPSConfig(shape=(1, 2), j_max_twice=1, D=2, chi=4),
+        config=_su2_config(shape=(1, 2), j_max_twice=1, D=2, chi=4),
         contraction_strategy=NoTruncation(),
     )
     operator = TimeDependentHamiltonian(
         base=LocalHamiltonian(
             shape=model.shape,
-            terms=build_link_casimir_terms(model.shape, model.group),
+            terms=build_link_casimir_terms(model.shape, model.gauge_group),
         ),
         schedule=AffineSchedule(offset=jnp.asarray([1.0]), slope=jnp.asarray([1.0])),
     )
     init_cache, transition, estimate = build_mc_kernels(model, operator)
-    sample = SU2GIPEPS.flatten_sample(
+    sample = NonAbelianGIPEPS.flatten_sample(
         jnp.array([[1]], dtype=jnp.int32),
         jnp.zeros((0, 2), dtype=jnp.int32),
         jnp.zeros(model.shape, dtype=jnp.int32),
@@ -342,14 +361,14 @@ def test_su2_diagonal_only_kernels_apply_time_dependent_coefficients():
 
 
 def test_su2_kernel_estimates_plaquette_term_from_static_matrix_table():
-    model = SU2GIPEPS(
+    model = NonAbelianGIPEPS(
         rngs=nnx.Rngs(0),
-        config=SU2GIPEPSConfig(shape=(2, 2), j_max_twice=1, D=2, chi=4),
+        config=_su2_config(shape=(2, 2), j_max_twice=1, D=2, chi=4),
         contraction_strategy=NoTruncation(),
     )
     operator = LocalHamiltonian(
         shape=model.shape,
-        terms=(PlaquetteSU2Term(row=0, col=0),),
+        terms=(PlaquetteTerm(row=0, col=0),),
     )
 
     _init_cache, _transition, estimate = build_mc_kernels(model, operator)
@@ -362,7 +381,7 @@ def test_su2_kernel_estimates_plaquette_term_from_static_matrix_table():
     h_links = jnp.array([[1], [1]], dtype=jnp.int32)
     v_links = jnp.array([[1, 1]], dtype=jnp.int32)
     iotas = jnp.zeros(model.shape, dtype=jnp.int32)
-    candidate = SU2GIPEPS.flatten_sample(h_links, v_links, iotas)
+    candidate = NonAbelianGIPEPS.flatten_sample(h_links, v_links, iotas)
     matrix_element = model.plaquette_matrix_tables[0][0].matrix_elements[0, 0, 0, 0, 0]
     expected = (
         matrix_element
@@ -374,17 +393,17 @@ def test_su2_kernel_estimates_plaquette_term_from_static_matrix_table():
 
 
 def test_su2_kernel_sums_all_static_plaquette_outcomes():
-    model = SU2GIPEPS(
+    model = NonAbelianGIPEPS(
         rngs=nnx.Rngs(0),
-        config=SU2GIPEPSConfig(shape=(2, 2), j_max_twice=2, D=2, chi=4),
+        config=_su2_config(shape=(2, 2), j_max_twice=2, D=2, chi=4),
         contraction_strategy=NoTruncation(),
     )
     operator = LocalHamiltonian(
         shape=model.shape,
-        terms=(PlaquetteSU2Term(row=0, col=0),),
+        terms=(PlaquetteTerm(row=0, col=0),),
     )
     _init_cache, _transition, estimate = build_mc_kernels(model, operator)
-    sample = SU2GIPEPS.flatten_sample(
+    sample = NonAbelianGIPEPS.flatten_sample(
         jnp.array([[1], [1]], dtype=jnp.int32),
         jnp.array([[1, 1]], dtype=jnp.int32),
         jnp.zeros(model.shape, dtype=jnp.int32),
@@ -410,14 +429,14 @@ def test_su2_kernel_sums_all_static_plaquette_outcomes():
 
 
 def test_su2_transition_sweeps_static_plaquette_proposals():
-    model = SU2GIPEPS(
+    model = NonAbelianGIPEPS(
         rngs=nnx.Rngs(0),
-        config=SU2GIPEPSConfig(shape=(2, 2), j_max_twice=1, D=2, chi=4),
+        config=_su2_config(shape=(2, 2), j_max_twice=1, D=2, chi=4),
         contraction_strategy=NoTruncation(),
     )
     operator = LocalHamiltonian(
         shape=model.shape,
-        terms=(PlaquetteSU2Term(row=0, col=0),),
+        terms=(PlaquetteTerm(row=0, col=0),),
     )
     init_cache, transition, _estimate = build_mc_kernels(model, operator)
     sample = model.all_zero_sample()
@@ -440,14 +459,14 @@ def test_su2_transition_sweeps_static_plaquette_proposals():
 
 
 def test_su2_plaquette_term_is_noop_when_truncation_has_no_output():
-    model = SU2GIPEPS(
+    model = NonAbelianGIPEPS(
         rngs=nnx.Rngs(0),
-        config=SU2GIPEPSConfig(shape=(2, 2), j_max_twice=0, D=2, chi=4),
+        config=_su2_config(shape=(2, 2), j_max_twice=0, D=2, chi=4),
         contraction_strategy=NoTruncation(),
     )
     operator = LocalHamiltonian(
         shape=model.shape,
-        terms=(PlaquetteSU2Term(row=0, col=0),),
+        terms=(PlaquetteTerm(row=0, col=0),),
     )
     init_cache, transition, estimate = build_mc_kernels(model, operator)
     sample = model.all_zero_sample()
@@ -468,9 +487,9 @@ def test_su2_plaquette_term_is_noop_when_truncation_has_no_output():
 
 
 def test_su2_sliced_gradients_reconstruct_full_gradients():
-    model = SU2GIPEPS(
+    model = NonAbelianGIPEPS(
         rngs=nnx.Rngs(0),
-        config=SU2GIPEPSConfig(shape=(2, 2), j_max_twice=1, D=2, chi=4),
+        config=_su2_config(shape=(2, 2), j_max_twice=1, D=2, chi=4),
         contraction_strategy=NoTruncation(),
     )
     operator = LocalHamiltonian(shape=model.shape, terms=())
@@ -515,9 +534,9 @@ def test_su2_sliced_gradients_reconstruct_full_gradients():
 
 
 def test_su2_plaquette_transition_satisfies_exact_detailed_balance_on_2x2():
-    model = SU2GIPEPS(
+    model = NonAbelianGIPEPS(
         rngs=nnx.Rngs(0),
-        config=SU2GIPEPSConfig(shape=(2, 2), j_max_twice=2, D=2, chi=4),
+        config=_su2_config(shape=(2, 2), j_max_twice=2, D=2, chi=4),
         contraction_strategy=NoTruncation(),
     )
     tensors = _weighted_block_tensors(model)
@@ -548,9 +567,9 @@ def test_su2_plaquette_transition_satisfies_exact_detailed_balance_on_2x2():
 
 
 def test_su2_plaquette_transition_graph_is_connected_on_2x2():
-    model = SU2GIPEPS(
+    model = NonAbelianGIPEPS(
         rngs=nnx.Rngs(0),
-        config=SU2GIPEPSConfig(shape=(2, 2), j_max_twice=2, D=2, chi=4),
+        config=_su2_config(shape=(2, 2), j_max_twice=2, D=2, chi=4),
         contraction_strategy=NoTruncation(),
     )
     samples = _valid_samples(model)
@@ -576,9 +595,9 @@ def test_su2_plaquette_transition_graph_is_connected_on_2x2():
 
 
 def test_su2_sliced_qgt_matches_full_qgt_on_2x2():
-    model = SU2GIPEPS(
+    model = NonAbelianGIPEPS(
         rngs=nnx.Rngs(0),
-        config=SU2GIPEPSConfig(shape=(2, 2), j_max_twice=1, D=2, chi=4),
+        config=_su2_config(shape=(2, 2), j_max_twice=1, D=2, chi=4),
         contraction_strategy=NoTruncation(),
     )
     operator = LocalHamiltonian(shape=model.shape, terms=())
@@ -620,15 +639,15 @@ def test_su2_sliced_qgt_matches_full_qgt_on_2x2():
 
 
 def test_su2_local_energy_matches_exact_2x2_hamiltonian_matrix():
-    model = SU2GIPEPS(
+    model = NonAbelianGIPEPS(
         rngs=nnx.Rngs(0),
-        config=SU2GIPEPSConfig(shape=(2, 2), j_max_twice=2, D=2, chi=4),
+        config=_su2_config(shape=(2, 2), j_max_twice=2, D=2, chi=4),
         contraction_strategy=NoTruncation(),
     )
-    electric_terms = build_link_casimir_terms(model.shape, model.group)
+    electric_terms = build_link_casimir_terms(model.shape, model.gauge_group)
     operator = LocalHamiltonian(
         shape=model.shape,
-        terms=(*electric_terms, PlaquetteSU2Term(row=0, col=0)),
+        terms=(*electric_terms, PlaquetteTerm(row=0, col=0)),
         coeffs=(jnp.asarray(0.7),) * len(electric_terms) + (jnp.asarray(-1.2),),
     )
     tensors = _weighted_block_tensors(model)
@@ -653,9 +672,9 @@ def test_su2_local_energy_matches_exact_2x2_hamiltonian_matrix():
 
 
 def test_su2_2x2_ground_state_local_energy_matches_ed():
-    model = SU2GIPEPS(
+    model = NonAbelianGIPEPS(
         rngs=nnx.Rngs(0),
-        config=SU2GIPEPSConfig(shape=(2, 2), j_max_twice=2, D=1, chi=1),
+        config=_su2_config(shape=(2, 2), j_max_twice=2, D=1, chi=1),
         contraction_strategy=NoTruncation(),
     )
     samples, hamiltonian = _exact_pure_gauge_hamiltonian(
@@ -670,8 +689,8 @@ def test_su2_2x2_ground_state_local_energy_matches_ed():
     operator = LocalHamiltonian(
         shape=model.shape,
         terms=(
-            *build_link_casimir_terms(model.shape, model.group),
-            PlaquetteSU2Term(row=0, col=0),
+            *build_link_casimir_terms(model.shape, model.gauge_group),
+            PlaquetteTerm(row=0, col=0),
         ),
         coeffs=(jnp.asarray(0.7),) * 4 + (jnp.asarray(-1.2),),
     )
@@ -684,14 +703,14 @@ def test_su2_2x2_ground_state_local_energy_matches_ed():
 
 
 def test_su2_local_energy_matches_exact_3x3_hamiltonian_matrix():
-    model = SU2GIPEPS(
+    model = NonAbelianGIPEPS(
         rngs=nnx.Rngs(0),
-        config=SU2GIPEPSConfig(shape=(3, 3), j_max_twice=1, D=1, chi=1),
+        config=_su2_config(shape=(3, 3), j_max_twice=1, D=1, chi=1),
         contraction_strategy=NoTruncation(),
     )
-    electric_terms = build_link_casimir_terms(model.shape, model.group)
+    electric_terms = build_link_casimir_terms(model.shape, model.gauge_group)
     plaquette_terms = tuple(
-        PlaquetteSU2Term(row=row, col=col)
+        PlaquetteTerm(row=row, col=col)
         for row in range(model.shape[0] - 1)
         for col in range(model.shape[1] - 1)
     )
@@ -724,9 +743,9 @@ def test_su2_local_energy_matches_exact_3x3_hamiltonian_matrix():
 
 
 def test_su2_3x3_ed_ground_energy_baseline():
-    model = SU2GIPEPS(
+    model = NonAbelianGIPEPS(
         rngs=nnx.Rngs(0),
-        config=SU2GIPEPSConfig(shape=(3, 3), j_max_twice=1, D=1, chi=1),
+        config=_su2_config(shape=(3, 3), j_max_twice=1, D=1, chi=1),
         contraction_strategy=NoTruncation(),
     )
     samples, hamiltonian = _exact_pure_gauge_hamiltonian(
@@ -744,9 +763,9 @@ def test_su2_3x3_ed_ground_energy_baseline():
 def test_su2_3x3_imaginary_time_optimization_approaches_ed_energy():
     electric_coeff = 0.7
     plaquette_coeff = -1.2
-    model = SU2GIPEPS(
+    model = NonAbelianGIPEPS(
         rngs=nnx.Rngs(3),
-        config=SU2GIPEPSConfig(shape=(3, 3), j_max_twice=1, D=2, chi=4),
+        config=_su2_config(shape=(3, 3), j_max_twice=1, D=2, chi=4),
     )
     samples, hamiltonian = _exact_pure_gauge_hamiltonian(
         model,
@@ -754,9 +773,9 @@ def test_su2_3x3_imaginary_time_optimization_approaches_ed_energy():
         plaquette_coeff=plaquette_coeff,
     )
     eigenvalues, _eigenvectors = jnp.linalg.eigh(hamiltonian)
-    electric_terms = build_link_casimir_terms(model.shape, model.group)
+    electric_terms = build_link_casimir_terms(model.shape, model.gauge_group)
     plaquette_terms = tuple(
-        PlaquetteSU2Term(row=row, col=col)
+        PlaquetteTerm(row=row, col=col)
         for row in range(model.shape[0] - 1)
         for col in range(model.shape[1] - 1)
     )
@@ -790,14 +809,14 @@ def test_su2_3x3_imaginary_time_optimization_approaches_ed_energy():
 
 
 def test_su2_kernels_run_through_generic_mc_sampler():
-    model = SU2GIPEPS(
+    model = NonAbelianGIPEPS(
         rngs=nnx.Rngs(0),
-        config=SU2GIPEPSConfig(shape=(2, 2), j_max_twice=1, D=2, chi=4),
+        config=_su2_config(shape=(2, 2), j_max_twice=1, D=2, chi=4),
         contraction_strategy=NoTruncation(),
     )
     operator = LocalHamiltonian(
         shape=model.shape,
-        terms=(*build_link_casimir_terms(model.shape, model.group), PlaquetteSU2Term(row=0, col=0)),
+        terms=(*build_link_casimir_terms(model.shape, model.gauge_group), PlaquetteTerm(row=0, col=0)),
     )
     tensors = _weighted_block_tensors(model)
     samples = model.random_physical_configuration(jax.random.PRNGKey(0), n_samples=2)
@@ -819,9 +838,9 @@ def test_su2_kernels_run_through_generic_mc_sampler():
 
 
 def test_plaquette_candidate_samples_preserve_gauss_law_for_jmax_half_vacuum():
-    model = SU2GIPEPS(
+    model = NonAbelianGIPEPS(
         rngs=nnx.Rngs(0),
-        config=SU2GIPEPSConfig(shape=(2, 2), j_max_twice=1, D=2, chi=4),
+        config=_su2_config(shape=(2, 2), j_max_twice=1, D=2, chi=4),
         contraction_strategy=NoTruncation(),
     )
 
@@ -837,16 +856,16 @@ def test_plaquette_candidate_samples_preserve_gauss_law_for_jmax_half_vacuum():
     h_links = jnp.array([[1], [1]], dtype=jnp.int32)
     v_links = jnp.array([[1, 1]], dtype=jnp.int32)
     iotas = jnp.zeros(model.shape, dtype=jnp.int32)
-    expected = SU2GIPEPS.flatten_sample(h_links, v_links, iotas)
+    expected = NonAbelianGIPEPS.flatten_sample(h_links, v_links, iotas)
 
     assert valid.shape == (1,)
     assert jnp.array_equal(candidates[valid], jnp.stack([expected]))
 
 
 def test_plaquette_candidate_samples_mask_invalid_intertwiner_combinations():
-    model = SU2GIPEPS(
+    model = NonAbelianGIPEPS(
         rngs=nnx.Rngs(0),
-        config=SU2GIPEPSConfig(shape=(3, 3), j_max_twice=1, D=2, chi=4),
+        config=_su2_config(shape=(3, 3), j_max_twice=1, D=2, chi=4),
         contraction_strategy=NoTruncation(),
     )
 

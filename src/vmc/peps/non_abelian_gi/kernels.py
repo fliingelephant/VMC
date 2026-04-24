@@ -1,4 +1,4 @@
-"""SU(2) GI-PEPS kernel dispatch extension for the generic MC sampler."""
+"""Generic kernel dispatch for sampled-block non-Abelian GI-PEPS."""
 from __future__ import annotations
 
 from itertools import product
@@ -20,27 +20,27 @@ from vmc.peps.common.energy import (
     _compute_right_envs_2row,
     _update_left_env_2row,
 )
-from vmc.peps.standard.kernels import Cache, Context, LocalEstimates, build_mc_kernels
-from vmc.peps.su2_gi.contraction import build_row_mpo
-from vmc.peps.su2_gi.local_terms import (
+from vmc.peps.non_abelian_gi.contraction import build_row_mpo
+from vmc.peps.non_abelian_gi.local_terms import (
     HorizontalLinkCasimirTerm,
-    PlaquetteSU2Term,
+    PlaquetteTerm,
     VerticalLinkCasimirTerm,
     link_casimir_energy,
 )
-from vmc.peps.su2_gi.group import (
+from vmc.peps.non_abelian_gi.model import NonAbelianGIPEPS
+from vmc.peps.non_abelian_gi.tables import (
     PlaquetteLinkTransitions,
     PlaquetteMatrixTable,
     PureGaugeTables,
 )
-from vmc.peps.su2_gi.model import SU2GIPEPS
+from vmc.peps.standard.kernels import Cache, Context, LocalEstimates, build_mc_kernels
 from vmc.utils.utils import _hastings_ratio, _metropolis_hastings_accept
 
 __all__ = ["build_mc_kernels"]
 
 
-class SU2TwoRowEnvs(NamedTuple):
-    """Two-row contraction context for SU(2) transition terms."""
+class SpinNetworkTwoRowEnvs(NamedTuple):
+    """Two-row contraction context for plaquette transition terms."""
 
     left_env: jax.Array
     right_envs: list[jax.Array]
@@ -75,7 +75,7 @@ def _plaquette_candidate_samples(
             jnp.zeros((0,), dtype=jnp.bool_),
         )
 
-    h_links, v_links, iotas = SU2GIPEPS.unflatten_sample(sample, shape)
+    h_links, v_links, iotas = NonAbelianGIPEPS.unflatten_sample(sample, shape)
     link_outputs = link_transitions.output_links
     lookup = tables.block_id_lookup
     plaquette_outputs = link_outputs[
@@ -114,7 +114,7 @@ def _plaquette_candidate_samples(
                     >= 0
                 )
             candidates.append(
-                SU2GIPEPS.flatten_sample(
+                NonAbelianGIPEPS.flatten_sample(
                     h_candidate,
                     v_candidate,
                     iota_candidate,
@@ -145,6 +145,34 @@ def _site_block_id(
     ]
 
 
+def _active_block_ids(
+    lookup: jax.Array,
+    sample: jax.Array,
+    shape: tuple[int, int],
+) -> jax.Array:
+    h_links, v_links, iotas = NonAbelianGIPEPS.unflatten_sample(sample, shape)
+    n_rows, n_cols = shape
+    return jnp.stack(
+        [
+            jnp.stack(
+                [
+                    _site_block_id(
+                        lookup,
+                        h_links,
+                        v_links,
+                        iotas,
+                        shape,
+                        row,
+                        col,
+                    )
+                    for col in range(n_cols)
+                ]
+            )
+            for row in range(n_rows)
+        ]
+    )
+
+
 @dispatch
 def _diagonal_energy(
     term: DiagonalOperator,
@@ -152,7 +180,7 @@ def _diagonal_energy(
     v_links: jax.Array,
 ) -> jax.Array:
     del h_links, v_links
-    raise NotImplementedError(f"Unsupported SU(2) diagonal term: {type(term)!r}.")
+    raise NotImplementedError(f"Unsupported non-Abelian diagonal term: {type(term)!r}.")
 
 
 @_diagonal_energy.dispatch
@@ -176,17 +204,17 @@ def _diagonal_energy(
 @dispatch
 def _transition_energy(
     term: TransitionOperator,
-    envs: SU2TwoRowEnvs,
+    envs: SpinNetworkTwoRowEnvs,
     tensors: Any,
 ) -> jax.Array:
     del envs, tensors
-    raise NotImplementedError(f"Unsupported SU(2) transition term: {type(term)!r}.")
+    raise NotImplementedError(f"Unsupported non-Abelian transition term: {type(term)!r}.")
 
 
 @_transition_energy.dispatch
 def _transition_energy(
-    term: PlaquetteSU2Term,
-    envs: SU2TwoRowEnvs,
+    term: PlaquetteTerm,
+    envs: SpinNetworkTwoRowEnvs,
     tensors: Any,
 ) -> jax.Array:
     row, col = term.row, term.col
@@ -443,17 +471,18 @@ def _plaquette_sweep_site(
 
 @build_mc_kernels.dispatch
 def build_mc_kernels(
-    model: SU2GIPEPS,
+    model: NonAbelianGIPEPS,
     operator: object,
     *,
     full_gradient: bool = False,
     observables: tuple = (),
 ) -> tuple[Any, Any, Any]:
-    """Build pure-gauge SU(2) init_cache/transition/estimate kernels."""
+    """Build init_cache/transition/estimate kernels for sampled-block GI-PEPS."""
     shape = model.shape
     n_rows, n_cols = shape
     strategy = model.strategy
     tables = model.tables
+    matrix_tables = model.plaquette_matrix_tables
     all_operators = (operator,) + observables
     bucketed_terms, coeff_structure = merge_operators(
         all_operators,
@@ -477,7 +506,7 @@ def build_mc_kernels(
     )
     if unsupported_transition_spans:
         raise NotImplementedError(
-            "SU(2) transition sweep supports only dr=2 plaquette terms."
+            "Non-Abelian transition sweep supports only dr=2 plaquette terms."
         )
 
     def build_bottom_envs(tensors: Any, sample: jax.Array) -> tuple:
@@ -530,14 +559,17 @@ def build_mc_kernels(
         cache: Cache,
     ) -> tuple[jax.Array, jax.Array, Context]:
         if has_transition_terms:
-            h_links, v_links, iotas = SU2GIPEPS.unflatten_sample(sample, shape)
-            active_block_ids = model._active_block_ids_unchecked(sample)
+            h_links, v_links, iotas = NonAbelianGIPEPS.unflatten_sample(sample, shape)
+            active_block_ids = _active_block_ids(tables.block_id_lookup, sample, shape)
             row_mpos = [
                 build_row_mpo(tensors, sample, shape, tables, row=row)
                 for row in range(n_rows)
             ]
             top_envs = [None] * n_rows
-            top_env = tuple(jnp.ones((1, 1, 1), dtype=tensors[0][0].dtype) for _ in range(n_cols))
+            top_env = tuple(
+                jnp.ones((1, 1, 1), dtype=tensors[0][0].dtype)
+                for _ in range(n_cols)
+            )
             for row in range(n_rows):
                 top_envs[row] = top_env
                 col_terms = transition_cols_by_row[row]
@@ -562,12 +594,12 @@ def build_mc_kernels(
                         top_env,
                         cache.bottom_envs[row + 1],
                         col_terms,
-                        model.plaquette_matrix_tables,
+                        matrix_tables,
                         row=row,
                     )
                 top_env = strategy.apply(top_env, row_mpos[row])
             return (
-                SU2GIPEPS.flatten_sample(h_links, v_links, iotas),
+                NonAbelianGIPEPS.flatten_sample(h_links, v_links, iotas),
                 key,
                 Context(
                     amp=_contract_bottom(top_env),
@@ -583,9 +615,9 @@ def build_mc_kernels(
         sample: jax.Array,
         context: Context,
     ) -> tuple[Cache, LocalEstimates]:
-        h_links, v_links, _iotas = SU2GIPEPS.unflatten_sample(sample, shape)
+        h_links, v_links, _iotas = NonAbelianGIPEPS.unflatten_sample(sample, shape)
         bottom_envs = build_bottom_envs(tensors, sample)
-        active_block_ids = model._active_block_ids_unchecked(sample)
+        active_block_ids = _active_block_ids(tables.block_id_lookup, sample, shape)
         row_mpos = tuple(
             build_row_mpo(tensors, sample, shape, tables, row=r)
             for r in range(n_rows)
@@ -627,7 +659,7 @@ def build_mc_kernels(
                 if row_pass.dr != 2:
                     if any(row_pass.columns):
                         raise NotImplementedError(
-                            "SU(2) transition evaluation supports only dr=2 terms."
+                            "Non-Abelian transition evaluation supports only dr=2 terms."
                         )
                     continue
                 if r >= n_rows - 1:
@@ -643,13 +675,13 @@ def build_mc_kernels(
                 )
                 left_env = jnp.ones((1, 1, 1, 1), dtype=tensors[r][0].dtype)
                 for c in range(n_cols):
-                    envs = SU2TwoRowEnvs(
+                    envs = SpinNetworkTwoRowEnvs(
                         left_env,
                         right_envs,
                         top_env,
                         bottom_env_next,
                         active_block_ids,
-                        model.plaquette_matrix_tables,
+                        matrix_tables,
                     )
                     for column in row_pass.columns[c]:
                         for term, contributions in column.terms:

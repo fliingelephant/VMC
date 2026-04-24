@@ -13,10 +13,13 @@ intertwiner sum creates redundant variational directions.
 
 The implementation split is:
 
-- `src/vmc/peps/su2_gi/group.py`: SU(2) symmetry semantics and static metadata.
+- `src/vmc/gauge_groups/su2.py`: SU(2) symmetry semantics and static metadata.
+- `src/vmc/gauge_groups/su3.py`: fundamental-truncated SU(3) backend using
+  exact low-dimensional invariant tensors.
 - `src/vmc/peps/common/block_sparse.py`: generic scheduled block-sparse linear
   algebra.
-- `src/vmc/peps/su2_gi/`: the SU(2) model, local terms, kernels, and tests.
+- `src/vmc/peps/non_abelian_gi/`: the generic non-Abelian GI-PEPS model, local
+  terms, kernels, and table contract.
 
 The first implementation gate is pure gauge SU(2) Yang-Mills with open
 boundaries. Matter is deferred until the pure-gauge amplitude, sampling,
@@ -93,7 +96,8 @@ the default because it restricts variational expressivity.
 
 - Bosonic matter.
 - Fermionic matter.
-- SU(3) or generic non-Abelian groups.
+- Full SU(3) beyond the fundamental truncation.
+- Other generic non-Abelian or finite-group backends.
 - Heterogeneous reduced dimensions `D_j` and `chi_j`.
 - Refactoring existing `src/vmc/peps/gi/`.
 - Exact hidden-intertwiner marginalization.
@@ -172,21 +176,25 @@ where `block_id` is an allowed local spin-network state
 src/vmc/peps/common/
   block_sparse.py      # generic scheduled dense-block execution
 
-src/vmc/peps/su2_gi/
+src/vmc/peps/non_abelian_gi/
+  builders.py          # typed static metadata builder dispatch
+  tables.py            # group-independent sampled block table containers
+  model.py             # NonAbelianGIPEPS config/module/sample helpers
+  local_terms.py       # generic link Casimir and plaquette term types
+  contraction.py       # active block row-MPO assembly and apply path
+  kernels.py           # generic sampled-block build_mc_kernels dispatch
+
+src/vmc/gauge_groups/
   __init__.py
-  compat.py           # apply/value compatibility surface, row-brick assembly
-  group.py             # SU(2), CG, intertwiners, static tables, schedules
-  model.py             # SU2GIPEPS config/module/sample helpers
-  local_terms.py       # Horizontal/VerticalLinkCasimirTerm, PlaquetteSU2Term,
-                       # outcome tables
-  kernels.py           # build_mc_kernels dispatch
+  su2.py               # SU(2), CG, intertwiners, and typed table builders
+  su3.py               # SU(3) p+q<=1 backend and typed table builders
 ```
 
 No existing Abelian GI code is changed.
 
 ---
 
-## 5. Symmetry Layer: `su2_gi/group.py`
+## 5. Symmetry Layer: `gauge_groups/su2.py`
 
 `group.py` owns the mathematical meaning of sectors and intertwiners. It should
 not perform boundary-MPS compression or environment contraction. It builds the
@@ -509,7 +517,7 @@ sector-labeled virtual layout that uses it.
 
 ---
 
-## 7. Model: `su2_gi/model.py`
+## 7. Model: `non_abelian_gi/model.py`
 
 ### 7.1 Config
 
@@ -517,14 +525,18 @@ Pure-gauge MVP config:
 
 ```python
 @dataclass(frozen=True)
-class SU2GIPEPSConfig:
+class NonAbelianGIPEPSConfig:
     shape: tuple[int, int]
-    j_max_twice: int
+    gauge_group: Any
     D: int
     chi: int
-    Qx_twice: Any = 0
+    target_charge: Any = 0
     dtype: Any = jnp.complex128
 ```
+
+For SU(2), set `gauge_group=SU2(j_max_twice=j_max_twice)`. SU(2)-specific
+fusion and plaquette metadata are registered through typed table-builder
+dispatch, not through an `SU2GIPEPS` model wrapper.
 
 Matter fields are added later by extending the config with `phys_dim` and
 `charge_of_site_twice`. Do not design the pure-gauge implementation around
@@ -544,8 +556,8 @@ after `block_id` follows the existing PEPS convention: `(up, down, left,
 right)`. Open-boundary legs have reduced dimension `1`; active internal legs
 have reduced dimension `D`.
 
-The all-zero irrep block is initialized with a small positive vacuum overlap
-plus noise. Other blocks are initialized with scaled complex Gaussian noise.
+All blocks are initialized with scaled complex Gaussian noise. No physical
+configuration is given a hard-coded variational bias.
 
 ### 7.3 Sample representation
 
@@ -584,7 +596,7 @@ This matches the existing `SlicedJacobian` assumption: one active slice per site
 
 ---
 
-## 8. Kernels: `su2_gi/kernels.py`
+## 8. Kernels: `non_abelian_gi/kernels.py`
 
 `kernels.py` follows the current Abelian pattern: the dispatch function captures
 all static metadata and returns `init_cache`, `transition`, and `estimate`.
@@ -596,7 +608,7 @@ Register:
 ```python
 @build_mc_kernels.dispatch
 def build_mc_kernels(
-    model: SU2GIPEPS,
+    model: NonAbelianGIPEPS,
     operator: object,
     *,
     full_gradient: bool = False,
@@ -716,13 +728,13 @@ Gradients:
 
 ---
 
-## 9. Local Terms: `su2_gi/local_terms.py`
+## 9. Local Terms: `non_abelian_gi/local_terms.py`
 
 Local terms follow the repository's existing operator convention:
 
 - Define operator dataclasses as pytrees when they carry dynamic arrays.
 - Register physical supports with `support_span.dispatch`.
-- Register model-specific evaluation windows with `SU2GIPEPS.eval_span`, falling
+- Register model-specific evaluation windows with `NonAbelianGIPEPS.eval_span`, falling
   back to `support_span` unless a larger reuse window is beneficial.
 - Register typed `_eval_term.dispatch` overloads for SU(2) term types.
 
@@ -741,13 +753,13 @@ link operators: construct them from the model's `SU2` metadata so each term
 stores the static `j(j+1)` diagonal array and can be bucketed by
 `merge_operators` as a diagonal term.
 
-### 9.2 `PlaquetteSU2Term`
+### 9.2 `PlaquetteTerm`
 
 Off-diagonal transition term:
 
 ```python
 @dataclass(frozen=True)
-class PlaquetteSU2Term:
+class PlaquetteTerm:
     row: int
     col: int
 ```
@@ -766,13 +778,13 @@ plaquette term:
 
 ```python
 @support_span.dispatch
-def support_span(_: PlaquetteSU2Term) -> tuple[int, int]:
+def support_span(_: PlaquetteTerm) -> tuple[int, int]:
     return 2, 2
 ```
 
 If future SU(2) terms have physical support smaller than their cheapest
 evaluation window, follow the `BlockadePEPS` pattern: keep `support_span` equal
-to physical support and override `SU2GIPEPS.eval_span` for the contraction
+to physical support and override `NonAbelianGIPEPS.eval_span` for the contraction
 window.
 
 Transition uses the same table for proposal outcomes.
@@ -800,7 +812,7 @@ Hard requirements:
 3. Runtime PEPS and boundary tensors carry reduced dimensions only.
 4. Magnetic-index and recoupling data appear only in static operator tables.
 5. One sampled site selects one tensor block.
-6. Static metadata is built once in `SU2GIPEPS.__init__` and closed over by
+6. Static metadata is built once in `NonAbelianGIPEPS.__init__` and closed over by
    `kernels.py`.
 7. Block-sparse contractions execute static schedules. No dictionaries in hot
    JAX paths.
@@ -876,7 +888,7 @@ Deferred until virtual bonds carry explicit sector labels:
 
 ### Phase 1: SU(2) tables
 
-- Add `su2_gi/group.py`.
+- Add `gauge_groups/su2.py`.
 - Implement integer-irrep `SU2`.
 - Implement CG and fusion tests.
 - Implement canonical intertwiner enumeration.
@@ -885,9 +897,9 @@ Deferred until virtual bonds carry explicit sector labels:
 
 ### Phase 2: Model skeleton
 
-- Add `su2_gi/model.py`.
-- Implement `SU2GIPEPSConfig`.
-- Implement `SU2GIPEPS` tensor initialization.
+- Add `non_abelian_gi/model.py`.
+- Implement `NonAbelianGIPEPSConfig`.
+- Implement `NonAbelianGIPEPS` tensor initialization.
 - Implement sample flatten/unflatten.
 - Implement all-zero electric-vacuum sample.
 - Implement random valid sample generation through table-driven plaquette
@@ -907,26 +919,25 @@ Deferred until virtual bonds carry explicit sector labels:
 - Implement variational QR compression.
 - Test against a dense unfolded contractor on small layouts.
 
-### Phase 4: Compatibility amplitude path
+### Phase 4: Active-block amplitude path
 
 - Implement row-brick assembly as active block gathers.
-- Keep `compat.py` and `SU2GIPEPS.apply` as compatibility/debug surfaces only.
 - Compare compatibility amplitudes against an explicitly unfolded dense
   spin-network contraction on `2x2` and `3x3`.
-- Keep production VMC contractions in `kernels.py`, backed by generic
+- Keep production VMC contractions in `non_abelian_gi/kernels.py`, backed by generic
   block-sparse row-MPO application and Variational QR compression.
 
 ### Phase 5: Local terms and transition tables
 
 - Add typed `HorizontalLinkCasimirTerm` and `VerticalLinkCasimirTerm`.
-- Add `PlaquetteSU2Term`.
+- Add `PlaquetteTerm`.
 - Build plaquette input/output tables.
 - Verify Hermiticity of plaquette matrix elements.
 - Verify every proposed output preserves Gauss law.
 
 ### Phase 6: Kernels
 
-- Add `su2_gi/kernels.py`.
+- Add `non_abelian_gi/kernels.py`.
 - Register typed `build_mc_kernels` dispatch.
 - Implement `init_cache`.
 - Implement pure-gauge plaquette `transition`.
@@ -1042,8 +1053,8 @@ Only after pure gauge passes:
 
 The MVP is successful when:
 
-1. A pure-gauge `SU2GIPEPS` can sample valid spin-network states on open
-   lattices.
+1. A pure-gauge `NonAbelianGIPEPS` with `gauge_group=SU2(...)` or fundamental
+   `gauge_group=SU3(...)` can sample valid spin-network states on open lattices.
 2. Amplitudes match an independent dense unfolded spin-network contraction.
 3. Plaquette transitions preserve Gauss law and satisfy detailed balance.
 4. Sliced gradients match full gradients.

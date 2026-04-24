@@ -1,18 +1,18 @@
-"""Local terms for pure-gauge SU(2) GI-PEPS."""
+"""Generic local terms for sampled pure-gauge non-Abelian GI-PEPS."""
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import jax
 import jax.numpy as jnp
 from plum import dispatch
 
 from vmc.operators.local_terms import DiagonalOperator, TransitionOperator, support_span
-from vmc.peps.su2_gi.group import SU2
 
 __all__ = [
     "HorizontalLinkCasimirTerm",
-    "PlaquetteSU2Term",
+    "PlaquetteTerm",
     "VerticalLinkCasimirTerm",
     "build_link_casimir_terms",
     "casimir_diagonal",
@@ -68,7 +68,7 @@ class VerticalLinkCasimirTerm(DiagonalOperator):
 
 @jax.tree_util.register_pytree_node_class
 @dataclass(frozen=True)
-class PlaquetteSU2Term(TransitionOperator):
+class PlaquetteTerm(TransitionOperator):
     """Magnetic plaquette term on the square with top-left corner ``(row, col)``."""
 
     row: int
@@ -85,7 +85,7 @@ class PlaquetteSU2Term(TransitionOperator):
 
 
 @support_span.dispatch
-def support_span(_: PlaquetteSU2Term) -> tuple[int, int]:
+def support_span(_: PlaquetteTerm) -> tuple[int, int]:
     return 2, 2
 
 
@@ -109,16 +109,16 @@ def link_casimir_energy(
     return term.diag[v_links[term.row, term.col]]
 
 
-def casimir_diagonal(group: SU2) -> jax.Array:
+def casimir_diagonal(group: Any) -> jax.Array:
     return jnp.asarray(
-        tuple(group.casimir(j_twice) for j_twice in group.irreps()),
+        tuple(group.casimir(irrep) for irrep in group.irreps()),
         dtype=jnp.float64,
     )
 
 
 def build_link_casimir_terms(
     shape: tuple[int, int],
-    group: SU2,
+    group: Any,
 ) -> tuple[HorizontalLinkCasimirTerm | VerticalLinkCasimirTerm, ...]:
     """Build one Casimir term for every open-boundary lattice link."""
     n_rows, n_cols = shape

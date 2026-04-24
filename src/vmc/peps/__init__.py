@@ -10,16 +10,16 @@ from vmc.peps.common import (
 )
 from vmc.peps.blockade import BlockadePEPS, BlockadePEPSConfig, random_independent_set, rydberg_hamiltonian
 from vmc.peps.gi import GILocalHamiltonian, GIPEPS, GIPEPSConfig
-from vmc.peps.standard import (
-    PEPS,
-)
-from vmc.peps.su2_gi import (
+from vmc.peps.non_abelian_gi import (
     HorizontalLinkCasimirTerm,
-    PlaquetteSU2Term,
-    SU2GIPEPS,
-    SU2GIPEPSConfig,
+    NonAbelianGIPEPS,
+    NonAbelianGIPEPSConfig,
+    PlaquetteTerm,
     VerticalLinkCasimirTerm,
     build_link_casimir_terms,
+)
+from vmc.peps.standard import (
+    PEPS,
 )
 from vmc.peps.standard.kernels import (
     Cache,
@@ -38,13 +38,13 @@ __all__ = [
     "GIPEPS",
     "GIPEPSConfig",
     "GILocalHamiltonian",
+    "NonAbelianGIPEPS",
+    "NonAbelianGIPEPSConfig",
     "BlockadePEPS",
     "BlockadePEPSConfig",
-    "SU2GIPEPS",
-    "SU2GIPEPSConfig",
     "HorizontalLinkCasimirTerm",
     "VerticalLinkCasimirTerm",
-    "PlaquetteSU2Term",
+    "PlaquetteTerm",
     "build_link_casimir_terms",
     "random_independent_set",
     "rydberg_hamiltonian",

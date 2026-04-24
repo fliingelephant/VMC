@@ -13,6 +13,14 @@ from vmc.peps.gi import GILocalHamiltonian, GIPEPS, GIPEPSConfig
 from vmc.peps.standard import (
     PEPS,
 )
+from vmc.peps.su2_gi import (
+    HorizontalLinkCasimirTerm,
+    PlaquetteSU2Term,
+    SU2GIPEPS,
+    SU2GIPEPSConfig,
+    VerticalLinkCasimirTerm,
+    build_link_casimir_terms,
+)
 from vmc.peps.standard.kernels import (
     Cache,
     Context,
@@ -32,6 +40,12 @@ __all__ = [
     "GILocalHamiltonian",
     "BlockadePEPS",
     "BlockadePEPSConfig",
+    "SU2GIPEPS",
+    "SU2GIPEPSConfig",
+    "HorizontalLinkCasimirTerm",
+    "VerticalLinkCasimirTerm",
+    "PlaquetteSU2Term",
+    "build_link_casimir_terms",
     "random_independent_set",
     "rydberg_hamiltonian",
     "Cache",

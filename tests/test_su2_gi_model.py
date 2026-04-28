@@ -39,6 +39,8 @@ def test_su2_gipeps_uses_generic_non_abelian_sampled_block_contract():
     assert isinstance(model, NonAbelianGIPEPS)
     assert isinstance(model.tables, PureGaugeTables)
     assert isinstance(model.plaquette_matrix_tables[0][0], PlaquetteMatrixTable)
+    assert model.horizontal_hopping_matrix_tables == ((), ())
+    assert model.vertical_hopping_matrix_tables == ((),)
 
 
 def test_su2_kernel_dispatch_is_registered_from_public_peps_surface():
@@ -130,9 +132,18 @@ def test_su2_gipeps_closes_over_plaquette_matrix_metadata():
     )
 
     matrix_table = model.plaquette_matrix_tables[0][0]
+    output_blocks = matrix_table.output_block_ids[
+        matrix_table.flat_index((0, 0, 0, 0), 0)
+    ]
+    output_links = [
+        model.tables.j_r_by_block[0, 0, output_blocks[0]],
+        model.tables.j_d_by_block[0, 1, output_blocks[1]],
+        model.tables.j_r_by_block[1, 0, output_blocks[2]],
+        model.tables.j_d_by_block[0, 0, output_blocks[0]],
+    ]
 
     assert matrix_table.counts[0, 0, 0, 0] == 1
-    assert matrix_table.output_links[0, 0, 0, 0, 0].tolist() == [1, 1, 1, 1]
+    assert [int(value) for value in output_links] == [1, 1, 1, 1]
 
 
 def test_su2_gipeps_flatten_unflatten_roundtrip():
@@ -168,6 +179,47 @@ def test_su2_gipeps_all_zero_sample_has_valid_shape_and_dtype():
     assert v_links.shape == (2, 2)
     assert iotas.shape == (3, 2)
     assert jnp.array_equal(sample, jnp.zeros_like(sample))
+
+
+def test_su2_gipeps_matter_uses_allowed_blocks_not_dense_physical_axis():
+    model = NonAbelianGIPEPS(
+        rngs=nnx.Rngs(0),
+        config=NonAbelianGIPEPSConfig(
+            shape=(1, 2),
+            gauge_group=SU2(j_max_twice=1),
+            D=2,
+            chi=4,
+            phys_dim=2,
+            matter_irreps=(0, 1),
+            matter_numbers=(0, 1),
+            particle_number=2,
+        ),
+    )
+
+    samples = model.random_physical_configuration(
+        jnp.array([0, 1], dtype=jnp.uint32),
+        n_samples=4,
+    )
+    matter, h_links, v_links, iotas = NonAbelianGIPEPS.unflatten_matter_sample(
+        samples[0],
+        model.shape,
+    )
+
+    assert model.tensors[0][0].get_value().shape == (2, 1, 1, 1, 2)
+    assert model.tensors[0][1].get_value().shape == (2, 1, 1, 2, 1)
+    assert model.sliced_dims == (2, 2)
+    assert samples.shape == (4, 5)
+    assert jnp.array_equal(matter, jnp.ones(model.shape, dtype=jnp.int32))
+    assert jnp.array_equal(h_links, jnp.ones((1, 1), dtype=jnp.int32))
+    assert v_links.shape == (0, 2)
+    assert jnp.array_equal(iotas, jnp.zeros(model.shape, dtype=jnp.int32))
+    for sample in samples:
+        matter, _h_links, _v_links, _iotas = NonAbelianGIPEPS.unflatten_matter_sample(
+            sample,
+            model.shape,
+        )
+        assert int(jnp.sum(matter)) == model.particle_number
+        model.active_block_ids(sample)
 
 
 def test_su2_gipeps_random_physical_configuration_returns_valid_batch():

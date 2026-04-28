@@ -19,17 +19,38 @@ def build_row_mpo(
     row: int,
 ) -> tuple[jax.Array, ...]:
     """Build one row MPO by selecting one sampled vertex block per site."""
+    return build_row_mpo_from_lookup(
+        tensors,
+        sample,
+        shape,
+        tables.block_id_lookup,
+        row=row,
+    )
+
+
+def build_row_mpo_from_lookup(
+    tensors: list[list[jax.Array]],
+    sample: jax.Array,
+    shape: tuple[int, int],
+    block_id_lookup: jax.Array,
+    *,
+    row: int,
+) -> tuple[jax.Array, ...]:
+    """Build one row MPO from the closed-over block lookup array."""
     from vmc.peps.non_abelian_gi.model import NonAbelianGIPEPS
 
-    h_links, v_links, iotas = NonAbelianGIPEPS.unflatten_sample(sample, shape)
+    matter, h_links, v_links, iotas = NonAbelianGIPEPS.unflatten_spin_network_sample(
+        sample,
+        shape,
+    )
     n_rows, n_cols = shape
-    lookup = tables.block_id_lookup
     return tuple(
         jnp.transpose(
             tensors[row][c][
-                lookup[
+                block_id_lookup[
                     row,
                     c,
+                    matter[row, c],
                     h_links[row, c - 1] if c > 0 else 0,
                     v_links[row - 1, c] if row > 0 else 0,
                     h_links[row, c] if c < n_cols - 1 else 0,
@@ -59,6 +80,12 @@ def non_abelian_gi_apply(
     for row in range(shape[0]):
         boundary = strategy.apply(
             boundary,
-            build_row_mpo(tensors, sample, shape, tables, row=row),
+            build_row_mpo_from_lookup(
+                tensors,
+                sample,
+                shape,
+                tables.block_id_lookup,
+                row=row,
+            ),
         )
     return _contract_bottom(boundary)

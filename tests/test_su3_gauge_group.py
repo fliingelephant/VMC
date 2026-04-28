@@ -38,8 +38,25 @@ def _plaquette_candidate_sample(
         int(active_blocks[row + 1, col + 1]),
     )
     matrix_table = model.plaquette_matrix_tables[row][col]
-    links = matrix_table.output_links[input_blocks + (out_idx,)]
-    output_iotas = matrix_table.output_iotas[input_blocks + (out_idx,)]
+    output_blocks = matrix_table.output_block_ids[
+        matrix_table.flat_index(input_blocks, out_idx)
+    ]
+    links = jnp.stack(
+        [
+            model.tables.j_r_by_block[row, col, output_blocks[0]],
+            model.tables.j_d_by_block[row, col + 1, output_blocks[1]],
+            model.tables.j_r_by_block[row + 1, col, output_blocks[2]],
+            model.tables.j_d_by_block[row, col, output_blocks[0]],
+        ]
+    )
+    output_iotas = jnp.stack(
+        [
+            model.tables.iota_by_block[row, col, output_blocks[0]],
+            model.tables.iota_by_block[row, col + 1, output_blocks[1]],
+            model.tables.iota_by_block[row + 1, col, output_blocks[2]],
+            model.tables.iota_by_block[row + 1, col + 1, output_blocks[3]],
+        ]
+    )
     h_links = h_links.at[row, col].set(links[0])
     h_links = h_links.at[row + 1, col].set(links[2])
     v_links = v_links.at[row, col + 1].set(links[1])
@@ -73,6 +90,7 @@ def _valid_samples(model: NonAbelianGIPEPS) -> tuple[jax.Array, ...]:
                         block_id = model.tables.block_id_lookup[
                             row,
                             col,
+                            0,
                             h_links[row, col - 1] if col > 0 else 0,
                             v_links[row - 1, col] if row > 0 else 0,
                             h_links[row, col] if col < n_cols - 1 else 0,
@@ -140,7 +158,9 @@ def _exact_pure_gauge_hamiltonian(
                     target_idx = sample_keys[tuple(candidate.tolist())]
                     hamiltonian = hamiltonian.at[target_idx, source_idx].add(
                         plaquette_coeff
-                        * table.matrix_elements[input_blocks + (out_idx,)]
+                        * table.matrix_elements[
+                            table.flat_index(input_blocks, out_idx)
+                        ]
                     )
     return samples, hamiltonian
 
@@ -185,20 +205,31 @@ def test_su3_plaquette_table_connects_vacuum_to_fundamental_loop_and_is_hermitia
     assert int(matrix_table.counts[vacuum_blocks]) > 0
     found_loop = False
     for out_idx in range(int(matrix_table.counts[vacuum_blocks])):
-        if tuple(int(x) for x in matrix_table.output_links[vacuum_blocks + (out_idx,)]) == (
+        output_blocks = matrix_table.output_block_ids[
+            matrix_table.flat_index(vacuum_blocks, out_idx)
+        ]
+        output_links = (
+            int(tables.j_r_by_block[0, 0, output_blocks[0]]),
+            int(tables.j_d_by_block[0, 1, output_blocks[1]]),
+            int(tables.j_r_by_block[1, 0, output_blocks[2]]),
+            int(tables.j_d_by_block[0, 0, output_blocks[0]]),
+        )
+        if output_links == (
             1,
             1,
             2,
             2,
         ):
             found_loop = True
-            output_blocks = tuple(
-                int(x) for x in matrix_table.output_block_ids[vacuum_blocks + (out_idx,)]
-            )
+            output_blocks = tuple(int(x) for x in output_blocks)
             reverse = matrix_table.find_outcome(output_blocks, vacuum_blocks)
             assert reverse >= 0
-            assert matrix_table.matrix_elements[vacuum_blocks + (out_idx,)] == pytest.approx(
-                matrix_table.matrix_elements[output_blocks + (reverse,)]
+            assert matrix_table.matrix_elements[
+                matrix_table.flat_index(vacuum_blocks, out_idx)
+            ] == pytest.approx(
+                matrix_table.matrix_elements[
+                    matrix_table.flat_index(output_blocks, reverse)
+                ]
             )
     assert found_loop
 

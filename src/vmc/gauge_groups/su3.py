@@ -11,6 +11,7 @@ import jax.numpy as jnp
 
 import vmc.peps.non_abelian_gi.builders as builders
 from vmc.peps.non_abelian_gi.tables import (
+    HoppingMatrixTable,
     PlaquetteLinkTransitions,
     PlaquetteMatrixTable,
     PureGaugeTables,
@@ -338,31 +339,35 @@ def build_plaquette_matrix_table(
         outcomes = _plaquette_output_outcomes(group, tables, site_coords, input_blocks, link_transitions)
         outcomes_by_input[input_ids] = outcomes
         max_outputs = max(max_outputs, len(outcomes))
-    output_shape = (*block_counts, max_outputs)
-    output_links = jnp.full((*output_shape, 4), -1, dtype=jnp.int32)
-    output_iotas = jnp.full((*output_shape, 4), -1, dtype=jnp.int32)
-    output_block_ids = jnp.full((*output_shape, 4), -1, dtype=jnp.int32)
-    matrix_elements = jnp.zeros(output_shape, dtype=jnp.complex128)
+    starts = jnp.zeros(block_counts, dtype=jnp.int32)
     counts = jnp.zeros(block_counts, dtype=jnp.int32)
+    total_outputs = sum(len(outcomes) for outcomes in outcomes_by_input.values())
+    output_block_ids = jnp.full((total_outputs, 4), -1, dtype=jnp.int32)
+    matrix_elements = jnp.zeros((total_outputs,), dtype=jnp.complex128)
+    cursor = 0
     for input_ids, outcomes in outcomes_by_input.items():
+        starts = starts.at[input_ids].set(cursor)
         counts = counts.at[input_ids].set(len(outcomes))
         for out_idx, (links, iotas, block_ids, matrix_element) in enumerate(outcomes):
-            slot = input_ids + (out_idx,)
-            output_links = output_links.at[slot].set(jnp.asarray(links, dtype=jnp.int32))
-            output_iotas = output_iotas.at[slot].set(jnp.asarray(iotas, dtype=jnp.int32))
-            output_block_ids = output_block_ids.at[slot].set(jnp.asarray(block_ids, dtype=jnp.int32))
-            matrix_elements = matrix_elements.at[slot].set(matrix_element)
+            del links, iotas
+            output_block_ids = output_block_ids.at[cursor + out_idx].set(jnp.asarray(block_ids, dtype=jnp.int32))
+            matrix_elements = matrix_elements.at[cursor + out_idx].set(matrix_element)
+        cursor += len(outcomes)
     proposal_weights = jnp.abs(matrix_elements) ** 2
-    proposal_norms = jnp.sum(proposal_weights, axis=-1)
+    proposal_norms = jnp.zeros(block_counts, dtype=proposal_weights.dtype)
+    for input_ids, outcomes in outcomes_by_input.items():
+        start = int(starts[input_ids])
+        proposal_norms = proposal_norms.at[input_ids].set(
+            jnp.sum(proposal_weights[start : start + len(outcomes)])
+        )
     return PlaquetteMatrixTable(
-        output_links,
-        output_iotas,
+        starts,
+        counts,
+        max_outputs,
         output_block_ids,
         matrix_elements,
         proposal_weights,
         proposal_norms,
-        counts,
-        max_outputs,
     )
 
 
@@ -376,6 +381,80 @@ def build_plaquette_matrix_tables(
         tuple(
             build_plaquette_matrix_table(group, tables, row=row, col=col)
             for col in range(n_cols - 1)
+        )
+        for row in range(n_rows - 1)
+    )
+
+
+def _empty_hopping_matrix_table(block_counts: tuple[int, int]) -> HoppingMatrixTable:
+    return HoppingMatrixTable(
+        starts=jnp.zeros(block_counts, dtype=jnp.int32),
+        counts=jnp.zeros(block_counts, dtype=jnp.int32),
+        max_count=0,
+        output_block_ids=jnp.full((0, 2), -1, dtype=jnp.int32),
+        matrix_elements=jnp.zeros((0,), dtype=jnp.float64),
+        proposal_weights=jnp.zeros((0,), dtype=jnp.float64),
+        proposal_norms=jnp.zeros(block_counts, dtype=jnp.float64),
+    )
+
+
+@builders.build_horizontal_hopping_matrix_table.dispatch
+def build_horizontal_hopping_matrix_table(
+    group: SU3,
+    tables: PureGaugeTables,
+    *,
+    row: int,
+    col: int,
+) -> HoppingMatrixTable:
+    del group
+    if tables.phys_dim != 1:
+        raise NotImplementedError("SU(3) matter hopping is not implemented yet.")
+    return _empty_hopping_matrix_table(
+        (tables.n_blocks(row, col), tables.n_blocks(row, col + 1))
+    )
+
+
+@builders.build_horizontal_hopping_matrix_tables.dispatch
+def build_horizontal_hopping_matrix_tables(
+    group: SU3,
+    tables: PureGaugeTables,
+) -> tuple[tuple[HoppingMatrixTable, ...], ...]:
+    n_rows, n_cols = tables.shape
+    return tuple(
+        tuple(
+            build_horizontal_hopping_matrix_table(group, tables, row=row, col=col)
+            for col in range(n_cols - 1)
+        )
+        for row in range(n_rows)
+    )
+
+
+@builders.build_vertical_hopping_matrix_table.dispatch
+def build_vertical_hopping_matrix_table(
+    group: SU3,
+    tables: PureGaugeTables,
+    *,
+    row: int,
+    col: int,
+) -> HoppingMatrixTable:
+    del group
+    if tables.phys_dim != 1:
+        raise NotImplementedError("SU(3) matter hopping is not implemented yet.")
+    return _empty_hopping_matrix_table(
+        (tables.n_blocks(row, col), tables.n_blocks(row + 1, col))
+    )
+
+
+@builders.build_vertical_hopping_matrix_tables.dispatch
+def build_vertical_hopping_matrix_tables(
+    group: SU3,
+    tables: PureGaugeTables,
+) -> tuple[tuple[HoppingMatrixTable, ...], ...]:
+    n_rows, n_cols = tables.shape
+    return tuple(
+        tuple(
+            build_vertical_hopping_matrix_table(group, tables, row=row, col=col)
+            for col in range(n_cols)
         )
         for row in range(n_rows - 1)
     )
@@ -581,12 +660,16 @@ def build_pure_gauge_tables(
     *,
     shape: tuple[int, int],
     target_charge: int = 0,
+    matter_irreps: tuple[int, ...] = (0,),
+    matter_numbers: tuple[int, ...] = (0,),
 ) -> PureGaugeTables:
+    if matter_irreps != (0,) or matter_numbers != (0,):
+        raise NotImplementedError("SU(3) matter tables are not implemented yet.")
     n_rows, n_cols = shape
     if n_rows <= 0 or n_cols <= 0:
         raise ValueError("shape must have positive dimensions.")
     rows: list[tuple[tuple[VertexBlock, ...], ...]] = []
-    lookup_rows: list[tuple[dict[tuple[int, int, int, int, int], int], ...]] = []
+    lookup_rows: list[tuple[dict[tuple[int, int, int, int, int, int], int], ...]] = []
     for row_idx in range(n_rows):
         row = []
         lookup_row = []
@@ -605,7 +688,7 @@ def build_pure_gauge_tables(
             row.append(blocks)
             lookup_row.append(
                 {
-                    (block.j_l, block.j_u, block.j_r, block.j_d, block.iota): block_id
+                    (0, block.j_l, block.j_u, block.j_r, block.j_d, block.iota): block_id
                     for block_id, block in enumerate(blocks)
                 }
             )
@@ -619,28 +702,51 @@ def build_pure_gauge_tables(
         for block in blocks
     )
     n_irreps = len(group.irreps())
+    max_blocks = max(len(blocks) for row in blocks_by_site for blocks in row)
     block_id_lookup = jnp.full(
-        (n_rows, n_cols, n_irreps, n_irreps, n_irreps, n_irreps, max_iotas),
+        (n_rows, n_cols, 1, n_irreps, n_irreps, n_irreps, n_irreps, max_iotas),
         -1,
         dtype=jnp.int32,
     )
+    matter_state_by_block = jnp.full((n_rows, n_cols, max_blocks), -1, dtype=jnp.int32)
+    j_l_by_block = jnp.full((n_rows, n_cols, max_blocks), -1, dtype=jnp.int32)
+    j_u_by_block = jnp.full((n_rows, n_cols, max_blocks), -1, dtype=jnp.int32)
+    j_r_by_block = jnp.full((n_rows, n_cols, max_blocks), -1, dtype=jnp.int32)
+    j_d_by_block = jnp.full((n_rows, n_cols, max_blocks), -1, dtype=jnp.int32)
+    iota_by_block = jnp.full((n_rows, n_cols, max_blocks), -1, dtype=jnp.int32)
     for row_idx, row in enumerate(blocks_by_site):
         for col_idx, blocks in enumerate(row):
             for block_id, block in enumerate(blocks):
                 block_id_lookup = block_id_lookup.at[
                     row_idx,
                     col_idx,
+                    0,
                     block.j_l,
                     block.j_u,
                     block.j_r,
                     block.j_d,
                     block.iota,
                 ].set(block_id)
+                matter_state_by_block = matter_state_by_block.at[row_idx, col_idx, block_id].set(0)
+                j_l_by_block = j_l_by_block.at[row_idx, col_idx, block_id].set(block.j_l)
+                j_u_by_block = j_u_by_block.at[row_idx, col_idx, block_id].set(block.j_u)
+                j_r_by_block = j_r_by_block.at[row_idx, col_idx, block_id].set(block.j_r)
+                j_d_by_block = j_d_by_block.at[row_idx, col_idx, block_id].set(block.j_d)
+                iota_by_block = iota_by_block.at[row_idx, col_idx, block_id].set(block.iota)
     return PureGaugeTables(
         group=group,
         shape=shape,
+        phys_dim=1,
+        matter_irreps=(0,),
+        matter_numbers=(0,),
         blocks=blocks_by_site,
         _block_ids=tuple(lookup_rows),
         max_iotas=max_iotas,
         block_id_lookup=block_id_lookup,
+        matter_state_by_block=matter_state_by_block,
+        j_l_by_block=j_l_by_block,
+        j_u_by_block=j_u_by_block,
+        j_r_by_block=j_r_by_block,
+        j_d_by_block=j_d_by_block,
+        iota_by_block=iota_by_block,
     )

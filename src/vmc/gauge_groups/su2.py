@@ -10,6 +10,7 @@ import jax.numpy as jnp
 
 import vmc.peps.non_abelian_gi.builders as builders
 from vmc.peps.non_abelian_gi.tables import (
+    HoppingMatrixTable,
     PlaquetteLinkTransitions,
     PlaquetteMatrixTable,
     PureGaugeTables,
@@ -86,7 +87,7 @@ class SU2:
 
 @dataclass(frozen=True, order=True)
 class VertexBlock:
-    """One pure-gauge vertex block in the sampled spin-network basis."""
+    """One vertex block in the sampled spin-network basis."""
 
     j_l: int
     j_u: int
@@ -94,6 +95,9 @@ class VertexBlock:
     j_d: int
     iota: int
     internal_irreps: tuple[int, ...]
+    matter_state: int = 0
+    matter_irrep: int = 0
+    matter_number: int = 0
 
 
 def _fuse_untruncated(a_twice: int, b_twice: int) -> tuple[int, ...]:
@@ -158,13 +162,20 @@ def clebsch_gordan(
 
 @cache
 def vertex_intertwiner_tensor(block: VertexBlock) -> jnp.ndarray:
-    """Return the canonical oriented four-leg singlet intertwiner tensor.
+    """Return the canonical oriented singlet intertwiner tensor.
 
     Lattice links are oriented right/down. At a vertex, the left/up legs are
-    incoming dual legs and the right/down legs are outgoing legs.
+    incoming dual legs and the right/down legs are outgoing legs. Matter blocks
+    carry one additional matter magnetic axis at the end.
     """
-    if len(block.internal_irreps) != 2:
-        raise ValueError("Pure-gauge vertex blocks must carry two internal irreps.")
+    if len(block.internal_irreps) == 2 and block.matter_irrep == 0:
+        return _pure_vertex_intertwiner_tensor(block)
+    if len(block.internal_irreps) == 3:
+        return _matter_vertex_intertwiner_tensor(block)
+    raise ValueError("Unexpected SU(2) vertex-block fusion path.")
+
+
+def _pure_vertex_intertwiner_tensor(block: VertexBlock) -> jnp.ndarray:
     j_mid, j_pair = block.internal_irreps
     tensor = jnp.zeros(
         (
@@ -194,6 +205,66 @@ def vertex_intertwiner_tensor(block: VertexBlock) -> jnp.ndarray:
                     tensor = tensor.at[l_idx, u_idx, r_idx, d_idx].set(value)
     return jnp.einsum(
         "la,ub,abrd->lurd",
+        _dual_metric(block.j_l),
+        _dual_metric(block.j_u),
+        tensor,
+        optimize=True,
+    )
+
+
+def _matter_vertex_intertwiner_tensor(block: VertexBlock) -> jnp.ndarray:
+    j_mid, j_pair, j_gauge = block.internal_irreps
+    tensor = jnp.zeros(
+        (
+            block.j_l + 1,
+            block.j_u + 1,
+            block.j_r + 1,
+            block.j_d + 1,
+            block.matter_irrep + 1,
+        ),
+        dtype=jnp.float64,
+    )
+    for l_idx, m_l in enumerate(_magnetic_labels(block.j_l)):
+        for u_idx, m_u in enumerate(_magnetic_labels(block.j_u)):
+            for r_idx, m_r in enumerate(_magnetic_labels(block.j_r)):
+                for d_idx, m_d in enumerate(_magnetic_labels(block.j_d)):
+                    for q_idx, m_q in enumerate(_magnetic_labels(block.matter_irrep)):
+                        value = 0.0
+                        for m_mid in _magnetic_labels(j_mid):
+                            for m_pair in _magnetic_labels(j_pair):
+                                for m_gauge in _magnetic_labels(j_gauge):
+                                    value += (
+                                        clebsch_gordan(
+                                            block.j_l, m_l, block.j_u, m_u, j_mid, m_mid
+                                        )
+                                        * clebsch_gordan(
+                                            block.j_r,
+                                            m_r,
+                                            block.j_d,
+                                            m_d,
+                                            j_pair,
+                                            m_pair,
+                                        )
+                                        * clebsch_gordan(
+                                            j_mid,
+                                            m_mid,
+                                            j_pair,
+                                            m_pair,
+                                            j_gauge,
+                                            m_gauge,
+                                        )
+                                        * clebsch_gordan(
+                                            j_gauge,
+                                            m_gauge,
+                                            block.matter_irrep,
+                                            m_q,
+                                            0,
+                                            0,
+                                        )
+                                    )
+                        tensor = tensor.at[l_idx, u_idx, r_idx, d_idx, q_idx].set(value)
+    return jnp.einsum(
+        "la,ub,abrdq->lurdq",
         _dual_metric(block.j_l),
         _dual_metric(block.j_u),
         tensor,
@@ -313,33 +384,37 @@ def build_plaquette_matrix_table(
                     outcomes_by_input[input_ids] = outcomes
                     max_outputs = max(max_outputs, len(outcomes))
 
-    output_shape = (*block_counts, max_outputs)
-    output_links = jnp.full((*output_shape, 4), -1, dtype=jnp.int32)
-    output_iotas = jnp.full((*output_shape, 4), -1, dtype=jnp.int32)
-    output_block_ids = jnp.full((*output_shape, 4), -1, dtype=jnp.int32)
-    matrix_elements = jnp.zeros(output_shape, dtype=jnp.float64)
+    starts = jnp.zeros(block_counts, dtype=jnp.int32)
     counts = jnp.zeros(block_counts, dtype=jnp.int32)
+    total_outputs = sum(len(outcomes) for outcomes in outcomes_by_input.values())
+    output_block_ids = jnp.full((total_outputs, 4), -1, dtype=jnp.int32)
+    matrix_elements = jnp.zeros((total_outputs,), dtype=jnp.float64)
+    cursor = 0
     for input_ids, outcomes in outcomes_by_input.items():
+        starts = starts.at[input_ids].set(cursor)
         counts = counts.at[input_ids].set(len(outcomes))
         for out_idx, (links, iotas, block_ids, matrix_element) in enumerate(outcomes):
-            slot = input_ids + (out_idx,)
-            output_links = output_links.at[slot].set(jnp.asarray(links, dtype=jnp.int32))
-            output_iotas = output_iotas.at[slot].set(jnp.asarray(iotas, dtype=jnp.int32))
-            output_block_ids = output_block_ids.at[slot].set(
+            del links, iotas
+            output_block_ids = output_block_ids.at[cursor + out_idx].set(
                 jnp.asarray(block_ids, dtype=jnp.int32)
             )
-            matrix_elements = matrix_elements.at[slot].set(matrix_element)
+            matrix_elements = matrix_elements.at[cursor + out_idx].set(matrix_element)
+        cursor += len(outcomes)
     proposal_weights = jnp.abs(matrix_elements) ** 2
-    proposal_norms = jnp.sum(proposal_weights, axis=-1)
+    proposal_norms = jnp.zeros(block_counts, dtype=proposal_weights.dtype)
+    for input_ids, outcomes in outcomes_by_input.items():
+        start = int(starts[input_ids])
+        proposal_norms = proposal_norms.at[input_ids].set(
+            jnp.sum(proposal_weights[start : start + len(outcomes)])
+        )
     return PlaquetteMatrixTable(
-        output_links=output_links,
-        output_iotas=output_iotas,
+        starts=starts,
+        counts=counts,
+        max_count=max_outputs,
         output_block_ids=output_block_ids,
         matrix_elements=matrix_elements,
         proposal_weights=proposal_weights,
         proposal_norms=proposal_norms,
-        counts=counts,
-        max_outputs=max_outputs,
     )
 
 
@@ -357,6 +432,320 @@ def build_plaquette_matrix_tables(
         )
         for row in range(n_rows - 1)
     )
+
+
+def _empty_hopping_matrix_table(block_counts: tuple[int, int]) -> HoppingMatrixTable:
+    return HoppingMatrixTable(
+        starts=jnp.zeros(block_counts, dtype=jnp.int32),
+        counts=jnp.zeros(block_counts, dtype=jnp.int32),
+        max_count=0,
+        output_block_ids=jnp.full((0, 2), -1, dtype=jnp.int32),
+        matrix_elements=jnp.zeros((0,), dtype=jnp.float64),
+        proposal_weights=jnp.zeros((0,), dtype=jnp.float64),
+        proposal_norms=jnp.zeros(block_counts, dtype=jnp.float64),
+    )
+
+
+@builders.build_horizontal_hopping_matrix_table.dispatch
+def build_horizontal_hopping_matrix_table(
+    group: SU2,
+    tables: PureGaugeTables,
+    *,
+    row: int,
+    col: int,
+) -> HoppingMatrixTable:
+    n_rows, n_cols = tables.shape
+    if not (0 <= row < n_rows and 0 <= col < n_cols - 1):
+        raise IndexError(f"Horizontal link {(row, col)} is outside shape {tables.shape}.")
+    site_coords = ((row, col), (row, col + 1))
+    return _build_hopping_matrix_table(
+        group,
+        tables,
+        site_coords,
+        orientation="h",
+    )
+
+
+@builders.build_horizontal_hopping_matrix_tables.dispatch
+def build_horizontal_hopping_matrix_tables(
+    group: SU2,
+    tables: PureGaugeTables,
+) -> tuple[tuple[HoppingMatrixTable, ...], ...]:
+    n_rows, n_cols = tables.shape
+    return tuple(
+        tuple(
+            build_horizontal_hopping_matrix_table(group, tables, row=row, col=col)
+            for col in range(n_cols - 1)
+        )
+        for row in range(n_rows)
+    )
+
+
+@builders.build_vertical_hopping_matrix_table.dispatch
+def build_vertical_hopping_matrix_table(
+    group: SU2,
+    tables: PureGaugeTables,
+    *,
+    row: int,
+    col: int,
+) -> HoppingMatrixTable:
+    n_rows, n_cols = tables.shape
+    if not (0 <= row < n_rows - 1 and 0 <= col < n_cols):
+        raise IndexError(f"Vertical link {(row, col)} is outside shape {tables.shape}.")
+    site_coords = ((row, col), (row + 1, col))
+    return _build_hopping_matrix_table(
+        group,
+        tables,
+        site_coords,
+        orientation="v",
+    )
+
+
+@builders.build_vertical_hopping_matrix_tables.dispatch
+def build_vertical_hopping_matrix_tables(
+    group: SU2,
+    tables: PureGaugeTables,
+) -> tuple[tuple[HoppingMatrixTable, ...], ...]:
+    n_rows, n_cols = tables.shape
+    return tuple(
+        tuple(
+            build_vertical_hopping_matrix_table(group, tables, row=row, col=col)
+            for col in range(n_cols)
+        )
+        for row in range(n_rows - 1)
+    )
+
+
+def _build_hopping_matrix_table(
+    group: SU2,
+    tables: PureGaugeTables,
+    site_coords: tuple[tuple[int, int], tuple[int, int]],
+    *,
+    orientation: str,
+) -> HoppingMatrixTable:
+    if tables.phys_dim == 1:
+        block_counts = tuple(tables.n_blocks(r, c) for r, c in site_coords)
+        return _empty_hopping_matrix_table(block_counts)
+    block_counts = tuple(tables.n_blocks(r, c) for r, c in site_coords)
+    outcomes_by_input: dict[
+        tuple[int, int],
+        list[tuple[tuple[int, int], float]],
+    ] = {}
+    max_outputs = 0
+    for first_id in range(block_counts[0]):
+        for second_id in range(block_counts[1]):
+            input_ids = (first_id, second_id)
+            input_blocks = _link_blocks(tables, site_coords, input_ids)
+            if not _hopping_input_consistent(input_blocks, orientation=orientation):
+                outcomes_by_input[input_ids] = []
+                continue
+            outcomes = _hopping_output_outcomes(
+                group,
+                tables,
+                site_coords,
+                input_blocks,
+                orientation=orientation,
+            )
+            outcomes_by_input[input_ids] = outcomes
+            max_outputs = max(max_outputs, len(outcomes))
+
+    starts = jnp.zeros(block_counts, dtype=jnp.int32)
+    counts = jnp.zeros(block_counts, dtype=jnp.int32)
+    total_outputs = sum(len(outcomes) for outcomes in outcomes_by_input.values())
+    output_block_ids = jnp.full((total_outputs, 2), -1, dtype=jnp.int32)
+    matrix_elements = jnp.zeros((total_outputs,), dtype=jnp.float64)
+    cursor = 0
+    for input_ids, outcomes in outcomes_by_input.items():
+        starts = starts.at[input_ids].set(cursor)
+        counts = counts.at[input_ids].set(len(outcomes))
+        for out_idx, (block_ids, matrix_element) in enumerate(outcomes):
+            output_block_ids = output_block_ids.at[cursor + out_idx].set(
+                jnp.asarray(block_ids, dtype=jnp.int32)
+            )
+            matrix_elements = matrix_elements.at[cursor + out_idx].set(matrix_element)
+        cursor += len(outcomes)
+    proposal_weights = jnp.abs(matrix_elements) ** 2
+    proposal_norms = jnp.zeros(block_counts, dtype=proposal_weights.dtype)
+    for input_ids, outcomes in outcomes_by_input.items():
+        start = int(starts[input_ids])
+        proposal_norms = proposal_norms.at[input_ids].set(
+            jnp.sum(proposal_weights[start : start + len(outcomes)])
+        )
+    return HoppingMatrixTable(
+        starts=starts,
+        counts=counts,
+        max_count=max_outputs,
+        output_block_ids=output_block_ids,
+        matrix_elements=matrix_elements,
+        proposal_weights=proposal_weights,
+        proposal_norms=proposal_norms,
+    )
+
+
+def _link_blocks(
+    tables: PureGaugeTables,
+    site_coords: tuple[tuple[int, int], tuple[int, int]],
+    block_ids: tuple[int, int],
+) -> tuple[VertexBlock, VertexBlock]:
+    return tuple(
+        tables.blocks[r][c][block_id]
+        for (r, c), block_id in zip(site_coords, block_ids, strict=True)
+    )
+
+
+def _hopping_input_consistent(
+    blocks: tuple[VertexBlock, VertexBlock],
+    *,
+    orientation: str,
+) -> bool:
+    first, second = blocks
+    if orientation == "h":
+        return first.j_r == second.j_l
+    return first.j_d == second.j_u
+
+
+def _hopping_output_outcomes(
+    group: SU2,
+    tables: PureGaugeTables,
+    site_coords: tuple[tuple[int, int], tuple[int, int]],
+    input_blocks: tuple[VertexBlock, VertexBlock],
+    *,
+    orientation: str,
+) -> list[tuple[tuple[int, int], float]]:
+    first, second = input_blocks
+    input_link = first.j_r if orientation == "h" else first.j_d
+    outcomes = []
+    for output_link in group.fundamental_link_outputs(input_link):
+        for output_states in _number_conserving_matter_state_pairs(tables, input_blocks):
+            output_block_ids = _hopping_output_block_ids(
+                tables,
+                site_coords,
+                input_blocks,
+                output_link,
+                output_states,
+                orientation=orientation,
+            )
+            for block_ids in _product_tuples(output_block_ids):
+                output_blocks = _link_blocks(tables, site_coords, block_ids)
+                matrix_element = _hopping_matrix_element(
+                    input_blocks,
+                    output_blocks,
+                    orientation=orientation,
+                )
+                if matrix_element == 0.0:
+                    continue
+                outcomes.append((block_ids, matrix_element))
+    return outcomes
+
+
+def _number_conserving_matter_state_pairs(
+    tables: PureGaugeTables,
+    input_blocks: tuple[VertexBlock, VertexBlock],
+) -> tuple[tuple[int, int], ...]:
+    first, second = input_blocks
+    input_number = first.matter_number + second.matter_number
+    return tuple(
+        (left_state, right_state)
+        for left_state, left_number in enumerate(tables.matter_numbers)
+        for right_state, right_number in enumerate(tables.matter_numbers)
+        if left_number + right_number == input_number
+        and (left_state, right_state)
+        != (first.matter_state, second.matter_state)
+    )
+
+
+def _hopping_output_block_ids(
+    tables: PureGaugeTables,
+    site_coords: tuple[tuple[int, int], tuple[int, int]],
+    input_blocks: tuple[VertexBlock, VertexBlock],
+    output_link: int,
+    output_states: tuple[int, int],
+    *,
+    orientation: str,
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    first, second = input_blocks
+    if orientation == "h":
+        keys = (
+            (output_states[0], first.j_l, first.j_u, output_link, first.j_d),
+            (output_states[1], output_link, second.j_u, second.j_r, second.j_d),
+        )
+    else:
+        keys = (
+            (output_states[0], first.j_l, first.j_u, first.j_r, output_link),
+            (output_states[1], second.j_l, output_link, second.j_r, second.j_d),
+        )
+    return tuple(
+        _site_block_ids_for_links(tables, r, c, key)
+        for (r, c), key in zip(site_coords, keys, strict=True)
+    )
+
+
+@cache
+def _hopping_matrix_element(
+    input_blocks: tuple[VertexBlock, VertexBlock],
+    output_blocks: tuple[VertexBlock, VertexBlock],
+    *,
+    orientation: str,
+) -> float:
+    forward = _oriented_hopping_matrix_element(
+        input_blocks,
+        output_blocks,
+        orientation=orientation,
+    )
+    backward = _oriented_hopping_matrix_element(
+        output_blocks,
+        input_blocks,
+        orientation=orientation,
+    )
+    return float(forward + backward)
+
+
+@cache
+def _oriented_hopping_matrix_element(
+    input_blocks: tuple[VertexBlock, VertexBlock],
+    output_blocks: tuple[VertexBlock, VertexBlock],
+    *,
+    orientation: str,
+) -> float:
+    first_in, second_in = input_blocks
+    first_out, second_out = output_blocks
+    if orientation == "h":
+        first_overlap = _vertex_overlap(first_in, first_out, affected_axes=(2, 4))
+        second_overlap = _vertex_overlap(second_in, second_out, affected_axes=(0, 4))
+        link = _link_fundamental_tensor(first_in.j_r, first_out.j_r)
+    else:
+        first_overlap = _vertex_overlap(first_in, first_out, affected_axes=(3, 4))
+        second_overlap = _vertex_overlap(second_in, second_out, affected_axes=(1, 4))
+        link = _link_fundamental_tensor(first_in.j_d, first_out.j_d)
+    second_entries = _nonzero_entries(second_overlap)
+    total = 0.0
+    for (p_out, m_first_out, p_in, _m_first_in), first_value in _nonzero_entries(
+        first_overlap
+    ):
+        for (
+            p_link_out,
+            q_link_out,
+            p_link_in,
+            q_link_in,
+            a_src,
+            a_tgt,
+        ), link_value in _nonzero_entries(link):
+            if p_link_out != p_out or p_link_in != p_in or a_src != m_first_out:
+                continue
+            prefix = first_value * link_value
+            for (
+                q_out,
+                _m_second_out,
+                q_in,
+                m_second_in,
+            ), second_value in second_entries:
+                if (
+                    q_link_out == q_out
+                    and q_link_in == q_in
+                    and a_tgt == m_second_in
+                ):
+                    total += prefix * second_value
+    return total
 
 
 def _plaquette_blocks(
@@ -423,10 +812,10 @@ def _plaquette_output_block_ids(
     tl, tr, bl, br = input_blocks
     top, right, bottom, left = output_links
     keys = (
-        (tl.j_l, tl.j_u, top, left),
-        (top, tr.j_u, tr.j_r, right),
-        (bl.j_l, left, bottom, bl.j_d),
-        (bottom, right, br.j_r, br.j_d),
+        (tl.matter_state, tl.j_l, tl.j_u, top, left),
+        (tr.matter_state, top, tr.j_u, tr.j_r, right),
+        (bl.matter_state, bl.j_l, left, bottom, bl.j_d),
+        (br.matter_state, bottom, right, br.j_r, br.j_d),
     )
     return tuple(
         _site_block_ids_for_links(tables, r, c, key)
@@ -438,13 +827,20 @@ def _site_block_ids_for_links(
     tables: PureGaugeTables,
     row: int,
     col: int,
-    links: tuple[int, int, int, int],
+    links: tuple[int, int, int, int, int],
 ) -> tuple[int, ...]:
-    j_l, j_u, j_r, j_d = links
+    matter_state, j_l, j_u, j_r, j_d = links
     return tuple(
         block_id
         for block_id, block in enumerate(tables.blocks[row][col])
-        if (block.j_l, block.j_u, block.j_r, block.j_d) == (j_l, j_u, j_r, j_d)
+        if (
+            block.matter_state,
+            block.j_l,
+            block.j_u,
+            block.j_r,
+            block.j_d,
+        )
+        == (matter_state, j_l, j_u, j_r, j_d)
     )
 
 
@@ -551,7 +947,13 @@ def _vertex_overlap(
 ) -> jax.Array:
     input_tensor = vertex_intertwiner_tensor(input_block)
     output_tensor = vertex_intertwiner_tensor(output_block)
-    external_axes = tuple(axis for axis in range(4) if axis not in affected_axes)
+    if 4 in affected_axes and input_tensor.ndim == 4:
+        input_tensor = input_tensor[..., None]
+    if 4 in affected_axes and output_tensor.ndim == 4:
+        output_tensor = output_tensor[..., None]
+    external_axes = tuple(
+        axis for axis in range(output_tensor.ndim) if axis not in affected_axes
+    )
     out_dims = tuple(output_tensor.shape[axis] for axis in affected_axes)
     in_dims = tuple(input_tensor.shape[axis] for axis in affected_axes)
     ext_dim = math.prod(output_tensor.shape[axis] for axis in external_axes)
@@ -638,13 +1040,34 @@ def _pure_gauge_intertwiner_paths(
     )
 
 
+def _matter_intertwiner_paths(
+    group: SU2,
+    *,
+    j_l: int,
+    j_u: int,
+    j_r: int,
+    j_d: int,
+    matter_irrep: int,
+    target_twice: int,
+) -> tuple[tuple[int, int, int], ...]:
+    return tuple(
+        (j_m, j_n, j_gauge)
+        for j_m in group.tensor_product(j_l, j_u)
+        for j_n in group.tensor_product(j_r, j_d)
+        for j_gauge in _fuse_untruncated(j_m, j_n)
+        if target_twice in _fuse_untruncated(j_gauge, matter_irrep)
+    )
+
+
 def build_pure_gauge_vertex_blocks(
     group: SU2,
     *,
     active_legs: tuple[bool, bool, bool, bool],
     target_twice: int = 0,
+    matter_irreps: tuple[int, ...] = (0,),
+    matter_numbers: tuple[int, ...] = (0,),
 ) -> tuple[VertexBlock, ...]:
-    """Enumerate valid pure-gauge blocks for one vertex.
+    """Enumerate valid vertex blocks for one site.
 
     ``active_legs`` is ordered as ``(left, up, right, down)``. Inactive
     boundary legs are fixed to the singlet irrep ``j_twice = 0``.
@@ -653,33 +1076,54 @@ def build_pure_gauge_vertex_blocks(
         raise ValueError("active_legs must be ordered as (left, up, right, down).")
     if target_twice < 0:
         raise ValueError("target_twice must be non-negative.")
+    if len(matter_irreps) != len(matter_numbers):
+        raise ValueError("matter_irreps and matter_numbers must have equal length.")
 
     link_irreps = group.irreps()
     choices = tuple(link_irreps if active else (0,) for active in active_legs)
     blocks: list[VertexBlock] = []
-    for j_l in choices[0]:
-        for j_u in choices[1]:
-            for j_r in choices[2]:
-                for j_d in choices[3]:
-                    paths = _pure_gauge_intertwiner_paths(
-                        group,
-                        j_l=j_l,
-                        j_u=j_u,
-                        j_r=j_r,
-                        j_d=j_d,
-                        target_twice=target_twice,
-                    )
-                    for iota, internal_irreps in enumerate(paths):
-                        blocks.append(
-                            VertexBlock(
+    for matter_state, (matter_irrep, matter_number) in enumerate(
+        zip(matter_irreps, matter_numbers, strict=True)
+    ):
+        if matter_irrep < 0:
+            raise ValueError("matter_irreps must be non-negative SU(2) labels.")
+        for j_l in choices[0]:
+            for j_u in choices[1]:
+                for j_r in choices[2]:
+                    for j_d in choices[3]:
+                        if matter_irrep == 0:
+                            paths = _pure_gauge_intertwiner_paths(
+                                group,
                                 j_l=j_l,
                                 j_u=j_u,
                                 j_r=j_r,
                                 j_d=j_d,
-                                iota=iota,
-                                internal_irreps=internal_irreps,
+                                target_twice=target_twice,
                             )
-                        )
+                        else:
+                            paths = _matter_intertwiner_paths(
+                                group,
+                                j_l=j_l,
+                                j_u=j_u,
+                                j_r=j_r,
+                                j_d=j_d,
+                                matter_irrep=matter_irrep,
+                                target_twice=target_twice,
+                            )
+                        for iota, internal_irreps in enumerate(paths):
+                            blocks.append(
+                                VertexBlock(
+                                    j_l=j_l,
+                                    j_u=j_u,
+                                    j_r=j_r,
+                                    j_d=j_d,
+                                    iota=iota,
+                                    internal_irreps=internal_irreps,
+                                    matter_state=matter_state,
+                                    matter_irrep=matter_irrep,
+                                    matter_number=matter_number,
+                                )
+                            )
     return tuple(sorted(blocks))
 
 
@@ -689,15 +1133,19 @@ def build_pure_gauge_tables(
     *,
     shape: tuple[int, int],
     target_charge: int = 0,
+    matter_irreps: tuple[int, ...] = (0,),
+    matter_numbers: tuple[int, ...] = (0,),
 ) -> PureGaugeTables:
-    """Build boundary-aware pure-gauge vertex block tables."""
+    """Build boundary-aware vertex block tables."""
     target_twice = int(target_charge)
     n_rows, n_cols = shape
     if n_rows <= 0 or n_cols <= 0:
         raise ValueError("shape must have positive dimensions.")
+    if len(matter_irreps) != len(matter_numbers):
+        raise ValueError("matter_irreps and matter_numbers must have equal length.")
 
     rows: list[tuple[tuple[VertexBlock, ...], ...]] = []
-    lookup_rows: list[tuple[dict[tuple[int, int, int, int, int], int], ...]] = []
+    lookup_rows: list[tuple[dict[tuple[int, int, int, int, int, int], int], ...]] = []
     for r in range(n_rows):
         row: list[tuple[VertexBlock, ...]] = []
         lookup_row: list[dict[tuple[int, int, int, int, int], int]] = []
@@ -707,11 +1155,20 @@ def build_pure_gauge_tables(
                 group,
                 active_legs=active_legs,
                 target_twice=target_twice,
+                matter_irreps=matter_irreps,
+                matter_numbers=matter_numbers,
             )
             row.append(blocks)
             lookup_row.append(
                 {
-                    (block.j_l, block.j_u, block.j_r, block.j_d, block.iota): block_id
+                    (
+                        block.matter_state,
+                        block.j_l,
+                        block.j_u,
+                        block.j_r,
+                        block.j_d,
+                        block.iota,
+                    ): block_id
                     for block_id, block in enumerate(blocks)
                 }
             )
@@ -725,28 +1182,63 @@ def build_pure_gauge_tables(
         for block in blocks
     )
     n_irreps = len(group.irreps())
+    phys_dim = len(matter_irreps)
+    max_blocks = max(len(blocks) for row in blocks_by_site for blocks in row)
     block_id_lookup = jnp.full(
-        (n_rows, n_cols, n_irreps, n_irreps, n_irreps, n_irreps, max_iotas),
+        (
+            n_rows,
+            n_cols,
+            phys_dim,
+            n_irreps,
+            n_irreps,
+            n_irreps,
+            n_irreps,
+            max_iotas,
+        ),
         -1,
         dtype=jnp.int32,
     )
+    matter_state_by_block = jnp.full((n_rows, n_cols, max_blocks), -1, dtype=jnp.int32)
+    j_l_by_block = jnp.full((n_rows, n_cols, max_blocks), -1, dtype=jnp.int32)
+    j_u_by_block = jnp.full((n_rows, n_cols, max_blocks), -1, dtype=jnp.int32)
+    j_r_by_block = jnp.full((n_rows, n_cols, max_blocks), -1, dtype=jnp.int32)
+    j_d_by_block = jnp.full((n_rows, n_cols, max_blocks), -1, dtype=jnp.int32)
+    iota_by_block = jnp.full((n_rows, n_cols, max_blocks), -1, dtype=jnp.int32)
     for r, row in enumerate(blocks_by_site):
         for c, blocks in enumerate(row):
             for block_id, block in enumerate(blocks):
                 block_id_lookup = block_id_lookup.at[
                     r,
                     c,
+                    block.matter_state,
                     block.j_l,
                     block.j_u,
                     block.j_r,
                     block.j_d,
                     block.iota,
                 ].set(block_id)
+                matter_state_by_block = matter_state_by_block.at[r, c, block_id].set(
+                    block.matter_state
+                )
+                j_l_by_block = j_l_by_block.at[r, c, block_id].set(block.j_l)
+                j_u_by_block = j_u_by_block.at[r, c, block_id].set(block.j_u)
+                j_r_by_block = j_r_by_block.at[r, c, block_id].set(block.j_r)
+                j_d_by_block = j_d_by_block.at[r, c, block_id].set(block.j_d)
+                iota_by_block = iota_by_block.at[r, c, block_id].set(block.iota)
     return PureGaugeTables(
         group=group,
         shape=shape,
+        phys_dim=phys_dim,
+        matter_irreps=tuple(int(irrep) for irrep in matter_irreps),
+        matter_numbers=tuple(int(number) for number in matter_numbers),
         blocks=blocks_by_site,
         _block_ids=tuple(lookup_rows),
         max_iotas=max_iotas,
         block_id_lookup=block_id_lookup,
+        matter_state_by_block=matter_state_by_block,
+        j_l_by_block=j_l_by_block,
+        j_u_by_block=j_u_by_block,
+        j_r_by_block=j_r_by_block,
+        j_d_by_block=j_d_by_block,
+        iota_by_block=iota_by_block,
     )

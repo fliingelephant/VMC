@@ -9,7 +9,7 @@ import jax
 
 @dataclass(frozen=True)
 class PureGaugeTables:
-    """Static pure-gauge vertex-block metadata.
+    """Static vertex-block metadata.
 
     The concrete group backend owns the meaning of irrep labels and block
     objects. Generic kernels only require integer block lookup tables.
@@ -17,10 +17,19 @@ class PureGaugeTables:
 
     group: Any
     shape: tuple[int, int]
+    phys_dim: int
+    matter_irreps: tuple[int, ...]
+    matter_numbers: tuple[int, ...]
     blocks: tuple[tuple[tuple[Any, ...], ...], ...]
-    _block_ids: tuple[tuple[dict[tuple[int, int, int, int, int], int], ...], ...]
+    _block_ids: tuple[tuple[dict[tuple[int, int, int, int, int, int], int], ...], ...]
     max_iotas: int
     block_id_lookup: jax.Array
+    matter_state_by_block: jax.Array
+    j_l_by_block: jax.Array
+    j_u_by_block: jax.Array
+    j_r_by_block: jax.Array
+    j_d_by_block: jax.Array
+    iota_by_block: jax.Array
 
     def active_legs(self, r: int, c: int) -> tuple[bool, bool, bool, bool]:
         """Return active ``(left, up, right, down)`` legs at a site."""
@@ -42,10 +51,11 @@ class PureGaugeTables:
         right: int,
         down: int,
         iota: int,
+        matter_state: int = 0,
     ) -> int:
         """Return the flat block id for a sampled local spin-network state."""
         self._validate_site(r, c)
-        key = (left, up, right, down, iota)
+        key = (matter_state, left, up, right, down, iota)
         if key not in self._block_ids[r][c]:
             raise ValueError(f"No vertex block for site {(r, c)} and key {key}.")
         return self._block_ids[r][c][key]
@@ -85,16 +95,28 @@ class PlaquetteLinkTransitions:
 
 @dataclass(frozen=True)
 class PlaquetteMatrixTable:
-    """Static plaquette matrix elements indexed by four corner block ids."""
+    """Row-sparse plaquette matrix elements indexed by four corner block ids."""
 
-    output_links: jax.Array
-    output_iotas: jax.Array
+    starts: jax.Array
+    counts: jax.Array
+    max_count: int
     output_block_ids: jax.Array
     matrix_elements: jax.Array
     proposal_weights: jax.Array
     proposal_norms: jax.Array
-    counts: jax.Array
-    max_outputs: int
+
+    @property
+    def max_outputs(self) -> int:
+        """Compatibility alias for callers that still name the loop bound this way."""
+        return self.max_count
+
+    def flat_index(
+        self,
+        input_blocks: tuple[int, int, int, int],
+        out_idx: int,
+    ) -> int:
+        """Return the flat sparse-outcome index for an input row and local slot."""
+        return int(self.starts[input_blocks]) + out_idx
 
     def find_outcome(
         self,
@@ -103,8 +125,46 @@ class PlaquetteMatrixTable:
     ) -> int:
         """Return the outcome slot for ``input_blocks -> output_blocks``."""
         count = int(self.counts[input_blocks])
+        start = int(self.starts[input_blocks])
         for out_idx in range(count):
-            candidate = self.output_block_ids[input_blocks + (out_idx,)]
+            candidate = self.output_block_ids[start + out_idx]
+            if tuple(int(x) for x in candidate) == output_blocks:
+                return out_idx
+        return -1
+
+
+@dataclass(frozen=True)
+class HoppingMatrixTable:
+    """Row-sparse matter-hopping matrix elements indexed by endpoint block ids."""
+
+    starts: jax.Array
+    counts: jax.Array
+    max_count: int
+    output_block_ids: jax.Array
+    matrix_elements: jax.Array
+    proposal_weights: jax.Array
+    proposal_norms: jax.Array
+
+    @property
+    def max_outputs(self) -> int:
+        return self.max_count
+
+    def flat_index(
+        self,
+        input_blocks: tuple[int, int],
+        out_idx: int,
+    ) -> int:
+        return int(self.starts[input_blocks]) + out_idx
+
+    def find_outcome(
+        self,
+        input_blocks: tuple[int, int],
+        output_blocks: tuple[int, int],
+    ) -> int:
+        count = int(self.counts[input_blocks])
+        start = int(self.starts[input_blocks])
+        for out_idx in range(count):
+            candidate = self.output_block_ids[start + out_idx]
             if tuple(int(x) for x in candidate) == output_blocks:
                 return out_idx
         return -1

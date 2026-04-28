@@ -109,7 +109,17 @@ def _su2_2x2_hamiltonian(
         hamiltonian = hamiltonian.at[source_idx, source_idx].set(electric)
         input_blocks = tuple(int(value) for value in model.active_block_ids(sample).reshape(-1))
         for out_idx in range(int(table.counts[input_blocks])):
-            links = table.output_links[input_blocks + (out_idx,)]
+            output_blocks = table.output_block_ids[
+                table.flat_index(input_blocks, out_idx)
+            ]
+            links = jnp.stack(
+                [
+                    model.tables.j_r_by_block[0, 0, output_blocks[0]],
+                    model.tables.j_d_by_block[0, 1, output_blocks[1]],
+                    model.tables.j_r_by_block[1, 0, output_blocks[2]],
+                    model.tables.j_d_by_block[0, 0, output_blocks[0]],
+                ]
+            )
             candidate = NonAbelianGIPEPS.flatten_sample(
                 jnp.asarray([[links[0]], [links[2]]], dtype=jnp.int32),
                 jnp.asarray([[links[3], links[1]]], dtype=jnp.int32),
@@ -117,7 +127,8 @@ def _su2_2x2_hamiltonian(
             )
             target_idx = sample_keys[tuple(candidate.tolist())]
             hamiltonian = hamiltonian.at[target_idx, source_idx].add(
-                plaquette_coeff * table.matrix_elements[input_blocks + (out_idx,)]
+                plaquette_coeff
+                * table.matrix_elements[table.flat_index(input_blocks, out_idx)]
             )
     return hamiltonian
 

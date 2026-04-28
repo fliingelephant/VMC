@@ -8,7 +8,7 @@ import jax.numpy as jnp
 
 from vmc.operators.local_terms import (
     DiagonalOperator,
-    LocalHamiltonian as GILocalHamiltonian,
+    LocalHamiltonian as GILocalHamiltonian,  # noqa: F401 - public re-export
     TransitionOperator,
     support_span,
 )

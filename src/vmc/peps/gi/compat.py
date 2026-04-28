@@ -4,7 +4,7 @@ from __future__ import annotations
 import functools
 from typing import Any
 
-from vmc import config  # noqa: F401 - JAX config must be imported first
+import vmc.config  # noqa: F401 - JAX config must be imported first
 
 import jax
 import jax.numpy as jnp

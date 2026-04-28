@@ -1,7 +1,7 @@
 """Common PEPS local-energy and derivative contractions."""
 from __future__ import annotations
 
-from vmc import config  # noqa: F401 - JAX config must be imported first
+import vmc.config  # noqa: F401 - JAX config must be imported first
 
 from typing import Any, Callable, NamedTuple
 

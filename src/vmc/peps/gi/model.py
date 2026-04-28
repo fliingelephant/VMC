@@ -30,7 +30,6 @@ from vmc.peps.common.contraction import (
 )
 from vmc.peps.common.energy import (
     RowEnvs,
-    TwoRowEnvs,
     _eval_term,
     _compute_right_envs_2row,
     _compute_single_gradient,
@@ -331,7 +330,6 @@ def _single_z2_hardcore_configuration_with_particles(
     Qx = jnp.asarray(Qx, dtype=jnp.int32)
     n_rows, n_cols = Qx.shape
     n_sites = n_rows * n_cols
-    n_pairs_max = (n_sites + 1) // 2
     key_sites, key_bg, key_pair = jax.random.split(key, 3)
     permutation = jax.random.permutation(key_sites, n_sites)
     occupied = permutation[:particle_number]

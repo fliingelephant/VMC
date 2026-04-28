@@ -1,6 +1,7 @@
 """Linear solvers for QGT systems."""
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 import jax.scipy as jsp
 import jax.scipy.sparse.linalg as jspsl

@@ -50,7 +50,7 @@ class SiteOrdering:
 class Jacobian:
     """Full Jacobian O (n_samples, n_params)."""
 
-    O: jax.Array
+    O: jax.Array  # noqa: E741 - conventional QGT notation
 
 
 @dataclass
@@ -98,7 +98,7 @@ def jacobian_mean(jac: Jacobian) -> jax.Array:
 
 
 @dispatch
-def jacobian_mean(jac: SlicedJacobian) -> jax.Array:
+def jacobian_mean(jac: SlicedJacobian) -> jax.Array:  # noqa: F811
     return _sliced_mean(jac.ordering, jac.o, jac.p, jac.sliced_dims)
 
 

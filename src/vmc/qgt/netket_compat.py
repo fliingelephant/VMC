@@ -64,13 +64,13 @@ class DenseSR(AbstractLinearPreconditioner):
         self, vstate: nk.vqs.VariationalState, step=None
     ) -> QGTOperator:
         samples = flatten_samples(vstate.samples)
-        O = build_dense_jac(
+        jacobian = build_dense_jac(
             vstate._apply_fun, vstate.parameters, vstate.model_state, samples, holomorphic=self.holomorphic
         )
         params_struct = jax.tree_util.tree_map(
             lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype), vstate.parameters
         )
-        qgt = QGT(Jacobian(O), space=ParameterSpace())
+        qgt = QGT(Jacobian(jacobian), space=ParameterSpace())
         return QGTOperator(
             _qgt=qgt,
             diag_shift=self.diag_shift,

@@ -112,7 +112,7 @@ def local_estimate(
 
 
 @dispatch
-def local_estimate(
+def local_estimate(  # noqa: F811
     model: object,
     samples: jax.Array,
     operator: DiscreteOperator,

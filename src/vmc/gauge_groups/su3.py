@@ -1,4 +1,5 @@
 """Fundamental-truncated SU(3) gauge-group backend for non-Abelian GI-PEPS."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -9,7 +10,16 @@ import math
 import jax
 import jax.numpy as jnp
 
-import vmc.peps.non_abelian_gi.builders as builders
+from vmc.peps.non_abelian_gi.builders import (
+    build_horizontal_hopping_matrix_table,
+    build_horizontal_hopping_matrix_tables,
+    build_plaquette_link_transitions,
+    build_plaquette_matrix_table,
+    build_plaquette_matrix_tables,
+    build_pure_gauge_tables,
+    build_vertical_hopping_matrix_table,
+    build_vertical_hopping_matrix_tables,
+)
 from vmc.peps.non_abelian_gi.tables import (
     HoppingMatrixTable,
     PlaquetteLinkTransitions,
@@ -125,7 +135,9 @@ def _tensor_with_fundamental(weight: tuple[int, int]) -> tuple[tuple[int, int], 
     return tuple(outputs)
 
 
-def _tensor_with_antifundamental(weight: tuple[int, int]) -> tuple[tuple[int, int], ...]:
+def _tensor_with_antifundamental(
+    weight: tuple[int, int],
+) -> tuple[tuple[int, int], ...]:
     p, q = weight
     outputs = [(p, q + 1)]
     if q > 0:
@@ -272,7 +284,7 @@ def _dual_label(irrep: int) -> int:
 _IRREP_DIMS = tuple((p + 1) * (q + 1) * (p + q + 2) // 2 for p, q in _IRREP_WEIGHTS)
 
 
-@builders.build_plaquette_link_transitions.dispatch
+@build_plaquette_link_transitions.dispatch
 def build_plaquette_link_transitions(group: SU3) -> PlaquetteLinkTransitions:
     """Build static plaquette link-output candidates for ``U_square + h.c.``."""
     n_irreps = len(group.irreps())
@@ -315,7 +327,7 @@ def build_plaquette_link_transitions(group: SU3) -> PlaquetteLinkTransitions:
     return PlaquetteLinkTransitions(output_links, counts, max_outputs)
 
 
-@builders.build_plaquette_matrix_table.dispatch
+@build_plaquette_matrix_table.dispatch
 def build_plaquette_matrix_table(
     group: SU3,
     tables: PureGaugeTables,
@@ -336,7 +348,9 @@ def build_plaquette_matrix_table(
         if not _plaquette_input_consistent(input_blocks):
             outcomes_by_input[input_ids] = []
             continue
-        outcomes = _plaquette_output_outcomes(group, tables, site_coords, input_blocks, link_transitions)
+        outcomes = _plaquette_output_outcomes(
+            group, tables, site_coords, input_blocks, link_transitions
+        )
         outcomes_by_input[input_ids] = outcomes
         max_outputs = max(max_outputs, len(outcomes))
     starts = jnp.zeros(block_counts, dtype=jnp.int32)
@@ -350,7 +364,9 @@ def build_plaquette_matrix_table(
         counts = counts.at[input_ids].set(len(outcomes))
         for out_idx, (links, iotas, block_ids, matrix_element) in enumerate(outcomes):
             del links, iotas
-            output_block_ids = output_block_ids.at[cursor + out_idx].set(jnp.asarray(block_ids, dtype=jnp.int32))
+            output_block_ids = output_block_ids.at[cursor + out_idx].set(
+                jnp.asarray(block_ids, dtype=jnp.int32)
+            )
             matrix_elements = matrix_elements.at[cursor + out_idx].set(matrix_element)
         cursor += len(outcomes)
     proposal_weights = jnp.abs(matrix_elements) ** 2
@@ -371,7 +387,7 @@ def build_plaquette_matrix_table(
     )
 
 
-@builders.build_plaquette_matrix_tables.dispatch
+@build_plaquette_matrix_tables.dispatch
 def build_plaquette_matrix_tables(
     group: SU3,
     tables: PureGaugeTables,
@@ -398,7 +414,7 @@ def _empty_hopping_matrix_table(block_counts: tuple[int, int]) -> HoppingMatrixT
     )
 
 
-@builders.build_horizontal_hopping_matrix_table.dispatch
+@build_horizontal_hopping_matrix_table.dispatch
 def build_horizontal_hopping_matrix_table(
     group: SU3,
     tables: PureGaugeTables,
@@ -406,7 +422,6 @@ def build_horizontal_hopping_matrix_table(
     row: int,
     col: int,
 ) -> HoppingMatrixTable:
-    del group
     if tables.phys_dim != 1:
         raise NotImplementedError("SU(3) matter hopping is not implemented yet.")
     return _empty_hopping_matrix_table(
@@ -414,7 +429,7 @@ def build_horizontal_hopping_matrix_table(
     )
 
 
-@builders.build_horizontal_hopping_matrix_tables.dispatch
+@build_horizontal_hopping_matrix_tables.dispatch
 def build_horizontal_hopping_matrix_tables(
     group: SU3,
     tables: PureGaugeTables,
@@ -429,7 +444,7 @@ def build_horizontal_hopping_matrix_tables(
     )
 
 
-@builders.build_vertical_hopping_matrix_table.dispatch
+@build_vertical_hopping_matrix_table.dispatch
 def build_vertical_hopping_matrix_table(
     group: SU3,
     tables: PureGaugeTables,
@@ -437,7 +452,6 @@ def build_vertical_hopping_matrix_table(
     row: int,
     col: int,
 ) -> HoppingMatrixTable:
-    del group
     if tables.phys_dim != 1:
         raise NotImplementedError("SU(3) matter hopping is not implemented yet.")
     return _empty_hopping_matrix_table(
@@ -445,7 +459,7 @@ def build_vertical_hopping_matrix_table(
     )
 
 
-@builders.build_vertical_hopping_matrix_tables.dispatch
+@build_vertical_hopping_matrix_tables.dispatch
 def build_vertical_hopping_matrix_tables(
     group: SU3,
     tables: PureGaugeTables,
@@ -476,10 +490,7 @@ def _plaquette_input_consistent(
 ) -> bool:
     tl, tr, bl, br = blocks
     return (
-        tl.j_r == tr.j_l
-        and bl.j_r == br.j_l
-        and tl.j_d == bl.j_u
-        and tr.j_d == br.j_u
+        tl.j_r == tr.j_l and bl.j_r == br.j_l and tl.j_d == bl.j_u and tr.j_d == br.j_u
     )
 
 
@@ -489,7 +500,14 @@ def _plaquette_output_outcomes(
     site_coords: tuple[tuple[int, int], ...],
     input_blocks: tuple[VertexBlock, VertexBlock, VertexBlock, VertexBlock],
     link_transitions: PlaquetteLinkTransitions,
-) -> list[tuple[tuple[int, int, int, int], tuple[int, int, int, int], tuple[int, int, int, int], complex]]:
+) -> list[
+    tuple[
+        tuple[int, int, int, int],
+        tuple[int, int, int, int],
+        tuple[int, int, int, int],
+        complex,
+    ]
+]:
     tl, tr, bl, _br = input_blocks
     input_links = (tl.j_r, tr.j_d, bl.j_r, tl.j_d)
     outcomes = []
@@ -500,9 +518,11 @@ def _plaquette_output_outcomes(
             input_blocks,
             output_links,
         )
-        for block_ids in _product_tuples(output_block_ids):
+        for block_ids in product(*output_block_ids):
             output_blocks = _plaquette_blocks(tables, site_coords, block_ids)
-            matrix_element = _plaquette_matrix_element(group, input_blocks, output_blocks)
+            matrix_element = _plaquette_matrix_element(
+                group, input_blocks, output_blocks
+            )
             if abs(matrix_element) <= 1e-12:
                 continue
             outcomes.append(
@@ -548,15 +568,6 @@ def _site_block_ids_for_links(
         for block_id, block in enumerate(tables.blocks[row][col])
         if (block.j_l, block.j_u, block.j_r, block.j_d) == (j_l, j_u, j_r, j_d)
     )
-
-
-def _product_tuples(values: tuple[tuple[int, ...], ...]) -> tuple[tuple[int, ...], ...]:
-    if any(len(part) == 0 for part in values):
-        return ()
-    out = [()]
-    for part in values:
-        out = [prefix + (value,) for prefix in out for value in part]
-    return tuple(out)
 
 
 @cache
@@ -633,7 +644,9 @@ def build_pure_gauge_vertex_blocks(
     target_charge: int = 0,
 ) -> tuple[VertexBlock, ...]:
     if target_charge != 0:
-        raise NotImplementedError("SU(3) backend currently supports singlet target_charge=0.")
+        raise NotImplementedError(
+            "SU(3) backend currently supports singlet target_charge=0."
+        )
     if len(active_legs) != 4:
         raise ValueError("active_legs must be ordered as (left, up, right, down).")
     choices = tuple(group.irreps() if active else (0,) for active in active_legs)
@@ -654,7 +667,7 @@ def build_pure_gauge_vertex_blocks(
     return tuple(sorted(blocks))
 
 
-@builders.build_pure_gauge_tables.dispatch
+@build_pure_gauge_tables.dispatch
 def build_pure_gauge_tables(
     group: SU3,
     *,
@@ -688,7 +701,14 @@ def build_pure_gauge_tables(
             row.append(blocks)
             lookup_row.append(
                 {
-                    (0, block.j_l, block.j_u, block.j_r, block.j_d, block.iota): block_id
+                    (
+                        0,
+                        block.j_l,
+                        block.j_u,
+                        block.j_r,
+                        block.j_d,
+                        block.iota,
+                    ): block_id
                     for block_id, block in enumerate(blocks)
                 }
             )
@@ -696,10 +716,7 @@ def build_pure_gauge_tables(
         lookup_rows.append(tuple(lookup_row))
     blocks_by_site = tuple(rows)
     max_iotas = max(
-        block.iota + 1
-        for row in blocks_by_site
-        for blocks in row
-        for block in blocks
+        block.iota + 1 for row in blocks_by_site for blocks in row for block in blocks
     )
     n_irreps = len(group.irreps())
     max_blocks = max(len(blocks) for row in blocks_by_site for blocks in row)
@@ -727,12 +744,24 @@ def build_pure_gauge_tables(
                     block.j_d,
                     block.iota,
                 ].set(block_id)
-                matter_state_by_block = matter_state_by_block.at[row_idx, col_idx, block_id].set(0)
-                j_l_by_block = j_l_by_block.at[row_idx, col_idx, block_id].set(block.j_l)
-                j_u_by_block = j_u_by_block.at[row_idx, col_idx, block_id].set(block.j_u)
-                j_r_by_block = j_r_by_block.at[row_idx, col_idx, block_id].set(block.j_r)
-                j_d_by_block = j_d_by_block.at[row_idx, col_idx, block_id].set(block.j_d)
-                iota_by_block = iota_by_block.at[row_idx, col_idx, block_id].set(block.iota)
+                matter_state_by_block = matter_state_by_block.at[
+                    row_idx, col_idx, block_id
+                ].set(0)
+                j_l_by_block = j_l_by_block.at[row_idx, col_idx, block_id].set(
+                    block.j_l
+                )
+                j_u_by_block = j_u_by_block.at[row_idx, col_idx, block_id].set(
+                    block.j_u
+                )
+                j_r_by_block = j_r_by_block.at[row_idx, col_idx, block_id].set(
+                    block.j_r
+                )
+                j_d_by_block = j_d_by_block.at[row_idx, col_idx, block_id].set(
+                    block.j_d
+                )
+                iota_by_block = iota_by_block.at[row_idx, col_idx, block_id].set(
+                    block.iota
+                )
     return PureGaugeTables(
         group=group,
         shape=shape,

@@ -316,7 +316,9 @@ def test_su2_gipeps_row_mpo_selects_active_blocks_in_common_axis_order():
     sample = NonAbelianGIPEPS.flatten_sample(h_links, v_links, iotas)
     tensors = [[jnp.asarray(tensor) for tensor in row] for row in model.tensors]
 
-    row_mpo = build_row_mpo(tensors, sample, model.shape, model.tables, row=0)
+    row_mpo = build_row_mpo(
+        tensors, sample, model.shape, model.tables.block_id_lookup, row=0
+    )
     block_id = model.tables.block_id(0, 0, 0, 0, 1, 1, 0)
 
     assert row_mpo[0].shape == (1, 2, 1, 2)
@@ -340,10 +342,13 @@ def test_su2_gipeps_apply_contracts_one_site_selected_block():
     )
     tensors = [[jnp.asarray([[[[[3.0 + 2.0j]]]]], dtype=jnp.complex128)]]
 
-    assert model.apply(
-        tensors,
-        model.all_zero_sample(),
-        model.shape,
-        model.tables,
-        model.strategy,
-    ) == 3.0 + 2.0j
+    assert (
+        model.apply(
+            tensors,
+            model.all_zero_sample(),
+            model.shape,
+            model.tables,
+            model.strategy,
+        )
+        == 3.0 + 2.0j
+    )

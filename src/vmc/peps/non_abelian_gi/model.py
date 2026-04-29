@@ -1,4 +1,5 @@
 """Generic sampled-block non-Abelian gauge-invariant PEPS model."""
+
 from __future__ import annotations
 
 import vmc.config  # noqa: F401 - JAX config must be imported first
@@ -69,13 +70,17 @@ class NonAbelianGIPEPSConfig:
             or self.matter_numbers != (0,)
             or self.particle_number != 0
         ):
-            raise ValueError("Pure-gauge configurations must use the singlet matter basis.")
+            raise ValueError(
+                "Pure-gauge configurations must use the singlet matter basis."
+            )
         if (
             self.matter_irreps == (0, 1)
             and self.matter_numbers == (0, 1)
             and self.particle_number % 2
         ):
-            raise ValueError("Singlet/fundamental SU(2) matter requires even particle_number.")
+            raise ValueError(
+                "Singlet/fundamental SU(2) matter requires even particle_number."
+            )
 
 
 class NonAbelianGIPEPS(nnx.Module):
@@ -117,9 +122,11 @@ class NonAbelianGIPEPS(nnx.Module):
         )
         n_rows, n_cols = self.shape
         if self.phys_dim > 1:
-            self.horizontal_hopping_matrix_tables = build_horizontal_hopping_matrix_tables(
-                self.gauge_group,
-                self.tables,
+            self.horizontal_hopping_matrix_tables = (
+                build_horizontal_hopping_matrix_tables(
+                    self.gauge_group,
+                    self.tables,
+                )
             )
             self.vertical_hopping_matrix_tables = build_vertical_hopping_matrix_tables(
                 self.gauge_group,
@@ -128,8 +135,9 @@ class NonAbelianGIPEPS(nnx.Module):
         else:
             self.horizontal_hopping_matrix_tables = tuple(() for _ in range(n_rows))
             self.vertical_hopping_matrix_tables = tuple(() for _ in range(n_rows - 1))
-        self.random_init_sweeps = int(getattr(self.gauge_group, "random_init_sweeps", 1))
-        self.n_irreps = int(self.tables.block_id_lookup.shape[3])
+        self.random_init_sweeps = int(
+            getattr(self.gauge_group, "random_init_sweeps", 1)
+        )
         if contraction_strategy is None:
             contraction_strategy = Variational(truncate_bond_dimension=self.chi)
         self.strategy = contraction_strategy
@@ -138,14 +146,10 @@ class NonAbelianGIPEPS(nnx.Module):
             up * down * left * right
             for r in range(n_rows)
             for c in range(n_cols)
-            for up, down, left, right in [
-                self._site_dims(r, c, n_rows, n_cols)
-            ]
+            for up, down, left, right in [self._site_dims(r, c, n_rows, n_cols)]
         )
         self.sliced_dims = tuple(
-            self.tables.n_blocks(r, c)
-            for r in range(n_rows)
-            for c in range(n_cols)
+            self.tables.n_blocks(r, c) for r in range(n_rows) for c in range(n_cols)
         )
         self.tensors = [
             [
@@ -295,7 +299,9 @@ class NonAbelianGIPEPS(nnx.Module):
         return jax.vmap(self._single_random_physical_configuration)(keys)
 
     def _single_random_physical_configuration(self, key: jax.Array) -> jax.Array:
-        h_links, v_links, iotas = self.unflatten_sample(self.all_zero_sample(), self.shape)
+        h_links, v_links, iotas = self.unflatten_sample(
+            self.all_zero_sample(), self.shape
+        )
         for _ in range(self.random_init_sweeps):
             for row in range(self.shape[0] - 1):
                 for col in range(self.shape[1] - 1):
@@ -355,7 +361,9 @@ class NonAbelianGIPEPS(nnx.Module):
         row: int,
         col: int,
     ) -> tuple[jax.Array, jax.Array, jax.Array]:
-        active_block_ids = self._active_block_ids_from_links(h_links, v_links, iotas)
+        active_block_ids = self._active_block_ids_from_fields(
+            jnp.zeros(self.shape, dtype=jnp.int32), h_links, v_links, iotas
+        )
         input_blocks = (
             active_block_ids[row, col],
             active_block_ids[row, col + 1],
@@ -367,18 +375,10 @@ class NonAbelianGIPEPS(nnx.Module):
             return h_links, v_links, iotas
         start = table.starts[input_blocks]
         count = table.counts[input_blocks]
-        weights = jnp.stack(
-            [
-                jnp.where(
-                    out_idx < count,
-                    table.proposal_weights[
-                        jnp.where(out_idx < count, start + out_idx, 0)
-                    ],
-                    0.0,
-                )
-                for out_idx in range(table.max_count)
-            ]
-        )
+        arange = jnp.arange(table.max_count)
+        valid = arange < count
+        safe_indices = jnp.where(valid, start + arange, 0)
+        weights = jnp.where(valid, table.proposal_weights[safe_indices], 0.0)
         norm = table.proposal_norms[input_blocks]
         can_update = norm > 0.0
         apply_key, outcome_key = jax.random.split(key)
@@ -388,7 +388,9 @@ class NonAbelianGIPEPS(nnx.Module):
             jnp.sum(jnp.cumsum(weights) < threshold),
             weights.shape[0] - 1,
         ).astype(jnp.int32)
-        output_blocks = table.output_block_ids[jnp.where(can_update, start + out_idx, 0)]
+        output_blocks = table.output_block_ids[
+            jnp.where(can_update, start + out_idx, 0)
+        ]
         output_links = jnp.stack(
             [
                 self.tables.j_r_by_block[row, col, output_blocks[0]],
@@ -430,13 +432,14 @@ class NonAbelianGIPEPS(nnx.Module):
             sample,
             self.shape,
         )
+        n_irreps = self.tables.block_id_lookup.shape[3]
         if bool(
             jnp.any(matter < 0)
             | jnp.any(matter >= self.phys_dim)
             | jnp.any(h_links < 0)
-            | jnp.any(h_links >= self.n_irreps)
+            | jnp.any(h_links >= n_irreps)
             | jnp.any(v_links < 0)
-            | jnp.any(v_links >= self.n_irreps)
+            | jnp.any(v_links >= n_irreps)
             | jnp.any(iotas < 0)
             | jnp.any(iotas >= self.tables.max_iotas)
         ):
@@ -446,22 +449,6 @@ class NonAbelianGIPEPS(nnx.Module):
             raise ValueError("Invalid non-Abelian local block in sample.")
         return block_ids
 
-    def _active_block_ids_unchecked(self, sample: jax.Array) -> jax.Array:
-        matter, h_links, v_links, iotas = self.unflatten_spin_network_sample(
-            sample,
-            self.shape,
-        )
-        return self._active_block_ids_from_fields(matter, h_links, v_links, iotas)
-
-    def _active_block_ids_from_links(
-        self,
-        h_links: jax.Array,
-        v_links: jax.Array,
-        iotas: jax.Array,
-    ) -> jax.Array:
-        matter = jnp.zeros(self.shape, dtype=jnp.int32)
-        return self._active_block_ids_from_fields(matter, h_links, v_links, iotas)
-
     def _active_block_ids_from_fields(
         self,
         matter: jax.Array,
@@ -469,26 +456,21 @@ class NonAbelianGIPEPS(nnx.Module):
         v_links: jax.Array,
         iotas: jax.Array,
     ) -> jax.Array:
-        lookup = self.tables.block_id_lookup
         n_rows, n_cols = self.shape
-        rows = []
-        for r in range(n_rows):
-            row = []
-            for c in range(n_cols):
-                row.append(
-                    lookup[
-                        r,
-                        c,
-                        matter[r, c],
-                        h_links[r, c - 1] if c > 0 else 0,
-                        v_links[r - 1, c] if r > 0 else 0,
-                        h_links[r, c] if c < n_cols - 1 else 0,
-                        v_links[r, c] if r < n_rows - 1 else 0,
-                        iotas[r, c],
-                    ]
-                )
-            rows.append(jnp.stack(row))
-        return jnp.stack(rows)
+        h_padded = jnp.pad(h_links, ((0, 0), (1, 1)))
+        v_padded = jnp.pad(v_links, ((1, 1), (0, 0)))
+        r_idx = jnp.arange(n_rows)[:, None]
+        c_idx = jnp.arange(n_cols)[None, :]
+        return self.tables.block_id_lookup[
+            r_idx,
+            c_idx,
+            matter,
+            h_padded[:, :-1],
+            v_padded[:-1, :],
+            h_padded[:, 1:],
+            v_padded[1:, :],
+            iotas,
+        ]
 
 
 def _path_masks(

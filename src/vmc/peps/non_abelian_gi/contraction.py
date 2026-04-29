@@ -1,4 +1,5 @@
 """Sampled-block contraction helpers for non-Abelian GI-PEPS."""
+
 from __future__ import annotations
 
 import jax
@@ -14,29 +15,11 @@ def build_row_mpo(
     tensors: list[list[jax.Array]],
     sample: jax.Array,
     shape: tuple[int, int],
-    tables: PureGaugeTables,
-    *,
-    row: int,
-) -> tuple[jax.Array, ...]:
-    """Build one row MPO by selecting one sampled vertex block per site."""
-    return build_row_mpo_from_lookup(
-        tensors,
-        sample,
-        shape,
-        tables.block_id_lookup,
-        row=row,
-    )
-
-
-def build_row_mpo_from_lookup(
-    tensors: list[list[jax.Array]],
-    sample: jax.Array,
-    shape: tuple[int, int],
     block_id_lookup: jax.Array,
     *,
     row: int,
 ) -> tuple[jax.Array, ...]:
-    """Build one row MPO from the closed-over block lookup array."""
+    """Build one row MPO by selecting one sampled vertex block per site."""
     from vmc.peps.non_abelian_gi.model import NonAbelianGIPEPS
 
     matter, h_links, v_links, iotas = NonAbelianGIPEPS.unflatten_spin_network_sample(
@@ -80,7 +63,7 @@ def non_abelian_gi_apply(
     for row in range(shape[0]):
         boundary = strategy.apply(
             boundary,
-            build_row_mpo_from_lookup(
+            build_row_mpo(
                 tensors,
                 sample,
                 shape,

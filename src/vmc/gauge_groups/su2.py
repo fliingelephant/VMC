@@ -1,14 +1,25 @@
 """Truncated SU(2) gauge-group backend for non-Abelian GI-PEPS."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import cache
+from itertools import product
 import math
 
 import jax
 import jax.numpy as jnp
 
-import vmc.peps.non_abelian_gi.builders as builders
+from vmc.peps.non_abelian_gi.builders import (
+    build_horizontal_hopping_matrix_table,
+    build_horizontal_hopping_matrix_tables,
+    build_plaquette_link_transitions,
+    build_plaquette_matrix_table,
+    build_plaquette_matrix_tables,
+    build_pure_gauge_tables,
+    build_vertical_hopping_matrix_table,
+    build_vertical_hopping_matrix_tables,
+)
 from vmc.peps.non_abelian_gi.tables import (
     HoppingMatrixTable,
     PlaquetteLinkTransitions,
@@ -306,7 +317,7 @@ def _half_sum(*twice_values: int) -> int:
     return total // 2
 
 
-@builders.build_plaquette_link_transitions.dispatch
+@build_plaquette_link_transitions.dispatch
 def build_plaquette_link_transitions(group: SU2) -> PlaquetteLinkTransitions:
     """Build static plaquette link-output candidates from fundamental fusion."""
     n_irreps = len(group.irreps())
@@ -345,7 +356,7 @@ def build_plaquette_link_transitions(group: SU2) -> PlaquetteLinkTransitions:
     )
 
 
-@builders.build_plaquette_matrix_table.dispatch
+@build_plaquette_matrix_table.dispatch
 def build_plaquette_matrix_table(
     group: SU2,
     tables: PureGaugeTables,
@@ -363,7 +374,14 @@ def build_plaquette_matrix_table(
     block_counts = tuple(tables.n_blocks(r, c) for r, c in site_coords)
     outcomes_by_input: dict[
         tuple[int, int, int, int],
-        list[tuple[tuple[int, int, int, int], tuple[int, int, int, int], tuple[int, int, int, int], float]],
+        list[
+            tuple[
+                tuple[int, int, int, int],
+                tuple[int, int, int, int],
+                tuple[int, int, int, int],
+                float,
+            ]
+        ],
     ] = {}
     max_outputs = 0
     for tl_id in range(block_counts[0]):
@@ -418,7 +436,7 @@ def build_plaquette_matrix_table(
     )
 
 
-@builders.build_plaquette_matrix_tables.dispatch
+@build_plaquette_matrix_tables.dispatch
 def build_plaquette_matrix_tables(
     group: SU2,
     tables: PureGaugeTables,
@@ -446,7 +464,7 @@ def _empty_hopping_matrix_table(block_counts: tuple[int, int]) -> HoppingMatrixT
     )
 
 
-@builders.build_horizontal_hopping_matrix_table.dispatch
+@build_horizontal_hopping_matrix_table.dispatch
 def build_horizontal_hopping_matrix_table(
     group: SU2,
     tables: PureGaugeTables,
@@ -456,7 +474,9 @@ def build_horizontal_hopping_matrix_table(
 ) -> HoppingMatrixTable:
     n_rows, n_cols = tables.shape
     if not (0 <= row < n_rows and 0 <= col < n_cols - 1):
-        raise IndexError(f"Horizontal link {(row, col)} is outside shape {tables.shape}.")
+        raise IndexError(
+            f"Horizontal link {(row, col)} is outside shape {tables.shape}."
+        )
     site_coords = ((row, col), (row, col + 1))
     return _build_hopping_matrix_table(
         group,
@@ -466,7 +486,7 @@ def build_horizontal_hopping_matrix_table(
     )
 
 
-@builders.build_horizontal_hopping_matrix_tables.dispatch
+@build_horizontal_hopping_matrix_tables.dispatch
 def build_horizontal_hopping_matrix_tables(
     group: SU2,
     tables: PureGaugeTables,
@@ -481,7 +501,7 @@ def build_horizontal_hopping_matrix_tables(
     )
 
 
-@builders.build_vertical_hopping_matrix_table.dispatch
+@build_vertical_hopping_matrix_table.dispatch
 def build_vertical_hopping_matrix_table(
     group: SU2,
     tables: PureGaugeTables,
@@ -501,7 +521,7 @@ def build_vertical_hopping_matrix_table(
     )
 
 
-@builders.build_vertical_hopping_matrix_tables.dispatch
+@build_vertical_hopping_matrix_tables.dispatch
 def build_vertical_hopping_matrix_tables(
     group: SU2,
     tables: PureGaugeTables,
@@ -616,7 +636,9 @@ def _hopping_output_outcomes(
     input_link = first.j_r if orientation == "h" else first.j_d
     outcomes = []
     for output_link in group.fundamental_link_outputs(input_link):
-        for output_states in _number_conserving_matter_state_pairs(tables, input_blocks):
+        for output_states in _number_conserving_matter_state_pairs(
+            tables, input_blocks
+        ):
             output_block_ids = _hopping_output_block_ids(
                 tables,
                 site_coords,
@@ -625,7 +647,7 @@ def _hopping_output_outcomes(
                 output_states,
                 orientation=orientation,
             )
-            for block_ids in _product_tuples(output_block_ids):
+            for block_ids in product(*output_block_ids):
                 output_blocks = _link_blocks(tables, site_coords, block_ids)
                 matrix_element = _hopping_matrix_element(
                     input_blocks,
@@ -649,8 +671,7 @@ def _number_conserving_matter_state_pairs(
         for left_state, left_number in enumerate(tables.matter_numbers)
         for right_state, right_number in enumerate(tables.matter_numbers)
         if left_number + right_number == input_number
-        and (left_state, right_state)
-        != (first.matter_state, second.matter_state)
+        and (left_state, right_state) != (first.matter_state, second.matter_state)
     )
 
 
@@ -739,11 +760,7 @@ def _oriented_hopping_matrix_element(
                 q_in,
                 m_second_in,
             ), second_value in second_entries:
-                if (
-                    q_link_out == q_out
-                    and q_link_in == q_in
-                    and a_tgt == m_second_in
-                ):
+                if q_link_out == q_out and q_link_in == q_in and a_tgt == m_second_in:
                     total += prefix * second_value
     return total
 
@@ -764,10 +781,7 @@ def _plaquette_input_consistent(
 ) -> bool:
     tl, tr, bl, br = blocks
     return (
-        tl.j_r == tr.j_l
-        and bl.j_r == br.j_l
-        and tl.j_d == bl.j_u
-        and tr.j_d == br.j_u
+        tl.j_r == tr.j_l and bl.j_r == br.j_l and tl.j_d == bl.j_u and tr.j_d == br.j_u
     )
 
 
@@ -776,7 +790,14 @@ def _plaquette_output_outcomes(
     site_coords: tuple[tuple[int, int], ...],
     input_blocks: tuple[VertexBlock, VertexBlock, VertexBlock, VertexBlock],
     link_transitions: PlaquetteLinkTransitions,
-) -> list[tuple[tuple[int, int, int, int], tuple[int, int, int, int], tuple[int, int, int, int], float]]:
+) -> list[
+    tuple[
+        tuple[int, int, int, int],
+        tuple[int, int, int, int],
+        tuple[int, int, int, int],
+        float,
+    ]
+]:
     tl, tr, bl, br = input_blocks
     input_links = (tl.j_r, tr.j_d, bl.j_r, tl.j_d)
     outcomes = []
@@ -787,7 +808,7 @@ def _plaquette_output_outcomes(
             input_blocks,
             output_links,
         )
-        for block_ids in _product_tuples(output_block_ids):
+        for block_ids in product(*output_block_ids):
             output_blocks = _plaquette_blocks(tables, site_coords, block_ids)
             matrix_element = _plaquette_matrix_element(input_blocks, output_blocks)
             if matrix_element == 0.0:
@@ -844,17 +865,6 @@ def _site_block_ids_for_links(
     )
 
 
-def _product_tuples(
-    values: tuple[tuple[int, ...], ...],
-) -> tuple[tuple[int, ...], ...]:
-    if any(len(part) == 0 for part in values):
-        return ()
-    out = [()]
-    for part in values:
-        out = [prefix + (value,) for prefix in out for value in part]
-    return tuple(out)
-
-
 @cache
 def _plaquette_matrix_element(
     input_blocks: tuple[VertexBlock, VertexBlock, VertexBlock, VertexBlock],
@@ -897,27 +907,55 @@ def _oriented_plaquette_matrix_element(
             for (q_vertex, right_out, q_vertex_in, right_in), tr_value in tr_entries:
                 if q_vertex != q or q_vertex_in != q_in:
                     continue
-                for (right_src, v, right_src_in, v_in, c, d), right_value in right_entries:
+                for (
+                    right_src,
+                    v,
+                    right_src_in,
+                    v_in,
+                    c,
+                    d,
+                ), right_value in right_entries:
                     if right_src != right_out or right_src_in != right_in or c != b:
                         continue
                     prefix = tl_value * top_value * tr_value * right_value
                     for (u, v_vertex, u_in, v_vertex_in), br_value in br_entries:
                         if v_vertex != v or v_vertex_in != v_in:
                             continue
-                        for (bottom_src, u_link, bottom_src_in, u_link_in, e, f), bottom_value in bottom_entries:
+                        for (
+                            bottom_src,
+                            u_link,
+                            bottom_src_in,
+                            u_link_in,
+                            e,
+                            f,
+                        ), bottom_value in bottom_entries:
                             if u_link != u or u_link_in != u_in:
                                 continue
                             br_connector = float(dual[d, f])
                             if br_connector == 0.0:
                                 continue
-                            prefix_bottom = prefix * br_value * bottom_value * br_connector
-                            for (left_tgt, bottom_tgt, left_tgt_in, bottom_tgt_in), bl_value in bl_entries:
+                            prefix_bottom = (
+                                prefix * br_value * bottom_value * br_connector
+                            )
+                            for (
+                                left_tgt,
+                                bottom_tgt,
+                                left_tgt_in,
+                                bottom_tgt_in,
+                            ), bl_value in bl_entries:
                                 if (
                                     bottom_tgt != bottom_src
                                     or bottom_tgt_in != bottom_src_in
                                 ):
                                     continue
-                                for (left_src, left_tgt_link, left_src_in, left_tgt_link_in, h, i), left_value in left_entries:
+                                for (
+                                    left_src,
+                                    left_tgt_link,
+                                    left_src_in,
+                                    left_tgt_link_in,
+                                    h,
+                                    i,
+                                ), left_value in left_entries:
                                     if (
                                         left_src != left_out
                                         or left_src_in != left_in
@@ -981,20 +1019,24 @@ def _link_fundamental_tensor(j_input: int, j_output: int) -> jax.Array:
                 for in_tgt_idx, m_in_tgt in enumerate(_magnetic_labels(j_input)):
                     for a_src_idx, a_src in enumerate(_magnetic_labels(1)):
                         for a_tgt_idx, a_tgt in enumerate(_magnetic_labels(1)):
-                            value = prefactor * clebsch_gordan(
-                                1,
-                                a_src,
-                                j_input,
-                                m_in_src,
-                                j_output,
-                                m_out_src,
-                            ) * clebsch_gordan(
-                                1,
-                                a_tgt,
-                                j_input,
-                                m_in_tgt,
-                                j_output,
-                                m_out_tgt,
+                            value = (
+                                prefactor
+                                * clebsch_gordan(
+                                    1,
+                                    a_src,
+                                    j_input,
+                                    m_in_src,
+                                    j_output,
+                                    m_out_src,
+                                )
+                                * clebsch_gordan(
+                                    1,
+                                    a_tgt,
+                                    j_input,
+                                    m_in_tgt,
+                                    j_output,
+                                    m_out_tgt,
+                                )
                             )
                             tensor = tensor.at[
                                 out_src_idx,
@@ -1008,19 +1050,12 @@ def _link_fundamental_tensor(j_input: int, j_output: int) -> jax.Array:
 
 
 def _nonzero_entries(array: jax.Array) -> tuple[tuple[tuple[int, ...], float], ...]:
-    entries = []
-    for index in _array_indices(array.shape):
-        value = float(array[index])
-        if value != 0.0:
-            entries.append((index, value))
-    return tuple(entries)
-
-
-def _array_indices(shape: tuple[int, ...]) -> tuple[tuple[int, ...], ...]:
-    indices = [()]
-    for size in shape:
-        indices = [prefix + (idx,) for prefix in indices for idx in range(size)]
-    return tuple(indices)
+    return tuple(
+        (index, value)
+        for index in product(*(range(size) for size in array.shape))
+        for value in (float(array[index]),)
+        if value != 0.0
+    )
 
 
 def _pure_gauge_intertwiner_paths(
@@ -1127,7 +1162,7 @@ def build_pure_gauge_vertex_blocks(
     return tuple(sorted(blocks))
 
 
-@builders.build_pure_gauge_tables.dispatch
+@build_pure_gauge_tables.dispatch
 def build_pure_gauge_tables(
     group: SU2,
     *,
@@ -1176,10 +1211,7 @@ def build_pure_gauge_tables(
         lookup_rows.append(tuple(lookup_row))
     blocks_by_site = tuple(rows)
     max_iotas = max(
-        block.iota + 1
-        for row in blocks_by_site
-        for blocks in row
-        for block in blocks
+        block.iota + 1 for row in blocks_by_site for blocks in row for block in blocks
     )
     n_irreps = len(group.irreps())
     phys_dim = len(matter_irreps)

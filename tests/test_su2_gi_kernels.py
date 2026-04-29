@@ -72,7 +72,9 @@ def _context_for_sample(
         top_envs.append(top_env)
         top_env = model.strategy.apply(
             top_env,
-            build_row_mpo(tensors, sample, model.shape, model.tables, row=row),
+            build_row_mpo(
+                tensors, sample, model.shape, model.tables.block_id_lookup, row=row
+            ),
         )
     return Context(amp=_contract_bottom(top_env), top_envs=tuple(top_envs))
 
@@ -218,9 +220,7 @@ def _valid_samples(model: NonAbelianGIPEPS) -> tuple[jax.Array, ...]:
     link_irreps = range(model.gauge_group.j_max_twice + 1)
     samples = []
     for h_values in itertools.product(link_irreps, repeat=n_rows * (n_cols - 1)):
-        h_links = jnp.asarray(h_values, dtype=jnp.int32).reshape(
-            (n_rows, n_cols - 1)
-        )
+        h_links = jnp.asarray(h_values, dtype=jnp.int32).reshape((n_rows, n_cols - 1))
         for v_values in itertools.product(link_irreps, repeat=(n_rows - 1) * n_cols):
             v_links = jnp.asarray(v_values, dtype=jnp.int32).reshape(
                 (n_rows - 1, n_cols)
@@ -270,21 +270,24 @@ def _plaquette_transition_probability(
     table = model.plaquette_matrix_tables[0][0]
     source_blocks = _active_blocks(model, source)
     target_blocks = _active_blocks(model, target)
-    source_weight = jnp.abs(
-        model.apply(tensors, source, model.shape, model.tables, model.strategy)
-    ) ** 2
-    target_weight = jnp.abs(
-        model.apply(tensors, target, model.shape, model.tables, model.strategy)
-    ) ** 2
+    source_weight = (
+        jnp.abs(model.apply(tensors, source, model.shape, model.tables, model.strategy))
+        ** 2
+    )
+    target_weight = (
+        jnp.abs(model.apply(tensors, target, model.shape, model.tables, model.strategy))
+        ** 2
+    )
     total = jnp.asarray(0.0, dtype=source_weight.dtype)
     for out_idx in range(int(table.counts[source_blocks])):
         candidate = _plaquette_candidate_sample(model, source, out_idx)
         if not bool(jnp.array_equal(candidate, target)):
             continue
         forward_norm = table.proposal_norms[source_blocks]
-        forward_prob = table.proposal_weights[
-            table.flat_index(source_blocks, out_idx)
-        ] / forward_norm
+        forward_prob = (
+            table.proposal_weights[table.flat_index(source_blocks, out_idx)]
+            / forward_norm
+        )
         reverse_norm = table.proposal_norms[target_blocks]
         source_vec = jnp.asarray(source_blocks, dtype=table.output_block_ids.dtype)
         reverse_weight = jnp.asarray(0.0, dtype=table.proposal_weights.dtype)
@@ -315,7 +318,9 @@ def _exact_pure_gauge_hamiltonian(
     sample_keys = {tuple(sample.tolist()): idx for idx, sample in enumerate(samples)}
     hamiltonian = jnp.zeros((len(samples), len(samples)), dtype=jnp.complex128)
     for source_idx, sample in enumerate(samples):
-        h_links, v_links, _iotas = NonAbelianGIPEPS.unflatten_sample(sample, model.shape)
+        h_links, v_links, _iotas = NonAbelianGIPEPS.unflatten_sample(
+            sample, model.shape
+        )
         electric = sum(
             electric_coeff * model.gauge_group.casimir(int(link))
             for link in (*h_links.reshape(-1), *v_links.reshape(-1))
@@ -342,9 +347,7 @@ def _exact_pure_gauge_hamiltonian(
                     target_idx = sample_keys[tuple(candidate.tolist())]
                     hamiltonian = hamiltonian.at[target_idx, source_idx].add(
                         plaquette_coeff
-                        * table.matrix_elements[
-                            table.flat_index(input_blocks, out_idx)
-                        ]
+                        * table.matrix_elements[table.flat_index(input_blocks, out_idx)]
                     )
     return samples, hamiltonian
 
@@ -483,7 +486,9 @@ def test_su2_matter_number_kernel_uses_sampled_matter_field():
     )
     init_cache, transition, estimate = build_mc_kernels(model, operator)
     sample = model.random_physical_configuration(jax.random.PRNGKey(0), n_samples=1)[0]
-    tensors = [[jnp.ones_like(jnp.asarray(tensor)) for tensor in row] for row in model.tensors]
+    tensors = [
+        [jnp.ones_like(jnp.asarray(tensor)) for tensor in row] for row in model.tensors
+    ]
 
     cache = init_cache(tensors, jnp.stack([sample]))
     sample_next, _key_next, context = transition(
@@ -585,8 +590,7 @@ def test_su2_transition_sweeps_plaquettes_before_matter_bonds(monkeypatch):
     init_cache, transition, _estimate = build_mc_kernels(model, operator)
     sample = model.all_zero_sample()
     tensors = [
-        [jnp.ones_like(jnp.asarray(tensor)) for tensor in row]
-        for row in model.tensors
+        [jnp.ones_like(jnp.asarray(tensor)) for tensor in row] for row in model.tensors
     ]
 
     cache = init_cache(tensors, jnp.stack([sample]))
@@ -630,7 +634,9 @@ def test_su2_horizontal_matter_hopping_kernel_uses_sparse_connected_table():
     v_links = jnp.zeros((0, 3), dtype=jnp.int32)
     iotas = jnp.zeros(model.shape, dtype=jnp.int32)
     sample = NonAbelianGIPEPS.flatten_matter_sample(matter, h_links, v_links, iotas)
-    tensors = [[jnp.ones_like(jnp.asarray(tensor)) for tensor in row] for row in model.tensors]
+    tensors = [
+        [jnp.ones_like(jnp.asarray(tensor)) for tensor in row] for row in model.tensors
+    ]
     active_blocks = model.active_block_ids(sample)
     input_blocks = (int(active_blocks[0, 1]), int(active_blocks[0, 2]))
     table = model.horizontal_hopping_matrix_tables[0][1]
@@ -641,10 +647,10 @@ def test_su2_horizontal_matter_hopping_kernel_uses_sparse_connected_table():
     matter_out = matter_out.at[0, 2].set(
         model.tables.matter_state_by_block[0, 2, candidate_blocks[1]]
     )
-    h_out = h_links.at[0, 1].set(
-        model.tables.j_r_by_block[0, 1, candidate_blocks[0]]
+    h_out = h_links.at[0, 1].set(model.tables.j_r_by_block[0, 1, candidate_blocks[0]])
+    candidate = NonAbelianGIPEPS.flatten_matter_sample(
+        matter_out, h_out, v_links, iotas
     )
-    candidate = NonAbelianGIPEPS.flatten_matter_sample(matter_out, h_out, v_links, iotas)
 
     context = _context_for_sample(model, tensors, sample)
     _cache_next, estimates = estimate(tensors, sample, context)
@@ -696,8 +702,7 @@ def test_su2_estimate_reuses_dr1_right_envs_for_gradients_and_terms(monkeypatch)
     iotas = jnp.zeros(model.shape, dtype=jnp.int32)
     sample = NonAbelianGIPEPS.flatten_matter_sample(matter, h_links, v_links, iotas)
     tensors = [
-        [jnp.ones_like(jnp.asarray(tensor)) for tensor in row]
-        for row in model.tensors
+        [jnp.ones_like(jnp.asarray(tensor)) for tensor in row] for row in model.tensors
     ]
     context = _context_for_sample(model, tensors, sample)
     calls = 0
@@ -743,8 +748,7 @@ def test_su2_iota_heatbath_uses_one_site_environment(monkeypatch):
     iotas = jnp.zeros(model.shape, dtype=jnp.int32)
     sample = NonAbelianGIPEPS.flatten_matter_sample(matter, h_links, v_links, iotas)
     tensors = [
-        [jnp.ones_like(jnp.asarray(tensor)) for tensor in row]
-        for row in model.tensors
+        [jnp.ones_like(jnp.asarray(tensor)) for tensor in row] for row in model.tensors
     ]
     init_cache, transition, _estimate = build_mc_kernels(
         model,
@@ -823,8 +827,7 @@ def test_su2_horizontal_transition_carries_current_amplitude(monkeypatch):
     iotas = jnp.zeros(model.shape, dtype=jnp.int32)
     sample = NonAbelianGIPEPS.flatten_matter_sample(matter, h_links, v_links, iotas)
     tensors = [
-        [jnp.ones_like(jnp.asarray(tensor)) for tensor in row]
-        for row in model.tensors
+        [jnp.ones_like(jnp.asarray(tensor)) for tensor in row] for row in model.tensors
     ]
     two_col_calls = 0
     original = su2_kernels._contract_1row_2col
@@ -859,7 +862,9 @@ def test_su2_kernel_estimates_plaquette_term_from_static_matrix_table():
 
     _init_cache, _transition, estimate = build_mc_kernels(model, operator)
     sample = model.all_zero_sample()
-    tensors = [[jnp.ones_like(jnp.asarray(tensor)) for tensor in row] for row in model.tensors]
+    tensors = [
+        [jnp.ones_like(jnp.asarray(tensor)) for tensor in row] for row in model.tensors
+    ]
 
     context = _context_for_sample(model, tensors, sample)
     _cache_next, estimates = jax.jit(estimate)(tensors, sample, context)
@@ -897,12 +902,16 @@ def test_su2_kernel_sums_all_static_plaquette_outcomes():
         jnp.array([[1, 1]], dtype=jnp.int32),
         jnp.zeros(model.shape, dtype=jnp.int32),
     )
-    tensors = [[jnp.ones_like(jnp.asarray(tensor)) for tensor in row] for row in model.tensors]
+    tensors = [
+        [jnp.ones_like(jnp.asarray(tensor)) for tensor in row] for row in model.tensors
+    ]
 
     context = _context_for_sample(model, tensors, sample)
     _cache_next, estimates = estimate(tensors, sample, context)
 
-    input_blocks = tuple(int(value) for value in model.active_block_ids(sample).reshape(-1))
+    input_blocks = tuple(
+        int(value) for value in model.active_block_ids(sample).reshape(-1)
+    )
     matrix_table = model.plaquette_matrix_tables[0][0]
     amp = model.apply(tensors, sample, model.shape, model.tables, model.strategy)
     expected = jnp.asarray(0.0, dtype=amp.dtype)
@@ -931,7 +940,9 @@ def test_su2_transition_sweeps_static_plaquette_proposals():
     )
     init_cache, transition, _estimate = build_mc_kernels(model, operator)
     sample = model.all_zero_sample()
-    tensors = [[jnp.ones_like(jnp.asarray(tensor)) for tensor in row] for row in model.tensors]
+    tensors = [
+        [jnp.ones_like(jnp.asarray(tensor)) for tensor in row] for row in model.tensors
+    ]
 
     cache = init_cache(tensors, jnp.stack([sample]))
     sample_next, _key_next, context = jax.jit(transition)(
@@ -961,7 +972,9 @@ def test_su2_plaquette_term_is_noop_when_truncation_has_no_output():
     )
     init_cache, transition, estimate = build_mc_kernels(model, operator)
     sample = model.all_zero_sample()
-    tensors = [[jnp.ones_like(jnp.asarray(tensor)) for tensor in row] for row in model.tensors]
+    tensors = [
+        [jnp.ones_like(jnp.asarray(tensor)) for tensor in row] for row in model.tensors
+    ]
 
     cache = init_cache(tensors, jnp.stack([sample]))
     sample_next, _key_next, context = transition(
@@ -972,7 +985,7 @@ def test_su2_plaquette_term_is_noop_when_truncation_has_no_output():
     )
     _cache_next, estimates = estimate(tensors, sample_next, context)
 
-    assert model.plaquette_matrix_tables[0][0].max_outputs == 0
+    assert model.plaquette_matrix_tables[0][0].max_count == 0
     assert jnp.array_equal(sample_next, sample)
     assert jnp.array_equal(estimates.local_estimate, jnp.asarray([0.0]))
 
@@ -1307,7 +1320,10 @@ def test_su2_kernels_run_through_generic_mc_sampler():
     )
     operator = LocalHamiltonian(
         shape=model.shape,
-        terms=(*build_link_casimir_terms(model.shape, model.gauge_group), PlaquetteTerm(row=0, col=0)),
+        terms=(
+            *build_link_casimir_terms(model.shape, model.gauge_group),
+            PlaquetteTerm(row=0, col=0),
+        ),
     )
     tensors = _weighted_block_tensors(model)
     samples = model.random_physical_configuration(jax.random.PRNGKey(0), n_samples=2)
@@ -1353,14 +1369,13 @@ def test_su2_transition_heatbaths_single_site_iota_at_fixed_links():
     assert active_blocks[0, 1] != iota1_block
 
     tensors = [
-        [jnp.zeros_like(jnp.asarray(tensor)) for tensor in row]
-        for row in model.tensors
+        [jnp.zeros_like(jnp.asarray(tensor)) for tensor in row] for row in model.tensors
     ]
     for row in range(model.shape[0]):
         for col in range(model.shape[1]):
             block = iota1_block if (row, col) == (0, 1) else active_blocks[row, col]
-            tensors[row][col] = tensors[row][col].at[block].set(
-                jnp.ones_like(tensors[row][col][block])
+            tensors[row][col] = (
+                tensors[row][col].at[block].set(jnp.ones_like(tensors[row][col][block]))
             )
 
     init_cache, transition, _estimate = build_mc_kernels(

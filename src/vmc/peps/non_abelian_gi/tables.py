@@ -1,4 +1,5 @@
 """Static sampled spin-network metadata shared by non-Abelian GI-PEPS backends."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -105,11 +106,6 @@ class PlaquetteMatrixTable:
     proposal_weights: jax.Array
     proposal_norms: jax.Array
 
-    @property
-    def max_outputs(self) -> int:
-        """Compatibility alias for callers that still name the loop bound this way."""
-        return self.max_count
-
     def flat_index(
         self,
         input_blocks: tuple[int, int, int, int],
@@ -144,10 +140,6 @@ class HoppingMatrixTable:
     matrix_elements: jax.Array
     proposal_weights: jax.Array
     proposal_norms: jax.Array
-
-    @property
-    def max_outputs(self) -> int:
-        return self.max_count
 
     def flat_index(
         self,

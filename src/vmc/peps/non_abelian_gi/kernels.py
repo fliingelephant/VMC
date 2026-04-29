@@ -1256,10 +1256,13 @@ def build_mc_kernels(
     observables: tuple = (),
 ) -> tuple[Any, Any, Any]:
     """Build init_cache/transition/estimate kernels for sampled-block GI-PEPS."""
-    shape = model.shape
+    config = model.config
+    shape = tuple(int(x) for x in config.shape)
     n_rows, n_cols = shape
     strategy = model.strategy
     tables = model.tables
+    phys_dim = int(config.phys_dim)
+    max_iotas = int(tables.max_iotas)
     block_id_lookup = tables.block_id_lookup
     matter_state_by_block = tables.matter_state_by_block
     j_r_by_block = tables.j_r_by_block
@@ -1284,7 +1287,7 @@ def build_mc_kernels(
         for col_terms in cols
         for term, _contributions in col_terms
     )
-    if has_matter_hopping_terms and model.phys_dim == 1:
+    if has_matter_hopping_terms and phys_dim == 1:
         raise ValueError("Matter hopping terms require phys_dim > 1.")
 
     def build_bottom_envs(tensors: Any, sample: jax.Array) -> tuple:
@@ -1364,7 +1367,7 @@ def build_mc_kernels(
         final_sample = _flatten_like_sample(sample, matter, h_links, v_links, iotas)
         if row_mpos is None:
             row_mpos = build_row_mpos(tensors, final_sample)
-        if tables.max_iotas > 1:
+        if max_iotas > 1:
             bottom_envs_iota = build_bottom_envs(tensors, final_sample)
             top_envs = [None] * n_rows
             top_env = tuple(
@@ -1463,7 +1466,7 @@ def build_mc_kernels(
                     row=row,
                 )
                 top_env = strategy.apply(top_env, row_mpos[row])
-            if model.phys_dim == 1:
+            if phys_dim == 1:
                 return finish_transition(
                     tensors,
                     sample,
@@ -1477,7 +1480,7 @@ def build_mc_kernels(
                     row_mpos,
                 )
 
-        if model.phys_dim == 1:
+        if phys_dim == 1:
             return finish_transition(
                 tensors,
                 sample,

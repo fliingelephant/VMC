@@ -1,4 +1,5 @@
 import itertools
+from types import FunctionType
 
 import jax
 import jax.numpy as jnp
@@ -91,6 +92,50 @@ def _weighted_block_tensors(model: NonAbelianGIPEPS) -> list[list[jax.Array]]:
         ]
         for row in model.tensors
     ]
+
+
+def _recursive_closure_ids(fn: FunctionType) -> set[int]:
+    ids = set()
+    seen_functions = set()
+
+    def visit(value):
+        ids.add(id(value))
+        if not isinstance(value, FunctionType) or id(value) in seen_functions:
+            return
+        seen_functions.add(id(value))
+        if value.__closure__ is None:
+            return
+        for cell in value.__closure__:
+            visit(cell.cell_contents)
+
+    visit(fn)
+    return ids
+
+
+def test_su2_kernels_do_not_close_model_or_table_objects():
+    model = NonAbelianGIPEPS(
+        rngs=nnx.Rngs(0),
+        config=NonAbelianGIPEPSConfig(
+            shape=(2, 2),
+            gauge_group=SU2(j_max_twice=1),
+            D=2,
+            chi=4,
+            phys_dim=2,
+            matter_irreps=(0, 1),
+            matter_numbers=(0, 1),
+            particle_number=2,
+        ),
+        contraction_strategy=NoTruncation(),
+    )
+
+    kernels = build_mc_kernels(
+        model,
+        LocalHamiltonian(shape=model.shape, terms=()),
+    )
+    closure_ids = set().union(*(_recursive_closure_ids(kernel) for kernel in kernels))
+
+    assert id(model) not in closure_ids
+    assert id(model.tables) not in closure_ids
 
 
 def test_common_contract_1row_1col_matches_one_site_environment_dot():

@@ -8,6 +8,9 @@ from flax import nnx
 from vmc.core import make_mc_sampler
 from vmc.drivers import ImaginaryTimeUnit, TDVPDriver
 from vmc.peps.common.contraction import _contract_bottom
+from vmc.peps.common import contraction as common_contraction
+from vmc.peps.common import energy as common_energy
+from vmc.peps.non_abelian_gi import kernels as su2_kernels
 from vmc.peps.non_abelian_gi.kernels import _plaquette_candidate_samples
 from vmc.operators.local_terms import LocalHamiltonian
 from vmc.operators.time_dependent import AffineSchedule, TimeDependentHamiltonian
@@ -88,6 +91,33 @@ def _weighted_block_tensors(model: NonAbelianGIPEPS) -> list[list[jax.Array]]:
         ]
         for row in model.tensors
     ]
+
+
+def test_common_contract_1row_1col_matches_one_site_environment_dot():
+    key = jax.random.PRNGKey(0)
+    left_env = jax.random.normal(key, (2, 3, 2), dtype=jnp.float64)
+    top = jax.random.normal(jax.random.PRNGKey(1), (2, 5, 2), dtype=jnp.float64)
+    mpo = jax.random.normal(jax.random.PRNGKey(2), (3, 4, 5, 6), dtype=jnp.float64)
+    bottom = jax.random.normal(jax.random.PRNGKey(3), (2, 6, 2), dtype=jnp.float64)
+    right_env = jax.random.normal(jax.random.PRNGKey(4), (2, 4, 2), dtype=jnp.float64)
+
+    env_grad = common_energy._compute_single_gradient(
+        left_env,
+        right_env,
+        top,
+        bottom,
+    )
+
+    assert jnp.allclose(
+        common_contraction._contract_1row_1col(
+            left_env,
+            top,
+            mpo,
+            bottom,
+            right_env,
+        ),
+        jnp.einsum("cduv,uvcd->", mpo, env_grad),
+    )
 
 
 def _plaquette_candidate_sample(
@@ -460,7 +490,7 @@ def test_su2_transition_sweeps_plaquettes_before_matter_bonds(monkeypatch):
     ):
         del tensors, args, kwargs
         calls.append(("plaquette", row))
-        return key, h_links, v_links, iotas, active_block_ids, row_mpo0, row_mpo1
+        return key, h_links, v_links, iotas, active_block_ids, row_mpo0, row_mpo1, None
 
     def horizontal_sweep(
         key,
@@ -476,7 +506,7 @@ def test_su2_transition_sweeps_plaquettes_before_matter_bonds(monkeypatch):
     ):
         del tensors, args, kwargs
         calls.append(("horizontal", row))
-        return key, matter, h_links, iotas, active_block_ids, row_mpo
+        return key, matter, h_links, iotas, active_block_ids, row_mpo, None
 
     def vertical_sweep(
         key,
@@ -493,7 +523,7 @@ def test_su2_transition_sweeps_plaquettes_before_matter_bonds(monkeypatch):
     ):
         del tensors, args, kwargs
         calls.append(("vertical", row))
-        return key, matter, v_links, iotas, active_block_ids, row_mpo0, row_mpo1
+        return key, matter, v_links, iotas, active_block_ids, row_mpo0, row_mpo1, None
 
     monkeypatch.setattr(
         "vmc.peps.non_abelian_gi.kernels._plaquette_sweep_row_pair",
@@ -593,6 +623,182 @@ def test_su2_horizontal_matter_hopping_kernel_uses_sparse_connected_table():
         transition_context.amp,
         model.apply(tensors, candidate, model.shape, model.tables, model.strategy),
     )
+
+
+def test_su2_estimate_reuses_dr1_right_envs_for_gradients_and_terms(monkeypatch):
+    model = NonAbelianGIPEPS(
+        rngs=nnx.Rngs(0),
+        config=NonAbelianGIPEPSConfig(
+            shape=(1, 3),
+            gauge_group=SU2(j_max_twice=1),
+            D=2,
+            chi=4,
+            phys_dim=2,
+            matter_irreps=(0, 1),
+            matter_numbers=(0, 1),
+            particle_number=2,
+        ),
+        contraction_strategy=NoTruncation(),
+    )
+    operator = LocalHamiltonian(
+        shape=model.shape,
+        terms=(HorizontalMatterHoppingTerm(row=0, col=1),),
+    )
+    _init_cache, _transition, estimate = build_mc_kernels(model, operator)
+    matter = jnp.asarray([[1, 1, 0]], dtype=jnp.int32)
+    h_links = jnp.asarray([[1, 0]], dtype=jnp.int32)
+    v_links = jnp.zeros((0, 3), dtype=jnp.int32)
+    iotas = jnp.zeros(model.shape, dtype=jnp.int32)
+    sample = NonAbelianGIPEPS.flatten_matter_sample(matter, h_links, v_links, iotas)
+    tensors = [
+        [jnp.ones_like(jnp.asarray(tensor)) for tensor in row]
+        for row in model.tensors
+    ]
+    context = _context_for_sample(model, tensors, sample)
+    calls = 0
+    original_common = common_energy._compute_right_envs
+    original_su2 = su2_kernels._compute_right_envs
+
+    def count_common(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_common(*args, **kwargs)
+
+    def count_su2(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_su2(*args, **kwargs)
+
+    monkeypatch.setattr(common_energy, "_compute_right_envs", count_common)
+    monkeypatch.setattr(su2_kernels, "_compute_right_envs", count_su2)
+
+    estimate(tensors, sample, context)
+
+    assert calls == 1
+
+
+def test_su2_iota_heatbath_uses_one_site_environment(monkeypatch):
+    model = NonAbelianGIPEPS(
+        rngs=nnx.Rngs(0),
+        config=NonAbelianGIPEPSConfig(
+            shape=(2, 3),
+            gauge_group=SU2(j_max_twice=1),
+            D=2,
+            chi=4,
+            phys_dim=2,
+            matter_irreps=(0, 1),
+            matter_numbers=(0, 1),
+            particle_number=2,
+        ),
+        contraction_strategy=NoTruncation(),
+    )
+    matter = jnp.asarray([[1, 1, 0], [0, 0, 0]], dtype=jnp.int32)
+    h_links = jnp.asarray([[1, 1], [0, 1]], dtype=jnp.int32)
+    v_links = jnp.asarray([[0, 1, 1]], dtype=jnp.int32)
+    iotas = jnp.zeros(model.shape, dtype=jnp.int32)
+    sample = NonAbelianGIPEPS.flatten_matter_sample(matter, h_links, v_links, iotas)
+    tensors = [
+        [jnp.ones_like(jnp.asarray(tensor)) for tensor in row]
+        for row in model.tensors
+    ]
+    init_cache, transition, _estimate = build_mc_kernels(
+        model,
+        LocalHamiltonian(shape=model.shape, terms=()),
+    )
+    scalar_calls = 0
+    gradient_calls = 0
+    original_scalar = su2_kernels._contract_1row_1col
+    original_gradient = su2_kernels._compute_single_gradient
+
+    def count_scalar(*args, **kwargs):
+        nonlocal scalar_calls
+        scalar_calls += 1
+        return original_scalar(*args, **kwargs)
+
+    def count_gradient(*args, **kwargs):
+        nonlocal gradient_calls
+        gradient_calls += 1
+        return original_gradient(*args, **kwargs)
+
+    def skip_horizontal(
+        key,
+        tensors,
+        matter,
+        h_links,
+        iotas,
+        active_block_ids,
+        row_mpo,
+        *args,
+        **kwargs,
+    ):
+        del tensors, args, kwargs
+        return key, matter, h_links, iotas, active_block_ids, row_mpo, None
+
+    monkeypatch.setattr(su2_kernels, "_contract_1row_1col", count_scalar)
+    monkeypatch.setattr(su2_kernels, "_compute_single_gradient", count_gradient)
+    monkeypatch.setattr(
+        su2_kernels,
+        "_horizontal_hopping_sweep_row",
+        skip_horizontal,
+    )
+
+    transition(
+        tensors,
+        sample,
+        jax.random.PRNGKey(0),
+        _single_cache(init_cache(tensors, jnp.stack([sample]))),
+    )
+
+    assert scalar_calls == 0
+    assert gradient_calls == model.shape[0] * model.shape[1]
+
+
+def test_su2_horizontal_transition_carries_current_amplitude(monkeypatch):
+    model = NonAbelianGIPEPS(
+        rngs=nnx.Rngs(0),
+        config=NonAbelianGIPEPSConfig(
+            shape=(1, 3),
+            gauge_group=SU2(j_max_twice=1),
+            D=2,
+            chi=4,
+            phys_dim=2,
+            matter_irreps=(0, 1),
+            matter_numbers=(0, 1),
+            particle_number=2,
+        ),
+        contraction_strategy=NoTruncation(),
+    )
+    init_cache, transition, _estimate = build_mc_kernels(
+        model,
+        LocalHamiltonian(shape=model.shape, terms=()),
+    )
+    matter = jnp.asarray([[1, 1, 0]], dtype=jnp.int32)
+    h_links = jnp.asarray([[1, 0]], dtype=jnp.int32)
+    v_links = jnp.zeros((0, 3), dtype=jnp.int32)
+    iotas = jnp.zeros(model.shape, dtype=jnp.int32)
+    sample = NonAbelianGIPEPS.flatten_matter_sample(matter, h_links, v_links, iotas)
+    tensors = [
+        [jnp.ones_like(jnp.asarray(tensor)) for tensor in row]
+        for row in model.tensors
+    ]
+    two_col_calls = 0
+    original = su2_kernels._contract_1row_2col
+
+    def count_two_col(*args, **kwargs):
+        nonlocal two_col_calls
+        two_col_calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(su2_kernels, "_contract_1row_2col", count_two_col)
+
+    transition(
+        tensors,
+        sample,
+        jax.random.PRNGKey(0),
+        _single_cache(init_cache(tensors, jnp.stack([sample]))),
+    )
+
+    assert two_col_calls == 1
 
 
 def test_su2_kernel_estimates_plaquette_term_from_static_matrix_table():

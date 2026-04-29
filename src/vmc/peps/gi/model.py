@@ -24,6 +24,7 @@ from flax import nnx
 from vmc.peps.common.contraction import (
     _apply_mpo_from_below,
     _compute_right_envs,
+    _contract_1row_1col,
     _contract_2row_1col,
     _contract_2row_2col,
     _contract_bottom,
@@ -1140,23 +1141,32 @@ def _plaquette_sweep_row_pair(
     bottom_env: tuple,
     row_mpo0: tuple,
     row_mpo1: tuple,
+    amp_cur: jax.Array | None,
     r: int,
-) -> tuple[jax.Array, tuple, tuple, jax.Array, jax.Array]:
+) -> tuple[jax.Array, tuple, tuple, jax.Array, jax.Array, jax.Array | None]:
     """Sweep plaquettes in a row pair using direct einsum."""
     n_cols = config.shape[1]
     dtype = row_mpo0[0].dtype
     right_envs = _compute_right_envs_2row(top_env, row_mpo0, row_mpo1, bottom_env, dtype)
     left_env = jnp.ones((1, 1, 1, 1), dtype=dtype)
+    row_mpo0_list = list(row_mpo0)
+    row_mpo1_list = list(row_mpo1)
+    if amp_cur is None and n_cols > 1:
+        amp_cur = _contract_2row_2col(
+            left_env,
+            top_env,
+            row_mpo0_list[0],
+            row_mpo1_list[0],
+            row_mpo0_list[1],
+            row_mpo1_list[1],
+            bottom_env,
+            right_envs[1],
+            0,
+        )
 
     for c in range(n_cols - 1):
         key, subkey = jax.random.split(key)
         delta = jax.random.randint(subkey, (), 1, config.N, dtype=jnp.int32)
-
-        amp_cur = _contract_2row_2col(
-            left_env, top_env, row_mpo0[c], row_mpo1[c],
-            row_mpo0[c + 1], row_mpo1[c + 1], bottom_env, right_envs[c + 1], c,
-        )
-        # Compute proposed configuration
         h_prop, v_prop = _plaquette_flip(h_links, v_links, r, c, delta=delta, N=config.N)
         eff00 = _assemble_site(tensors, h_prop, v_prop, config, r, c)
         eff01 = _assemble_site(tensors, h_prop, v_prop, config, r, c + 1)
@@ -1166,29 +1176,42 @@ def _plaquette_sweep_row_pair(
         mpo01_prop = jnp.transpose(eff01[sites[r, c + 1]], (2, 3, 0, 1))
         mpo10_prop = jnp.transpose(eff10[sites[r + 1, c]], (2, 3, 0, 1))
         mpo11_prop = jnp.transpose(eff11[sites[r + 1, c + 1]], (2, 3, 0, 1))
-        amp_prop = _contract_2row_2col(
-            left_env, top_env, mpo00_prop, mpo10_prop,
-            mpo01_prop, mpo11_prop, bottom_env, right_envs[c + 1], c,
+        prefix_current = _update_left_env_2row(
+            left_env,
+            top_env[c],
+            row_mpo0_list[c],
+            row_mpo1_list[c],
+            bottom_env[c],
+        )
+        prefix_proposed = _update_left_env_2row(
+            left_env,
+            top_env[c],
+            mpo00_prop,
+            mpo10_prop,
+            bottom_env[c],
+        )
+        amp_prop = _contract_2row_1col(
+            prefix_proposed,
+            top_env[c + 1],
+            mpo01_prop,
+            mpo11_prop,
+            bottom_env[c + 1],
+            right_envs[c + 1],
         )
         key, accept = _metropolis_hastings_accept(
             key, jnp.abs(amp_cur) ** 2, jnp.abs(amp_prop) ** 2
         )
 
-        # Update MPOs for accepted proposals
-        row_mpo0_list = list(row_mpo0)
-        row_mpo1_list = list(row_mpo1)
-        row_mpo0_list[c] = jnp.where(accept, mpo00_prop, row_mpo0[c])
-        row_mpo0_list[c + 1] = jnp.where(accept, mpo01_prop, row_mpo0[c + 1])
-        row_mpo1_list[c] = jnp.where(accept, mpo10_prop, row_mpo1[c])
-        row_mpo1_list[c + 1] = jnp.where(accept, mpo11_prop, row_mpo1[c + 1])
-        row_mpo0 = tuple(row_mpo0_list)
-        row_mpo1 = tuple(row_mpo1_list)
+        row_mpo0_list[c] = jnp.where(accept, mpo00_prop, row_mpo0_list[c])
+        row_mpo0_list[c + 1] = jnp.where(accept, mpo01_prop, row_mpo0_list[c + 1])
+        row_mpo1_list[c] = jnp.where(accept, mpo10_prop, row_mpo1_list[c])
+        row_mpo1_list[c + 1] = jnp.where(accept, mpo11_prop, row_mpo1_list[c + 1])
         h_links = jnp.where(accept, h_prop, h_links)
         v_links = jnp.where(accept, v_prop, v_links)
+        left_env = jnp.where(accept, prefix_proposed, prefix_current)
+        amp_cur = jnp.where(accept, amp_prop, amp_cur)
 
-        left_env = _update_left_env_2row(left_env, top_env[c], row_mpo0[c], row_mpo1[c], bottom_env[c])
-
-    return key, row_mpo0, row_mpo1, h_links, v_links
+    return key, tuple(row_mpo0_list), tuple(row_mpo1_list), h_links, v_links, amp_cur
 
 
 def _horizontal_link_sweep_row(
@@ -1201,32 +1224,38 @@ def _horizontal_link_sweep_row(
     top_env: tuple,
     bottom_env: tuple,
     row_mpo: tuple,
+    amp_cur: jax.Array | None,
     mask_per_charge: jax.Array | None,
     r: int,
     charge_of_site: jax.Array,
     charge_to_indices: jax.Array,
     charge_deg: jax.Array,
-) -> tuple[jax.Array, tuple, jax.Array, jax.Array]:
+) -> tuple[jax.Array, tuple, jax.Array, jax.Array, jax.Array | None]:
     """Sweep horizontal links in a single row using direct einsum."""
     n_cols = config.shape[1]
     n = jnp.asarray(config.N, dtype=jnp.int32)
     dtype = row_mpo[0].dtype
     right_envs = _compute_right_envs(top_env, row_mpo, bottom_env, dtype)
     left_env = jnp.ones((1, 1, 1), dtype=dtype)
+    row_mpo_list = list(row_mpo)
+    if amp_cur is None and n_cols > 1:
+        prefix_current = _update_left_env_1row(
+            left_env,
+            top_env[0],
+            row_mpo_list[0],
+            bottom_env[0],
+        )
+        amp_cur = _contract_1row_1col(
+            prefix_current,
+            top_env[1],
+            row_mpo_list[1],
+            bottom_env[1],
+            right_envs[1],
+        )
 
     for c in range(n_cols - 1):
         key, subkey = jax.random.split(key)
         delta = jax.random.randint(subkey, (), 1, config.N, dtype=jnp.int32)
-
-        # Direct einsum for 2-site amplitude
-        # Convention: left_env (a,c,e), top[c] (a,u,b), mpo[c] (c,d,u,v), bot[c] (e,v,f)
-        # top[c+1] (b,g,h), mpo[c+1] (d,i,g,w), bot[c+1] (f,w,j), right_env (h,i,j)
-        amp_cur = jnp.einsum(
-            "ace,aub,cduv,evf,bgh,digw,fwj,hij->",
-            left_env, top_env[c], row_mpo[c], bottom_env[c],
-            top_env[c + 1], row_mpo[c + 1], bottom_env[c + 1], right_envs[c + 1],
-            optimize=[(0, 1), (0, 6), (0, 5), (0, 3), (1, 2), (1, 2), (0, 1)],
-        )
         h_prop = h_links.at[r, c].set((h_links[r, c] + delta) % n)
         q_left = charge_of_site[sites[r, c]]
         q_right = charge_of_site[sites[r, c + 1]]
@@ -1255,12 +1284,24 @@ def _horizontal_link_sweep_row(
         )
         mpo0 = jnp.transpose(eff0[sites_prop[r, c]], (2, 3, 0, 1))
         mpo1 = jnp.transpose(eff1[sites_prop[r, c + 1]], (2, 3, 0, 1))
-        # Direct einsum for proposed amplitude
-        amp_prop = jnp.einsum(
-            "ace,aub,cduv,evf,bgh,digw,fwj,hij->",
-            left_env, top_env[c], mpo0, bottom_env[c],
-            top_env[c + 1], mpo1, bottom_env[c + 1], right_envs[c + 1],
-            optimize=[(0, 1), (0, 6), (0, 5), (0, 3), (1, 2), (1, 2), (0, 1)],
+        prefix_current = _update_left_env_1row(
+            left_env,
+            top_env[c],
+            row_mpo_list[c],
+            bottom_env[c],
+        )
+        prefix_proposed = _update_left_env_1row(
+            left_env,
+            top_env[c],
+            mpo0,
+            bottom_env[c],
+        )
+        amp_prop = _contract_1row_1col(
+            prefix_proposed,
+            top_env[c + 1],
+            mpo1,
+            bottom_env[c + 1],
+            right_envs[c + 1],
         )
         key, accept = _metropolis_hastings_accept(
             key,
@@ -1269,17 +1310,14 @@ def _horizontal_link_sweep_row(
             proposal_ratio=proposal_ratio,
         )
 
-        # Update row_mpo, h_links, sites based on accept
-        row_mpo_list = list(row_mpo)
-        row_mpo_list[c] = jnp.where(accept, mpo0, row_mpo[c])
-        row_mpo_list[c + 1] = jnp.where(accept, mpo1, row_mpo[c + 1])
-        row_mpo = tuple(row_mpo_list)
+        row_mpo_list[c] = jnp.where(accept, mpo0, row_mpo_list[c])
+        row_mpo_list[c + 1] = jnp.where(accept, mpo1, row_mpo_list[c + 1])
         h_links = jnp.where(accept, h_prop, h_links)
         sites = jnp.where(accept, sites_prop, sites)
+        left_env = jnp.where(accept, prefix_proposed, prefix_current)
+        amp_cur = jnp.where(accept, amp_prop, amp_cur)
 
-        left_env = _update_left_env_1row(left_env, top_env[c], row_mpo[c], bottom_env[c])
-
-    return key, row_mpo, sites, h_links
+    return key, tuple(row_mpo_list), sites, h_links, amp_cur
 
 
 def _vertical_link_sweep_row_pair(
@@ -1293,26 +1331,34 @@ def _vertical_link_sweep_row_pair(
     bottom_env: tuple,
     row_mpo0: tuple,
     row_mpo1: tuple,
+    amp_cur: jax.Array | None,
     mask_per_charge: jax.Array | None,
     r: int,
     charge_of_site: jax.Array,
     charge_to_indices: jax.Array,
     charge_deg: jax.Array,
-) -> tuple[jax.Array, tuple, tuple, jax.Array, jax.Array]:
+) -> tuple[jax.Array, tuple, tuple, jax.Array, jax.Array, jax.Array | None]:
     """Sweep vertical links in a row pair using direct einsum."""
     n_cols = config.shape[1]
     n = jnp.asarray(config.N, dtype=jnp.int32)
     dtype = row_mpo0[0].dtype
     right_envs = _compute_right_envs_2row(top_env, row_mpo0, row_mpo1, bottom_env, dtype)
     left_env = jnp.ones((1, 1, 1, 1), dtype=dtype)
+    row_mpo0_list = list(row_mpo0)
+    row_mpo1_list = list(row_mpo1)
+    if amp_cur is None and n_cols > 0:
+        amp_cur = _contract_2row_1col(
+            left_env,
+            top_env[0],
+            row_mpo0_list[0],
+            row_mpo1_list[0],
+            bottom_env[0],
+            right_envs[0],
+        )
 
     for c in range(n_cols):
         key, subkey = jax.random.split(key)
         delta = jax.random.randint(subkey, (), 1, config.N, dtype=jnp.int32)
-
-        amp_cur = _contract_2row_1col(
-            left_env, top_env[c], row_mpo0[c], row_mpo1[c], bottom_env[c], right_envs[c],
-        )
         v_prop = v_links.at[r, c].set((v_links[r, c] + delta) % n)
         q_top = charge_of_site[sites[r, c]]
         q_bottom = charge_of_site[sites[r + 1, c]]
@@ -1340,8 +1386,25 @@ def _vertical_link_sweep_row_pair(
         )
         mpo0_prop = jnp.transpose(eff0[sites_prop[r, c]], (2, 3, 0, 1))
         mpo1_prop = jnp.transpose(eff1[sites_prop[r + 1, c]], (2, 3, 0, 1))
-        amp_prop = _contract_2row_1col(
-            left_env, top_env[c], mpo0_prop, mpo1_prop, bottom_env[c], right_envs[c],
+        prefix_current = _update_left_env_2row(
+            left_env,
+            top_env[c],
+            row_mpo0_list[c],
+            row_mpo1_list[c],
+            bottom_env[c],
+        )
+        prefix_proposed = _update_left_env_2row(
+            left_env,
+            top_env[c],
+            mpo0_prop,
+            mpo1_prop,
+            bottom_env[c],
+        )
+        amp_prop = jnp.einsum(
+            "bryf,bryf->",
+            prefix_proposed,
+            right_envs[c],
+            optimize=[(0, 1)],
         )
         key, accept = _metropolis_hastings_accept(
             key,
@@ -1350,19 +1413,14 @@ def _vertical_link_sweep_row_pair(
             proposal_ratio=proposal_ratio,
         )
 
-        # Update row_mpo, v_links, sites based on accept
-        row_mpo0_list = list(row_mpo0)
-        row_mpo1_list = list(row_mpo1)
-        row_mpo0_list[c] = jnp.where(accept, mpo0_prop, row_mpo0[c])
-        row_mpo1_list[c] = jnp.where(accept, mpo1_prop, row_mpo1[c])
-        row_mpo0 = tuple(row_mpo0_list)
-        row_mpo1 = tuple(row_mpo1_list)
+        row_mpo0_list[c] = jnp.where(accept, mpo0_prop, row_mpo0_list[c])
+        row_mpo1_list[c] = jnp.where(accept, mpo1_prop, row_mpo1_list[c])
         v_links = jnp.where(accept, v_prop, v_links)
         sites = jnp.where(accept, sites_prop, sites)
+        left_env = jnp.where(accept, prefix_proposed, prefix_current)
+        amp_cur = jnp.where(accept, amp_prop, amp_cur)
 
-        left_env = _update_left_env_2row(left_env, top_env[c], row_mpo0[c], row_mpo1[c], bottom_env[c])
-
-    return key, row_mpo0, row_mpo1, sites, v_links
+    return key, tuple(row_mpo0_list), tuple(row_mpo1_list), sites, v_links, amp_cur
 
 
 def _horizontal_hardcore_hop_sweep_row(
@@ -1375,23 +1433,32 @@ def _horizontal_hardcore_hop_sweep_row(
     top_env: tuple,
     bottom_env: tuple,
     row_mpo: tuple,
+    amp_cur: jax.Array | None,
     mask_per_charge: jax.Array | None,
     r: int,
-) -> tuple[jax.Array, tuple, jax.Array, jax.Array]:
+) -> tuple[jax.Array, tuple, jax.Array, jax.Array, jax.Array | None]:
     """Sweep number-conserving Z2 hard-core hops on a row."""
     n_cols = config.shape[1]
     if n_cols <= 1:
-        return key, row_mpo, sites, h_links
+        return key, row_mpo, sites, h_links, amp_cur
     dtype = row_mpo[0].dtype
     right_envs = _compute_right_envs(top_env, row_mpo, bottom_env, dtype)
     mpo = list(row_mpo)
     left_env = jnp.ones((1, 1, 1), dtype=dtype)
-    amp_cur = jnp.einsum(
-        "ace,aub,cduv,evf,bgh,digw,fwj,hij->",
-        left_env, top_env[0], mpo[0], bottom_env[0],
-        top_env[1], mpo[1], bottom_env[1], right_envs[1],
-        optimize=[(0, 1), (0, 6), (0, 5), (0, 3), (1, 2), (1, 2), (0, 1)],
-    )
+    if amp_cur is None:
+        prefix_current = _update_left_env_1row(
+            left_env,
+            top_env[0],
+            mpo[0],
+            bottom_env[0],
+        )
+        amp_cur = _contract_1row_1col(
+            prefix_current,
+            top_env[1],
+            mpo[1],
+            bottom_env[1],
+            right_envs[1],
+        )
 
     for c in range(n_cols - 1):
         allowed = sites[r, c] != sites[r, c + 1]
@@ -1423,10 +1490,12 @@ def _horizontal_hardcore_hop_sweep_row(
             prefix_prop = _update_left_env_1row(
                 left_env, top_env[c], mpo0, bottom_env[c]
             )
-            amp_prop = jnp.einsum(
-                "bdf,bgh,digw,fwj,hij->",
-                prefix_prop, top_env[c + 1], mpo1, bottom_env[c + 1], right_env,
-                optimize=[(0, 1), (0, 3), (0, 2), (0, 1)],
+            amp_prop = _contract_1row_1col(
+                prefix_prop,
+                top_env[c + 1],
+                mpo1,
+                bottom_env[c + 1],
+                right_env,
             )
             key_next, accept = _metropolis_hastings_accept(
                 key,
@@ -1463,7 +1532,7 @@ def _horizontal_hardcore_hop_sweep_row(
             operand=None,
         )
 
-    return key, tuple(mpo), sites, h_links
+    return key, tuple(mpo), sites, h_links, amp_cur
 
 
 def _vertical_hardcore_hop_sweep_row_pair(
@@ -1477,9 +1546,10 @@ def _vertical_hardcore_hop_sweep_row_pair(
     bottom_env: tuple,
     row_mpo0: tuple,
     row_mpo1: tuple,
+    amp_cur: jax.Array | None,
     mask_per_charge: jax.Array | None,
     r: int,
-) -> tuple[jax.Array, tuple, tuple, jax.Array, jax.Array]:
+) -> tuple[jax.Array, tuple, tuple, jax.Array, jax.Array, jax.Array | None]:
     """Sweep number-conserving Z2 hard-core hops on a row pair."""
     n_cols = config.shape[1]
     dtype = row_mpo0[0].dtype
@@ -1487,9 +1557,15 @@ def _vertical_hardcore_hop_sweep_row_pair(
     mpo0 = list(row_mpo0)
     mpo1 = list(row_mpo1)
     left_env = jnp.ones((1, 1, 1, 1), dtype=dtype)
-    amp_cur = _contract_2row_1col(
-        left_env, top_env[0], mpo0[0], mpo1[0], bottom_env[0], right_envs[0],
-    )
+    if amp_cur is None and n_cols > 0:
+        amp_cur = _contract_2row_1col(
+            left_env,
+            top_env[0],
+            mpo0[0],
+            mpo1[0],
+            bottom_env[0],
+            right_envs[0],
+        )
 
     for c in range(n_cols):
         allowed = sites[r, c] != sites[r + 1, c]
@@ -1562,7 +1638,7 @@ def _vertical_hardcore_hop_sweep_row_pair(
             operand=None,
         )
 
-    return key, tuple(mpo0), tuple(mpo1), sites, v_links
+    return key, tuple(mpo0), tuple(mpo1), sites, v_links, amp_cur
 
 
 def _compute_bottom_envs(
@@ -1622,10 +1698,11 @@ def transition(
         row_mpo1 = _build_row_mpo_gi(
             tensors, sites, h_links, v_links, config, 1, n_cols, mask_per_charge
         )
+        amp_cur = None
         for r in range(n_rows - 1):
             if config.phys_dim == 1:
                 top_envs_cache[r] = top_env_plaquettes
-            key, row_mpo0, row_mpo1, h_links, v_links = _plaquette_sweep_row_pair(
+            key, row_mpo0, row_mpo1, h_links, v_links, amp_cur = _plaquette_sweep_row_pair(
                 key,
                 tensors,
                 sites,
@@ -1636,6 +1713,7 @@ def transition(
                 envs[r + 1],
                 row_mpo0,
                 row_mpo1,
+                amp_cur,
                 r,
             )
             top_env_plaquettes = strategy.apply(top_env_plaquettes, row_mpo0)
@@ -1670,6 +1748,7 @@ def transition(
     )
 
     top_env_h = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
+    amp_cur = None
     for row in range(n_rows):
         if n_rows == 1:
             top_envs_cache[row] = top_env_h
@@ -1677,7 +1756,7 @@ def transition(
             tensors, sites, h_links, v_links, config, row, n_cols, mask_per_charge
         )
         if number_conserving:
-            key, row_mpo, sites, h_links = _horizontal_hardcore_hop_sweep_row(
+            key, row_mpo, sites, h_links, amp_cur = _horizontal_hardcore_hop_sweep_row(
                 key,
                 tensors,
                 sites,
@@ -1687,11 +1766,12 @@ def transition(
                 top_env_h,
                 bottom_envs_h[row],
                 row_mpo,
+                amp_cur,
                 mask_per_charge,
                 row,
             )
         else:
-            key, row_mpo, sites, h_links = _horizontal_link_sweep_row(
+            key, row_mpo, sites, h_links, amp_cur = _horizontal_link_sweep_row(
                 key,
                 tensors,
                 sites,
@@ -1701,6 +1781,7 @@ def transition(
                 top_env_h,
                 bottom_envs_h[row],
                 row_mpo,
+                amp_cur,
                 mask_per_charge,
                 row,
                 charge_of_site,
@@ -1726,10 +1807,11 @@ def transition(
     row_mpo1 = _build_row_mpo_gi(
         tensors, sites, h_links, v_links, config, 1, n_cols, mask_per_charge
     )
+    amp_cur = None
     for r in range(n_rows - 1):
         top_envs_cache[r] = top_env
         if number_conserving:
-            key, row_mpo0, row_mpo1, sites, v_links = _vertical_hardcore_hop_sweep_row_pair(
+            key, row_mpo0, row_mpo1, sites, v_links, amp_cur = _vertical_hardcore_hop_sweep_row_pair(
                 key,
                 tensors,
                 sites,
@@ -1740,11 +1822,12 @@ def transition(
                 bottom_envs_v[r + 1],
                 row_mpo0,
                 row_mpo1,
+                amp_cur,
                 mask_per_charge,
                 r,
             )
         else:
-            key, row_mpo0, row_mpo1, sites, v_links = _vertical_link_sweep_row_pair(
+            key, row_mpo0, row_mpo1, sites, v_links, amp_cur = _vertical_link_sweep_row_pair(
                 key,
                 tensors,
                 sites,
@@ -1755,6 +1838,7 @@ def transition(
                 bottom_envs_v[r + 1],
                 row_mpo0,
                 row_mpo1,
+                amp_cur,
                 mask_per_charge,
                 r,
                 charge_of_site,

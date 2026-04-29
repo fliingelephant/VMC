@@ -13,13 +13,14 @@ from vmc.peps.common.block_sparse import build_eval_schedule
 from vmc.peps.common.contraction import (
     _apply_mpo_from_below,
     _compute_right_envs,
+    _contract_1row_1col,
     _contract_2row_1col,
     _contract_2row_2col,
     _contract_bottom,
 )
 from vmc.peps.common.energy import (
-    _compute_all_row_gradients,
     _compute_right_envs_2row,
+    _compute_single_gradient,
     _update_left_env_1row,
     _update_left_env_2row,
 )
@@ -400,24 +401,6 @@ def _contract_1row_2col(
     )
 
 
-def _contract_1row_1col(
-    left_env: jax.Array,
-    top: jax.Array,
-    mpo: jax.Array,
-    bottom: jax.Array,
-    right_env: jax.Array,
-) -> jax.Array:
-    return jnp.einsum(
-        "ace,aub,cduv,evf,bdf->",
-        left_env,
-        top,
-        mpo,
-        bottom,
-        right_env,
-        optimize=[(0, 1), (0, 3), (0, 2), (0, 1)],
-    )
-
-
 def _sample_table_outcome(
     key: jax.Array,
     weights: jax.Array,
@@ -580,16 +563,16 @@ def _iota_heatbath_sweep_site(
     )
     valid = candidate_blocks >= 0
     safe_blocks = jnp.where(valid, candidate_blocks, current_block)
+    env_grad = _compute_single_gradient(
+        left_env,
+        right_envs[col],
+        top_env[col],
+        bottom_env[col],
+    )
     weights = []
     for candidate_block in safe_blocks:
         candidate_mpo = _block_mpo(tensors[row][col], candidate_block)
-        amp = _contract_1row_1col(
-            left_env,
-            top_env[col],
-            candidate_mpo,
-            bottom_env[col],
-            right_envs[col],
-        )
+        amp = jnp.einsum("cduv,uvcd->", candidate_mpo, env_grad)
         weights.append(jnp.abs(amp) ** 2)
     weights = jnp.where(valid, jnp.stack(weights), 0.0)
     key, iota_idx, can_sample = _sample_table_outcome(key, weights, jnp.sum(weights))
@@ -715,13 +698,14 @@ def _plaquette_sweep_row_pair(
     row_mpo1: tuple,
     top_env: tuple,
     bottom_env_next: tuple,
+    amp_cur: jax.Array | None,
     matrix_tables: tuple[tuple[PlaquetteMatrixTable, ...], ...],
     j_r_by_block: jax.Array,
     j_d_by_block: jax.Array,
     iota_by_block: jax.Array,
     *,
     row: int,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, tuple, tuple]:
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, tuple, tuple, jax.Array | None]:
     dtype = tensors[row][0].dtype
     right_envs = _compute_right_envs_2row(
         top_env,
@@ -733,6 +717,18 @@ def _plaquette_sweep_row_pair(
     left_env = jnp.ones((1, 1, 1, 1), dtype=dtype)
     row_mpo0_list = list(row_mpo0)
     row_mpo1_list = list(row_mpo1)
+    if amp_cur is None and len(row_mpo0) > 1:
+        amp_cur = _contract_2row_2col(
+            left_env,
+            top_env,
+            row_mpo0_list[0],
+            row_mpo1_list[0],
+            row_mpo0_list[1],
+            row_mpo1_list[1],
+            bottom_env_next,
+            right_envs[1],
+            0,
+        )
     for col in range(len(row_mpo0) - 1):
         (
             key,
@@ -742,6 +738,8 @@ def _plaquette_sweep_row_pair(
             active_block_ids,
             row_mpo0_list,
             row_mpo1_list,
+            left_env,
+            amp_cur,
         ) = _plaquette_sweep_site(
             key,
             tensors,
@@ -755,19 +753,13 @@ def _plaquette_sweep_row_pair(
             top_env,
             bottom_env_next,
             right_envs,
+            amp_cur,
             matrix_tables[row][col],
             j_r_by_block,
             j_d_by_block,
             iota_by_block,
             row=row,
             col=col,
-        )
-        left_env = _update_left_env_2row(
-            left_env,
-            top_env[col],
-            row_mpo0_list[col],
-            row_mpo1_list[col],
-            bottom_env_next[col],
         )
     return (
         key,
@@ -777,6 +769,7 @@ def _plaquette_sweep_row_pair(
         active_block_ids,
         tuple(row_mpo0_list),
         tuple(row_mpo1_list),
+        amp_cur,
     )
 
 
@@ -790,17 +783,28 @@ def _horizontal_hopping_sweep_row(
     row_mpo: tuple,
     top_env: tuple,
     bottom_env: tuple,
+    amp_cur: jax.Array | None,
     hopping_tables: tuple[tuple[HoppingMatrixTable, ...], ...],
     matter_state_by_block: jax.Array,
     j_r_by_block: jax.Array,
     iota_by_block: jax.Array,
     *,
     row: int,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, tuple]:
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, tuple, jax.Array | None]:
     dtype = tensors[row][0].dtype
     right_envs = _compute_right_envs(top_env, row_mpo, bottom_env, dtype)
     left_env = jnp.ones((1, 1, 1), dtype=dtype)
     row_mpo_list = list(row_mpo)
+    if amp_cur is None and len(row_mpo) > 1:
+        amp_cur = _contract_1row_2col(
+            left_env,
+            top_env,
+            row_mpo_list[0],
+            row_mpo_list[1],
+            bottom_env,
+            right_envs[1],
+            0,
+        )
     for col in range(len(row_mpo) - 1):
         (
             key,
@@ -809,6 +813,8 @@ def _horizontal_hopping_sweep_row(
             iotas,
             active_block_ids,
             row_mpo_list,
+            left_env,
+            amp_cur,
         ) = _horizontal_hopping_sweep_site(
             key,
             tensors,
@@ -821,6 +827,7 @@ def _horizontal_hopping_sweep_row(
             top_env,
             bottom_env,
             right_envs,
+            amp_cur,
             hopping_tables[row][col],
             matter_state_by_block,
             j_r_by_block,
@@ -828,13 +835,7 @@ def _horizontal_hopping_sweep_row(
             row=row,
             col=col,
         )
-        left_env = _update_left_env_1row(
-            left_env,
-            top_env[col],
-            row_mpo_list[col],
-            bottom_env[col],
-        )
-    return key, matter, h_links, iotas, active_block_ids, tuple(row_mpo_list)
+    return key, matter, h_links, iotas, active_block_ids, tuple(row_mpo_list), amp_cur
 
 
 def _horizontal_hopping_sweep_site(
@@ -849,6 +850,7 @@ def _horizontal_hopping_sweep_site(
     top_env: tuple,
     bottom_env: tuple,
     right_envs: list[jax.Array],
+    amp_cur: jax.Array,
     table: HoppingMatrixTable,
     matter_state_by_block: jax.Array,
     j_r_by_block: jax.Array,
@@ -856,9 +858,15 @@ def _horizontal_hopping_sweep_site(
     *,
     row: int,
     col: int,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, list]:
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, list, jax.Array, jax.Array]:
     if table.max_count == 0:
-        return key, matter, h_links, iotas, active_block_ids, row_mpo
+        left_env = _update_left_env_1row(
+            left_env,
+            top_env[col],
+            row_mpo[col],
+            bottom_env[col],
+        )
+        return key, matter, h_links, iotas, active_block_ids, row_mpo, left_env, amp_cur
     input_blocks = (active_block_ids[row, col], active_block_ids[row, col + 1])
     weights = _table_row_weights(table, input_blocks)
     key, out_idx, can_propose = _sample_table_outcome(
@@ -882,27 +890,28 @@ def _horizontal_hopping_sweep_site(
 
     mpo_left = _block_mpo(tensors[row][col], safe_blocks[0])
     mpo_right = _block_mpo(tensors[row][col + 1], safe_blocks[1])
-    amp_current = _contract_1row_2col(
+    prefix_current = _update_left_env_1row(
         left_env,
-        top_env,
+        top_env[col],
         row_mpo[col],
-        row_mpo[col + 1],
-        bottom_env,
-        right_envs[col + 1],
-        col,
+        bottom_env[col],
     )
-    amp_proposed = _contract_1row_2col(
+    prefix_proposed = _update_left_env_1row(
         left_env,
-        top_env,
+        top_env[col],
         mpo_left,
+        bottom_env[col],
+    )
+    amp_proposed = _contract_1row_1col(
+        prefix_proposed,
+        top_env[col + 1],
         mpo_right,
-        bottom_env,
+        bottom_env[col + 1],
         right_envs[col + 1],
-        col,
     )
     key, accept = _metropolis_hastings_accept(
         key,
-        jnp.abs(amp_current) ** 2,
+        jnp.abs(amp_cur) ** 2,
         jnp.abs(amp_proposed) ** 2,
         proposal_ratio=_proposal_ratio(table, input_blocks, safe_blocks, out_idx, can_propose),
     )
@@ -924,6 +933,8 @@ def _horizontal_hopping_sweep_site(
         jnp.where(accept, iota_candidate, iotas),
         jnp.where(accept, block_candidate, active_block_ids),
         row_mpo,
+        jnp.where(accept, prefix_proposed, prefix_current),
+        jnp.where(accept, amp_proposed, amp_cur),
     )
 
 
@@ -938,13 +949,14 @@ def _vertical_hopping_sweep_row_pair(
     row_mpo1: tuple,
     top_env: tuple,
     bottom_env_next: tuple,
+    amp_cur: jax.Array | None,
     hopping_tables: tuple[tuple[HoppingMatrixTable, ...], ...],
     matter_state_by_block: jax.Array,
     j_d_by_block: jax.Array,
     iota_by_block: jax.Array,
     *,
     row: int,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, tuple, tuple]:
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, tuple, tuple, jax.Array | None]:
     dtype = tensors[row][0].dtype
     right_envs = _compute_right_envs_2row(
         top_env,
@@ -956,6 +968,15 @@ def _vertical_hopping_sweep_row_pair(
     left_env = jnp.ones((1, 1, 1, 1), dtype=dtype)
     row_mpo0_list = list(row_mpo0)
     row_mpo1_list = list(row_mpo1)
+    if amp_cur is None and row_mpo0:
+        amp_cur = _contract_2row_1col(
+            left_env,
+            top_env[0],
+            row_mpo0_list[0],
+            row_mpo1_list[0],
+            bottom_env_next[0],
+            right_envs[0],
+        )
     for col in range(len(row_mpo0)):
         (
             key,
@@ -965,6 +986,8 @@ def _vertical_hopping_sweep_row_pair(
             active_block_ids,
             row_mpo0_list,
             row_mpo1_list,
+            left_env,
+            amp_cur,
         ) = _vertical_hopping_sweep_site(
             key,
             tensors,
@@ -978,6 +1001,7 @@ def _vertical_hopping_sweep_row_pair(
             top_env,
             bottom_env_next,
             right_envs,
+            amp_cur,
             hopping_tables[row][col],
             matter_state_by_block,
             j_d_by_block,
@@ -985,14 +1009,7 @@ def _vertical_hopping_sweep_row_pair(
             row=row,
             col=col,
         )
-        left_env = _update_left_env_2row(
-            left_env,
-            top_env[col],
-            row_mpo0_list[col],
-            row_mpo1_list[col],
-            bottom_env_next[col],
-        )
-    return key, matter, v_links, iotas, active_block_ids, tuple(row_mpo0_list), tuple(row_mpo1_list)
+    return key, matter, v_links, iotas, active_block_ids, tuple(row_mpo0_list), tuple(row_mpo1_list), amp_cur
 
 
 def _vertical_hopping_sweep_site(
@@ -1008,6 +1025,7 @@ def _vertical_hopping_sweep_site(
     top_env: tuple,
     bottom_env_next: tuple,
     right_envs: list[jax.Array],
+    amp_cur: jax.Array,
     table: HoppingMatrixTable,
     matter_state_by_block: jax.Array,
     j_d_by_block: jax.Array,
@@ -1015,9 +1033,16 @@ def _vertical_hopping_sweep_site(
     *,
     row: int,
     col: int,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, list, list]:
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, list, list, jax.Array, jax.Array]:
     if table.max_count == 0:
-        return key, matter, v_links, iotas, active_block_ids, row_mpo0, row_mpo1
+        left_env = _update_left_env_2row(
+            left_env,
+            top_env[col],
+            row_mpo0[col],
+            row_mpo1[col],
+            bottom_env_next[col],
+        )
+        return key, matter, v_links, iotas, active_block_ids, row_mpo0, row_mpo1, left_env, amp_cur
     input_blocks = (active_block_ids[row, col], active_block_ids[row + 1, col])
     weights = _table_row_weights(table, input_blocks)
     key, out_idx, can_propose = _sample_table_outcome(
@@ -1041,25 +1066,29 @@ def _vertical_hopping_sweep_site(
 
     mpo_top = _block_mpo(tensors[row][col], safe_blocks[0])
     mpo_bottom = _block_mpo(tensors[row + 1][col], safe_blocks[1])
-    amp_current = _contract_2row_1col(
+    prefix_current = _update_left_env_2row(
         left_env,
         top_env[col],
         row_mpo0[col],
         row_mpo1[col],
         bottom_env_next[col],
-        right_envs[col],
     )
-    amp_proposed = _contract_2row_1col(
+    prefix_proposed = _update_left_env_2row(
         left_env,
         top_env[col],
         mpo_top,
         mpo_bottom,
         bottom_env_next[col],
+    )
+    amp_proposed = jnp.einsum(
+        "bryf,bryf->",
+        prefix_proposed,
         right_envs[col],
+        optimize=[(0, 1)],
     )
     key, accept = _metropolis_hastings_accept(
         key,
-        jnp.abs(amp_current) ** 2,
+        jnp.abs(amp_cur) ** 2,
         jnp.abs(amp_proposed) ** 2,
         proposal_ratio=_proposal_ratio(table, input_blocks, safe_blocks, out_idx, can_propose),
     )
@@ -1082,6 +1111,8 @@ def _vertical_hopping_sweep_site(
         jnp.where(accept, block_candidate, active_block_ids),
         row_mpo0,
         row_mpo1,
+        jnp.where(accept, prefix_proposed, prefix_current),
+        jnp.where(accept, amp_proposed, amp_cur),
     )
 
 
@@ -1098,6 +1129,7 @@ def _plaquette_sweep_site(
     top_env: tuple,
     bottom_env_next: tuple,
     right_envs: list[jax.Array],
+    amp_cur: jax.Array,
     table: PlaquetteMatrixTable,
     j_r_by_block: jax.Array,
     j_d_by_block: jax.Array,
@@ -1105,9 +1137,16 @@ def _plaquette_sweep_site(
     *,
     row: int,
     col: int,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, list, list]:
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, list, list, jax.Array, jax.Array]:
     if table.max_count == 0:
-        return key, h_links, v_links, iotas, active_block_ids, row_mpo0, row_mpo1
+        left_env = _update_left_env_2row(
+            left_env,
+            top_env[col],
+            row_mpo0[col],
+            row_mpo1[col],
+            bottom_env_next[col],
+        )
+        return key, h_links, v_links, iotas, active_block_ids, row_mpo0, row_mpo1, left_env, amp_cur
     input_blocks = (
         active_block_ids[row, col],
         active_block_ids[row, col + 1],
@@ -1138,31 +1177,31 @@ def _plaquette_sweep_site(
     mpo_tr = _block_mpo(tensors[row][col + 1], safe_blocks[1])
     mpo_bl = _block_mpo(tensors[row + 1][col], safe_blocks[2])
     mpo_br = _block_mpo(tensors[row + 1][col + 1], safe_blocks[3])
-    amp_current = _contract_2row_2col(
+    prefix_current = _update_left_env_2row(
         left_env,
-        top_env,
+        top_env[col],
         row_mpo0[col],
         row_mpo1[col],
-        row_mpo0[col + 1],
-        row_mpo1[col + 1],
-        bottom_env_next,
-        right_envs[col + 1],
-        col,
+        bottom_env_next[col],
     )
-    amp_proposed = _contract_2row_2col(
+    prefix_proposed = _update_left_env_2row(
         left_env,
-        top_env,
+        top_env[col],
         mpo_tl,
         mpo_bl,
+        bottom_env_next[col],
+    )
+    amp_proposed = _contract_2row_1col(
+        prefix_proposed,
+        top_env[col + 1],
         mpo_tr,
         mpo_br,
-        bottom_env_next,
+        bottom_env_next[col + 1],
         right_envs[col + 1],
-        col,
     )
     key, accept = _metropolis_hastings_accept(
         key,
-        jnp.abs(amp_current) ** 2,
+        jnp.abs(amp_cur) ** 2,
         jnp.abs(amp_proposed) ** 2,
         proposal_ratio=_proposal_ratio(table, input_blocks, safe_blocks, out_idx, can_propose),
     )
@@ -1195,7 +1234,17 @@ def _plaquette_sweep_site(
     v_links = jnp.where(accept, v_candidate, v_links)
     iotas = jnp.where(accept, iota_candidate, iotas)
     active_block_ids = jnp.where(accept, block_candidate, active_block_ids)
-    return key, h_links, v_links, iotas, active_block_ids, row_mpo0, row_mpo1
+    return (
+        key,
+        h_links,
+        v_links,
+        iotas,
+        active_block_ids,
+        row_mpo0,
+        row_mpo1,
+        jnp.where(accept, prefix_proposed, prefix_current),
+        jnp.where(accept, amp_proposed, amp_cur),
+    )
 
 
 @build_mc_kernels.dispatch
@@ -1384,6 +1433,7 @@ def build_mc_kernels(
         if n_rows > 1 and n_cols > 1:
             row_mpos = build_row_mpos(tensors, sample)
             top_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
+            amp_cur = None
             for row in range(n_rows - 1):
                 (
                     key,
@@ -1393,6 +1443,7 @@ def build_mc_kernels(
                     active_block_ids,
                     row_mpos[row],
                     row_mpos[row + 1],
+                    amp_cur,
                 ) = _plaquette_sweep_row_pair(
                     key,
                     tensors,
@@ -1404,6 +1455,7 @@ def build_mc_kernels(
                     row_mpos[row + 1],
                     top_env,
                     cache.bottom_envs[row + 1],
+                    amp_cur,
                     matrix_tables,
                     j_r_by_block,
                     j_d_by_block,
@@ -1448,6 +1500,7 @@ def build_mc_kernels(
         row_mpos = build_row_mpos(tensors, sample_after_plaquettes)
         bottom_envs_h = build_bottom_envs(tensors, sample_after_plaquettes)
         top_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
+        amp_cur = None
         for row in range(n_rows):
             (
                 key,
@@ -1456,6 +1509,7 @@ def build_mc_kernels(
                 iotas,
                 active_block_ids,
                 row_mpos[row],
+                amp_cur,
             ) = _horizontal_hopping_sweep_row(
                 key,
                 tensors,
@@ -1466,6 +1520,7 @@ def build_mc_kernels(
                 row_mpos[row],
                 top_env,
                 bottom_envs_h[row],
+                amp_cur,
                 horizontal_hopping_tables,
                 matter_state_by_block,
                 j_r_by_block,
@@ -1497,6 +1552,7 @@ def build_mc_kernels(
         row_mpos = build_row_mpos(tensors, sample_after_horizontal)
         bottom_envs_v = build_bottom_envs(tensors, sample_after_horizontal)
         top_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
+        amp_cur = None
         for row in range(n_rows - 1):
             (
                 key,
@@ -1506,6 +1562,7 @@ def build_mc_kernels(
                 active_block_ids,
                 row_mpos[row],
                 row_mpos[row + 1],
+                amp_cur,
             ) = _vertical_hopping_sweep_row_pair(
                 key,
                 tensors,
@@ -1517,6 +1574,7 @@ def build_mc_kernels(
                 row_mpos[row + 1],
                 top_env,
                 bottom_envs_v[row + 1],
+                amp_cur,
                 vertical_hopping_tables,
                 matter_state_by_block,
                 j_d_by_block,
@@ -1545,43 +1603,7 @@ def build_mc_kernels(
         matter, h_links, v_links, _iotas = (
             NonAbelianGIPEPS.unflatten_spin_network_sample(sample, shape)
         )
-        bottom_envs = build_bottom_envs(tensors, sample)
         active_block_ids = _active_block_ids(block_id_lookup, sample, shape)
-        row_mpos = tuple(
-            build_row_mpo_from_lookup(
-                tensors,
-                sample,
-                shape,
-                block_id_lookup,
-                row=r,
-            )
-            for r in range(n_rows)
-        )
-        grad_parts = []
-        p_parts = [] if not full_gradient else None
-        for r in range(n_rows):
-            env_grads = _compute_all_row_gradients(
-                context.top_envs[r],
-                bottom_envs[r],
-                row_mpos[r],
-            )
-            for c in range(n_cols):
-                env_grad = env_grads[c]
-                if full_gradient:
-                    grad_full = jnp.zeros_like(jnp.asarray(tensors[r][c]))
-                    grad_parts.append(
-                        grad_full.at[active_block_ids[r, c]].set(env_grad).reshape(-1)
-                    )
-                    continue
-                grad_parts.append(env_grad.reshape(-1))
-                p_parts.append(
-                    jnp.full(
-                        (env_grad.size,),
-                        active_block_ids[r, c],
-                        dtype=jnp.int16,
-                    )
-                )
-
         coeffs = static_coeffs if context.coeffs is None else context.coeffs
         local_estimates = jnp.zeros(len(bucketed_terms), dtype=context.amp.dtype)
         for term, contributions in bucketed_terms.diagonal:
@@ -1589,45 +1611,76 @@ def build_mc_kernels(
             for op_idx, coeff_idx in contributions:
                 coeff = 1.0 if coeffs is None else coeffs[coeff_idx]
                 local_estimates = local_estimates.at[op_idx].add(coeff * term_energy)
-        for r, row_passes in enumerate(eval_schedule.rows):
-            for row_pass in row_passes:
+
+        bottom_envs = [None] * n_rows
+        env_grads = [[None for _ in range(n_cols)] for _ in range(n_rows)]
+        bottom_env = tuple(
+            jnp.ones((1, 1, 1), dtype=tensors[0][0].dtype)
+            for _ in range(n_cols)
+        )
+        next_row_mpo = None
+        empty_columns = tuple(() for _ in range(n_cols))
+        for r in range(n_rows - 1, -1, -1):
+            bottom_envs[r] = bottom_env
+            top_env = context.top_envs[r]
+            row_mpo = build_row_mpo_from_lookup(
+                tensors,
+                sample,
+                shape,
+                block_id_lookup,
+                row=r,
+            )
+            dr1_columns = empty_columns
+            other_row_passes = []
+            for row_pass in eval_schedule.rows[r]:
                 if row_pass.dr == 1:
-                    top_env = context.top_envs[r]
-                    bottom_env = bottom_envs[r]
-                    right_envs = _compute_right_envs(
-                        top_env,
-                        row_mpos[r],
-                        bottom_env,
-                        tensors[r][0].dtype,
-                    )
-                    left_env = jnp.ones((1, 1, 1), dtype=tensors[r][0].dtype)
-                    for c in range(n_cols):
-                        envs = SpinNetworkRowEnvs(
-                            left_env,
-                            right_envs,
-                            top_env,
-                            bottom_env,
-                            active_block_ids,
-                            horizontal_hopping_tables,
-                        )
-                        for column in row_pass.columns[c]:
-                            for term, contributions in column.terms:
-                                term_energy = (
-                                    _transition_energy(term, envs, tensors)
-                                    / context.amp
-                                )
-                                for op_idx, coeff_idx in contributions:
-                                    coeff = 1.0 if coeffs is None else coeffs[coeff_idx]
-                                    local_estimates = local_estimates.at[op_idx].add(
-                                        coeff * term_energy
-                                    )
-                        left_env = _update_left_env_1row(
-                            left_env,
-                            top_env[c],
-                            row_mpos[r][c],
-                            bottom_env[c],
-                        )
+                    dr1_columns = row_pass.columns
                     continue
+                other_row_passes.append(row_pass)
+
+            right_envs = _compute_right_envs(
+                top_env,
+                row_mpo,
+                bottom_env,
+                tensors[r][0].dtype,
+            )
+            left_env = jnp.ones((1, 1, 1), dtype=tensors[r][0].dtype)
+            for c in range(n_cols):
+                env_grad = _compute_single_gradient(
+                    left_env,
+                    right_envs[c],
+                    top_env[c],
+                    bottom_env[c],
+                )
+                env_grads[r][c] = env_grad
+                if dr1_columns[c]:
+                    envs = SpinNetworkRowEnvs(
+                        left_env,
+                        right_envs,
+                        top_env,
+                        bottom_env,
+                        active_block_ids,
+                        horizontal_hopping_tables,
+                    )
+                    for column in dr1_columns[c]:
+                        for term, contributions in column.terms:
+                            term_energy = (
+                                _transition_energy(term, envs, tensors)
+                                / context.amp
+                            )
+                            for op_idx, coeff_idx in contributions:
+                                coeff = 1.0 if coeffs is None else coeffs[coeff_idx]
+                                local_estimates = local_estimates.at[op_idx].add(
+                                    coeff * term_energy
+                                )
+                left_env = _update_left_env_1row(
+                    left_env,
+                    top_env[c],
+                    row_mpo[c],
+                    bottom_env[c],
+                )
+
+            for row_pass in other_row_passes:
                 if row_pass.dr != 2:
                     if any(row_pass.columns):
                         raise NotImplementedError(
@@ -1636,20 +1689,23 @@ def build_mc_kernels(
                     continue
                 if r >= n_rows - 1:
                     continue
-                top_env = context.top_envs[r]
+                if next_row_mpo is None:
+                    raise NotImplementedError(
+                        "Missing next-row MPO for non-Abelian dr=2 evaluation."
+                    )
                 bottom_env_next = bottom_envs[r + 1]
-                right_envs = _compute_right_envs_2row(
+                right_envs_2row = _compute_right_envs_2row(
                     top_env,
-                    row_mpos[r],
-                    row_mpos[r + 1],
+                    row_mpo,
+                    next_row_mpo,
                     bottom_env_next,
                     tensors[r][0].dtype,
                 )
-                left_env = jnp.ones((1, 1, 1, 1), dtype=tensors[r][0].dtype)
+                left_env_2row = jnp.ones((1, 1, 1, 1), dtype=tensors[r][0].dtype)
                 for c in range(n_cols):
                     envs = SpinNetworkTwoRowEnvs(
-                        left_env,
-                        right_envs,
+                        left_env_2row,
+                        right_envs_2row,
                         top_env,
                         bottom_env_next,
                         active_block_ids,
@@ -1666,15 +1722,38 @@ def build_mc_kernels(
                                 local_estimates = local_estimates.at[op_idx].add(
                                     coeff * term_energy
                                 )
-                    left_env = _update_left_env_2row(
-                        left_env,
+                    left_env_2row = _update_left_env_2row(
+                        left_env_2row,
                         top_env[c],
-                        row_mpos[r][c],
-                        row_mpos[r + 1][c],
+                        row_mpo[c],
+                        next_row_mpo[c],
                         bottom_env_next[c],
                     )
+
+            bottom_env = _apply_mpo_from_below(bottom_env, row_mpo, strategy)
+            next_row_mpo = row_mpo
+
+        grad_parts = []
+        p_parts = [] if not full_gradient else None
+        for r in range(n_rows):
+            for c in range(n_cols):
+                env_grad = env_grads[r][c]
+                if full_gradient:
+                    grad_full = jnp.zeros_like(jnp.asarray(tensors[r][c]))
+                    grad_parts.append(
+                        grad_full.at[active_block_ids[r, c]].set(env_grad).reshape(-1)
+                    )
+                    continue
+                grad_parts.append(env_grad.reshape(-1))
+                p_parts.append(
+                    jnp.full(
+                        (env_grad.size,),
+                        active_block_ids[r, c],
+                        dtype=jnp.int16,
+                    )
+                )
         active_slice_indices = None if full_gradient else jnp.concatenate(p_parts)
-        return Cache(bottom_envs=bottom_envs, coeffs=context.coeffs), LocalEstimates(
+        return Cache(bottom_envs=tuple(bottom_envs), coeffs=context.coeffs), LocalEstimates(
             local_log_derivatives=jnp.concatenate(grad_parts) / context.amp,
             local_estimate=local_estimates,
             active_slice_indices=active_slice_indices,

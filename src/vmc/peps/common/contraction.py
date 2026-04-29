@@ -18,6 +18,7 @@ __all__ = [
     "_forward_with_cache",
     "_apply_mpo_from_below",
     "_compute_right_envs",
+    "_contract_1row_1col",
 ]
 
 def _build_row_mpo(tensors, row_indices, row, n_cols):
@@ -85,6 +86,19 @@ def _compute_right_envs(
             optimize=[(0, 3), (0, 2), (0, 1)],
         )
     return right_envs
+
+
+def _contract_1row_1col(left_env, top, mpo, bottom, right_env):
+    """Contract a one-row, one-column window to a scalar amplitude."""
+    return jnp.einsum(
+        "ace,aub,cduv,evf,bdf->",
+        left_env,
+        top,
+        mpo,
+        bottom,
+        right_env,
+        optimize=[(0, 1), (1, 2), (1, 2), (0, 1)],
+    )
 
 
 def _contract_2row_2col(left_env, top_env, mpo0_c, mpo1_c, mpo0_c1, mpo1_c1, bottom_env, right_env, c):

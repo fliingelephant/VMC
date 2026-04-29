@@ -5,6 +5,7 @@ from vmc.peps.common.contraction import (
     _apply_mpo_from_below,
     _build_row_mpo,
     _compute_right_envs,
+    _contract_1row_1col,
     _contract_bottom,
     _forward_with_cache,
 )
@@ -35,6 +36,7 @@ __all__ = [
     "_apply_mpo_from_below",
     "_build_row_mpo",
     "_compute_right_envs",
+    "_contract_1row_1col",
     "_contract_bottom",
     "_forward_with_cache",
     "RowEnvs",

@@ -1,7 +1,7 @@
 # SU(2) Gauge-Invariant PEPS - Full Intertwiner Design
 
 Date: 2026-04-24
-Status: Pure-gauge SU(2) MVP implemented; non-Abelian extensions in progress
+Status: Pure-gauge SU(2) MVP implemented; reduced two-state matter extension in progress
 Supersedes: `docs/superpowers/specs/2026-04-18-su2-gi-peps-design.md`
 
 This design extends the Abelian GI-PEPS idea to SU(2) by sampling the full
@@ -21,12 +21,15 @@ The implementation split is:
 - `src/vmc/peps/non_abelian_gi/`: the generic non-Abelian GI-PEPS model, local
   terms, kernels, and table contract.
 
-The first implementation gate is pure gauge SU(2) Yang-Mills with open
-boundaries. That gate is now implemented and benchmarked against exact
-diagonalization on `2x2` and `3x3` `j_max = 1/2` systems. The remaining work is
-extension work: matter, larger/non-fundamental group truncations, and optional
-sector-block boundary-MPS machinery if heterogeneous virtual sectors become
-necessary.
+The first implementation gate was pure-gauge SU(2) Yang-Mills with open
+boundaries. That gate is implemented and benchmarked against exact
+diagonalization on `2x2` and `3x3` `j_max = 1/2` systems. The current gate is
+the reduced two-state bosonic matter extension with fixed particle number,
+matter-aware allowed block storage, matter hopping tables, and production
+kernel support for plaquette, hopping, and explicit local intertwiner mixing.
+Remaining extension work includes larger/non-fundamental group truncations and
+optional sector-block boundary-MPS machinery if heterogeneous virtual sectors
+become necessary.
 
 ---
 
@@ -106,7 +109,7 @@ the default because it restricts variational expressivity.
 - Compatibility with the current sampler, TDVP driver, SR preconditioner, and
   sliced QGT path.
 
-### 2.2 Next extension target
+### 2.2 Current matter extension target
 
 - Reduced matter-basis support through config fields:
   `phys_dim`, `matter_irreps`, `matter_numbers`, and `particle_number`.
@@ -116,8 +119,11 @@ the default because it restricts variational expressivity.
 - Fixed total `particle_number` and number-conserving hopping only.
 - Matter-aware vertex block tables, plaquette transition tables, and horizontal
   and vertical hopping transition tables.
-- Row-sparse connected-outcome operator tables before adding matter, so the
-  matter extension does not inflate dense four-site transition arrays.
+- Row-sparse connected-outcome operator tables for plaquette and hopping
+  evaluation, so the matter extension does not inflate dense four-site
+  transition arrays.
+- Explicit local `iota` heatbath mixing at fixed matter and link irreps after
+  the plaquette and matter-bond transition sweeps.
 
 ### 2.3 Deferred
 
@@ -826,7 +832,13 @@ dense block equal to one.
 
 ### 8.4 `transition`
 
-The pure-gauge transition is a sequential plaquette sweep:
+The transition kernel is separate from operator evaluation. It does not inspect
+the operator bucket structure. Operator bucketing is only for local-energy and
+observable evaluation, where shared environments across different operators and
+anchor positions matter. Transition follows a deterministic sweep order over
+the static plaquette and hopping tables.
+
+The pure-gauge transition starts with a sequential plaquette sweep:
 
 1. Maintain cached top/bottom block-sparse environments for each row pair.
 2. At each plaquette, compute the local `input_id` from current links and
@@ -847,6 +859,27 @@ number-conserving hopping sweeps after the plaquette sweep. A hopping proposal
 uses its static connected-outcome table to update exactly the two endpoint
 matter states, the connecting link irrep, and the two endpoint `iota` slots.
 The fixed `particle_number` sector is therefore preserved by construction.
+
+The production sweep order is:
+
+```text
+plaquettes
+horizontal matter bonds, when phys_dim > 1
+vertical matter bonds, when phys_dim > 1
+single-site iota heatbath, when max_iotas > 1
+```
+
+The final `iota` heatbath is needed because non-Abelian multiplicity labels are
+physical spin-network labels and the plaquette/hopping tables need not mix them
+ergodically in small local sectors. At a site, it keeps matter and the four
+adjacent link irreps fixed, enumerates valid local `iota` candidates through
+the closed-over `block_id_lookup`, contracts each candidate against the shared
+row environment, and samples with weight `abs(Psi)^2`. It updates only
+`iotas`, `active_block_ids`, and the selected row-MPO block.
+
+This heatbath does not sum out intertwiners. The sampled state remains the full
+spin-network state `(matter, links, iota)`. Exact hidden-intertwiner
+marginalization would require a separate double-layer estimator and is deferred.
 
 ### 8.5 `estimate`
 
@@ -1052,8 +1085,13 @@ Hard requirements:
     enabled; dense padded tables are temporary pure-gauge compatibility data.
 12. Row-sparse transition tables carry a static `max_count` loop bound per
     table/signature, so storage is sparse without dynamic JAX control flow.
-13. Compression is QR-only for the MVP.
-14. The Abelian GI implementation remains untouched.
+13. Transition sweeps are not driven by operator buckets. They use the static
+    plaquette and hopping transition tables directly, then perform an optional
+    local `iota` heatbath at fixed matter/link labels.
+14. The local `iota` heatbath must reuse row environments; it must not rebuild a
+    full PEPS contraction independently for each candidate.
+15. Compression is QR-only for the MVP.
+16. The Abelian GI implementation remains untouched.
 
 Expected `j_max = 1/2` pure-gauge storage:
 
@@ -1134,24 +1172,53 @@ Implemented for fundamental-truncated SU(3):
 - Exact 2x2 ED ground-energy baseline and imaginary-time SR optimization
   benchmark against ED.
 
+Implemented for reduced two-state SU(2) matter:
+
+- Config support for `phys_dim`, `matter_irreps`, `matter_numbers`, and fixed
+  `particle_number`.
+- Matter-aware allowed vertex blocks
+  `(matter_state, j_l, j_u, j_r, j_d, iota)` with only valid configurations
+  stored.
+- Matter sample flatten/unflatten helpers and valid random configuration
+  initialization in a fixed particle-number sector.
+- Diagonal matter-number terms and number-conserving horizontal/vertical
+  hopping terms.
+- Static connected-outcome hopping tables that update endpoint matter states,
+  the connecting link irrep, and endpoint intertwiners.
+- Production kernel support for matter-aware plaquette evaluation, hopping
+  evaluation, transition sweeps, sliced gradients, and sampled TDVP runs.
+- Transition order aligned with the Abelian GI-PEPS structure: plaquettes first,
+  then matter-bond sweeps when matter is enabled.
+- Single-site `iota` heatbath mixing at fixed matter/link labels, using
+  shared row environments and the closed-over allowed-block lookup.
+- Small fixed-particle matter Hamiltonian checks against ED, including
+  local-estimator consistency on the full basis.
+- Realistic sampled TDVP benchmark on the `2x3`, `j_max = 1/2`,
+  `particle_number = 2` matter system. With `D = 6`, boundary truncation
+  `chi = 24`, `dt = 0.03`, 2048 samples, 32 chains, and `diag_shift = 1e-8`,
+  the sampled run reaches energy within about `6e-4` of the ED ground energy.
+
 Current representation and efficiency boundary:
 
 - Vertex tensors are block-sparse over sampled spin-network physical states.
 - A Monte Carlo sample selects one dense degeneracy block per site.
 - Boundary contraction currently acts on those selected dense row-MPO blocks.
-- Plaquette magnetic terms currently use dense per-plaquette static matrix
-  tables; the next implementation step is to migrate transition evaluation to
-  row-sparse connected-outcome tables before adding matter.
+- Plaquette and hopping local-energy evaluation use connected outcome tables
+  and shared row/span environments. Transition uses its own deterministic
+  plaquette, hopping, and local `iota` heatbath sweeps.
+- D=4 matter runs plateau above ED in the current benchmark; increasing PEPS
+  virtual dimension to D=6 with `chi=24` substantially reduces the error. This
+  points to ansatz capacity as the dominant current limitation in that test,
+  not a missing Hamiltonian factor or disconnected transition graph.
 
 Still unfinished:
 
 - Commit a SU(3) 3x3 ED/optimization benchmark if that becomes a validation
   target.
-- Replace dense per-plaquette matrix tables with row-sparse connected-outcome
-  transition tables.
 - Reuse plaquette tables by plaquette-space signature instead of rebuilding
   equivalent boundary/interior cases independently.
-- Add fixed-`particle_number` reduced matter-basis support.
+- Broaden fixed-`particle_number` matter validation beyond the current small
+  `j_max = 1/2` systems and parameter point.
 - Extend SU(3) beyond the fundamental truncation `p + q <= 1`.
 - Add heterogeneous `D_j`, heterogeneous `chi_j`, and true sector-block
   boundary-MPS contraction/compression if non-uniform virtual sectors are
@@ -1227,8 +1294,6 @@ Still unfinished:
 
 ### Phase 8: Matter extension
 
-After pure-gauge validation:
-
 - Extend config with `phys_dim`, `matter_irreps`, `matter_numbers`, and fixed
   `particle_number`.
 - Use pure gauge as the uniform `phys_dim=1`, `matter_irreps=(0,)` case rather
@@ -1240,6 +1305,10 @@ After pure-gauge validation:
 - Add diagonal matter number/mass terms.
 - Add matter transition sweeps that preserve fixed `particle_number`.
 - Add ED tests for the smallest two-state matter systems.
+- Add explicit local `iota` heatbath mixing and regression coverage for
+  fixed-link intertwiner updates.
+- Add realistic sampled TDVP benchmarks against ED for nontrivial fixed-particle
+  matter sectors.
 
 ---
 
@@ -1292,11 +1361,13 @@ After pure-gauge validation:
 ### 12.6 Sampling tests
 
 - `test_su2_transition_preserves_gauss_law`
+- `test_su2_transition_sweeps_plaquettes_before_matter_bonds`
 - `test_su2_plaquette_hastings_ratio`
 - `test_su2_detailed_balance_exact_2x2`
 - `test_su2_plaquette_ergodicity_2x2`
 - `test_su2_matter_transition_preserves_particle_number`
 - `test_su2_matter_transition_preserves_gauss_law`
+- `test_su2_transition_heatbaths_single_site_iota_at_fixed_links`
 
 ### 12.7 Gradient and VMC tests
 
@@ -1373,5 +1444,11 @@ The first matter extension is successful when:
    outcomes while reusing the same row/span environments as pure gauge.
 4. Horizontal and vertical hopping transitions preserve fixed `particle_number`
    and local Gauss law including updated endpoint intertwiners.
-5. Small-lattice matter energies and sliced gradients match exact dense
+5. Transition includes an explicit local `iota` mixing path for sectors where
+   plaquette and hopping sweeps alone do not efficiently move between local
+   intertwiner channels.
+6. Small-lattice matter energies and sliced gradients match exact dense
    references.
+7. A sampled TDVP run on a nontrivial fixed-particle matter system approaches
+   the ED ground energy without using exact evaluation inside the optimization
+   loop.

@@ -424,6 +424,112 @@ def test_su2_matter_number_kernel_uses_sampled_matter_field():
     assert estimates.active_slice_indices.shape == (sum(model.params_per_site),)
 
 
+def test_su2_transition_sweeps_plaquettes_before_matter_bonds(monkeypatch):
+    model = NonAbelianGIPEPS(
+        rngs=nnx.Rngs(0),
+        config=NonAbelianGIPEPSConfig(
+            shape=(2, 2),
+            gauge_group=SU2(j_max_twice=1),
+            D=2,
+            chi=4,
+            phys_dim=2,
+            matter_irreps=(0, 1),
+            matter_numbers=(0, 1),
+            particle_number=2,
+        ),
+        contraction_strategy=NoTruncation(),
+    )
+    operator = LocalHamiltonian(
+        shape=model.shape,
+        terms=build_matter_number_terms(model.shape, model.matter_numbers),
+    )
+    calls = []
+
+    def plaquette_sweep(
+        key,
+        tensors,
+        h_links,
+        v_links,
+        iotas,
+        active_block_ids,
+        row_mpo0,
+        row_mpo1,
+        *args,
+        row,
+        **kwargs,
+    ):
+        del tensors, args, kwargs
+        calls.append(("plaquette", row))
+        return key, h_links, v_links, iotas, active_block_ids, row_mpo0, row_mpo1
+
+    def horizontal_sweep(
+        key,
+        tensors,
+        matter,
+        h_links,
+        iotas,
+        active_block_ids,
+        row_mpo,
+        *args,
+        row,
+        **kwargs,
+    ):
+        del tensors, args, kwargs
+        calls.append(("horizontal", row))
+        return key, matter, h_links, iotas, active_block_ids, row_mpo
+
+    def vertical_sweep(
+        key,
+        tensors,
+        matter,
+        v_links,
+        iotas,
+        active_block_ids,
+        row_mpo0,
+        row_mpo1,
+        *args,
+        row,
+        **kwargs,
+    ):
+        del tensors, args, kwargs
+        calls.append(("vertical", row))
+        return key, matter, v_links, iotas, active_block_ids, row_mpo0, row_mpo1
+
+    monkeypatch.setattr(
+        "vmc.peps.non_abelian_gi.kernels._plaquette_sweep_row_pair",
+        plaquette_sweep,
+    )
+    monkeypatch.setattr(
+        "vmc.peps.non_abelian_gi.kernels._horizontal_hopping_sweep_row",
+        horizontal_sweep,
+    )
+    monkeypatch.setattr(
+        "vmc.peps.non_abelian_gi.kernels._vertical_hopping_sweep_row_pair",
+        vertical_sweep,
+    )
+    init_cache, transition, _estimate = build_mc_kernels(model, operator)
+    sample = model.all_zero_sample()
+    tensors = [
+        [jnp.ones_like(jnp.asarray(tensor)) for tensor in row]
+        for row in model.tensors
+    ]
+
+    cache = init_cache(tensors, jnp.stack([sample]))
+    transition(
+        tensors,
+        sample,
+        jax.random.PRNGKey(0),
+        _single_cache(cache),
+    )
+
+    assert calls == [
+        ("plaquette", 0),
+        ("horizontal", 0),
+        ("horizontal", 1),
+        ("vertical", 0),
+    ]
+
+
 def test_su2_horizontal_matter_hopping_kernel_uses_sparse_connected_table():
     model = NonAbelianGIPEPS(
         rngs=nnx.Rngs(0),
@@ -969,6 +1075,65 @@ def test_su2_kernels_run_through_generic_mc_sampler():
     assert estimates.local_estimate.shape == (2, 2, 1)
     for sample in sample_history.reshape((-1, model.all_zero_sample().size)):
         model.active_block_ids(sample)
+
+
+def test_su2_transition_heatbaths_single_site_iota_at_fixed_links():
+    model = NonAbelianGIPEPS(
+        rngs=nnx.Rngs(0),
+        config=NonAbelianGIPEPSConfig(
+            shape=(2, 3),
+            gauge_group=SU2(j_max_twice=1),
+            D=2,
+            chi=4,
+            phys_dim=2,
+            matter_irreps=(0, 1),
+            matter_numbers=(0, 1),
+            particle_number=2,
+        ),
+        contraction_strategy=NoTruncation(),
+    )
+    matter = jnp.asarray([[1, 1, 0], [0, 0, 0]], dtype=jnp.int32)
+    h_links = jnp.asarray([[1, 1], [0, 1]], dtype=jnp.int32)
+    v_links = jnp.asarray([[0, 1, 1]], dtype=jnp.int32)
+    iotas = jnp.zeros(model.shape, dtype=jnp.int32)
+    sample = NonAbelianGIPEPS.flatten_matter_sample(matter, h_links, v_links, iotas)
+    active_blocks = model.active_block_ids(sample)
+    iota1_block = model.tables.block_id_lookup[0, 1, 1, 1, 0, 1, 1, 1]
+    assert active_blocks[0, 1] != iota1_block
+
+    tensors = [
+        [jnp.zeros_like(jnp.asarray(tensor)) for tensor in row]
+        for row in model.tensors
+    ]
+    for row in range(model.shape[0]):
+        for col in range(model.shape[1]):
+            block = iota1_block if (row, col) == (0, 1) else active_blocks[row, col]
+            tensors[row][col] = tensors[row][col].at[block].set(
+                jnp.ones_like(tensors[row][col][block])
+            )
+
+    init_cache, transition, _estimate = build_mc_kernels(
+        model,
+        LocalHamiltonian(shape=model.shape, terms=()),
+    )
+    cache = _single_cache(init_cache(tensors, jnp.stack([sample])))
+    sample_next, _key_next, context = transition(
+        tensors,
+        sample,
+        jax.random.PRNGKey(0),
+        cache,
+    )
+    matter_next, h_next, v_next, iotas_next = NonAbelianGIPEPS.unflatten_matter_sample(
+        sample_next,
+        model.shape,
+    )
+
+    assert jnp.array_equal(matter_next, matter)
+    assert jnp.array_equal(h_next, h_links)
+    assert jnp.array_equal(v_next, v_links)
+    assert iotas_next[0, 1] == 1
+    assert jnp.count_nonzero(iotas_next) == 1
+    assert jnp.abs(context.amp) > 0
 
 
 def test_plaquette_candidate_samples_preserve_gauss_law_for_jmax_half_vacuum():

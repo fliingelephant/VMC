@@ -1,4 +1,5 @@
 """Generic local terms for sampled pure-gauge non-Abelian GI-PEPS."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -8,7 +9,12 @@ import jax
 import jax.numpy as jnp
 from plum import dispatch
 
-from vmc.operators.local_terms import DiagonalOperator, TransitionOperator, support_span
+from vmc.operators.local_terms import (
+    DiagonalOperator,
+    PlaquetteOperator as PlaquetteTerm,
+    TransitionOperator,
+    support_span,
+)
 
 __all__ = [
     "HorizontalLinkCasimirTerm",
@@ -136,29 +142,6 @@ class VerticalMatterHoppingTerm(TransitionOperator):
         del children
         row, col = aux_data
         return cls(row=row, col=col)
-
-
-@jax.tree_util.register_pytree_node_class
-@dataclass(frozen=True)
-class PlaquetteTerm(TransitionOperator):
-    """Magnetic plaquette term on the square with top-left corner ``(row, col)``."""
-
-    row: int
-    col: int
-
-    def tree_flatten(self):
-        return (), (self.row, self.col)
-
-    @classmethod
-    def tree_unflatten(cls, aux_data, children):
-        del children
-        row, col = aux_data
-        return cls(row=row, col=col)
-
-
-@support_span.dispatch
-def support_span(_: PlaquetteTerm) -> tuple[int, int]:
-    return 2, 2
 
 
 @support_span.dispatch

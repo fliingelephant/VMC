@@ -30,7 +30,10 @@ from vmc.peps.common.energy import (
     _update_left_env_1row,
     _update_left_env_2row,
 )
-from vmc.peps.non_abelian_gi.contraction import build_row_mpo
+from vmc.peps.non_abelian_gi.contraction import (
+    active_block_ids_from_fields,
+    build_row_mpo,
+)
 from vmc.peps.non_abelian_gi.local_terms import (
     HorizontalLinkCasimirTerm,
     HorizontalMatterHoppingTerm,
@@ -180,21 +183,7 @@ def _active_block_ids(
         sample,
         shape,
     )
-    n_rows, n_cols = shape
-    h_padded = jnp.pad(h_links, ((0, 0), (1, 1)))
-    v_padded = jnp.pad(v_links, ((1, 1), (0, 0)))
-    r_idx = jnp.arange(n_rows)[:, None]
-    c_idx = jnp.arange(n_cols)[None, :]
-    return lookup[
-        r_idx,
-        c_idx,
-        matter,
-        h_padded[:, :-1],
-        v_padded[:-1, :],
-        h_padded[:, 1:],
-        v_padded[1:, :],
-        iotas,
-    ]
+    return active_block_ids_from_fields(lookup, matter, h_links, v_links, iotas, shape)
 
 
 def _flatten_like_sample(
@@ -1277,24 +1266,29 @@ def build_mc_kernels(
     if has_matter_hopping_terms and phys_dim == 1:
         raise ValueError("Matter hopping terms require phys_dim > 1.")
 
-    def build_bottom_envs(tensors: Any, sample: jax.Array) -> tuple:
-        dtype = tensors[0][0].dtype
+    def build_row_mpos(tensors: Any, sample: jax.Array) -> list[tuple[jax.Array, ...]]:
+        return [
+            build_row_mpo(
+                tensors,
+                sample,
+                shape,
+                block_id_lookup,
+                row=row,
+            )
+            for row in range(n_rows)
+        ]
+
+    def build_bottom_envs_from_row_mpos(row_mpos: list[tuple[jax.Array, ...]]) -> tuple:
+        dtype = row_mpos[0][0].dtype
         envs = [None] * n_rows
         env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
         for row in range(n_rows - 1, -1, -1):
             envs[row] = env
-            env = _apply_mpo_from_below(
-                env,
-                build_row_mpo(
-                    tensors,
-                    sample,
-                    shape,
-                    block_id_lookup,
-                    row=row,
-                ),
-                strategy,
-            )
+            env = _apply_mpo_from_below(env, row_mpos[row], strategy)
         return tuple(envs)
+
+    def build_bottom_envs(tensors: Any, sample: jax.Array) -> tuple:
+        return build_bottom_envs_from_row_mpos(build_row_mpos(tensors, sample))
 
     def init_cache(
         tensors: Any,
@@ -1313,18 +1307,6 @@ def build_mc_kernels(
                 )
             ),
         )
-
-    def build_row_mpos(tensors: Any, sample: jax.Array) -> list[tuple[jax.Array, ...]]:
-        return [
-            build_row_mpo(
-                tensors,
-                sample,
-                shape,
-                block_id_lookup,
-                row=row,
-            )
-            for row in range(n_rows)
-        ]
 
     def context_from_row_mpos(
         row_mpos: list[tuple[jax.Array, ...]],
@@ -1354,7 +1336,7 @@ def build_mc_kernels(
         if row_mpos is None:
             row_mpos = build_row_mpos(tensors, final_sample)
         if max_iotas > 1:
-            bottom_envs_iota = build_bottom_envs(tensors, final_sample)
+            bottom_envs_iota = build_bottom_envs_from_row_mpos(row_mpos)
             top_envs = [None] * n_rows
             top_env = tuple(
                 jnp.ones((1, 1, 1), dtype=row_mpos[0][0].dtype) for _ in range(n_cols)
@@ -1486,7 +1468,7 @@ def build_mc_kernels(
             iotas,
         )
         row_mpos = build_row_mpos(tensors, sample_after_plaquettes)
-        bottom_envs_h = build_bottom_envs(tensors, sample_after_plaquettes)
+        bottom_envs_h = build_bottom_envs_from_row_mpos(row_mpos)
         top_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
         amp_cur = None
         for row in range(n_rows):
@@ -1538,7 +1520,7 @@ def build_mc_kernels(
             iotas,
         )
         row_mpos = build_row_mpos(tensors, sample_after_horizontal)
-        bottom_envs_v = build_bottom_envs(tensors, sample_after_horizontal)
+        bottom_envs_v = build_bottom_envs_from_row_mpos(row_mpos)
         top_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
         amp_cur = None
         for row in range(n_rows - 1):

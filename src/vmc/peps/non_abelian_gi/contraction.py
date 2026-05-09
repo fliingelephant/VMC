@@ -8,7 +8,36 @@ import jax.numpy as jnp
 from vmc.peps.common.contraction import _contract_bottom
 from vmc.peps.non_abelian_gi.tables import PureGaugeTables
 
-__all__ = ["build_row_mpo", "non_abelian_gi_apply"]
+__all__ = [
+    "active_block_ids_from_fields",
+    "build_row_mpo",
+    "non_abelian_gi_apply",
+]
+
+
+def active_block_ids_from_fields(
+    block_id_lookup: jax.Array,
+    matter: jax.Array,
+    h_links: jax.Array,
+    v_links: jax.Array,
+    iotas: jax.Array,
+    shape: tuple[int, int],
+) -> jax.Array:
+    n_rows, n_cols = shape
+    h_padded = jnp.pad(h_links, ((0, 0), (1, 1)))
+    v_padded = jnp.pad(v_links, ((1, 1), (0, 0)))
+    r_idx = jnp.arange(n_rows)[:, None]
+    c_idx = jnp.arange(n_cols)[None, :]
+    return block_id_lookup[
+        r_idx,
+        c_idx,
+        matter,
+        h_padded[:, :-1],
+        v_padded[:-1, :],
+        h_padded[:, 1:],
+        v_padded[1:, :],
+        iotas,
+    ]
 
 
 def build_row_mpo(
@@ -26,21 +55,18 @@ def build_row_mpo(
         sample,
         shape,
     )
-    n_rows, n_cols = shape
+    active_block_ids = active_block_ids_from_fields(
+        block_id_lookup,
+        matter,
+        h_links,
+        v_links,
+        iotas,
+        shape,
+    )
+    n_cols = shape[1]
     return tuple(
         jnp.transpose(
-            tensors[row][c][
-                block_id_lookup[
-                    row,
-                    c,
-                    matter[row, c],
-                    h_links[row, c - 1] if c > 0 else 0,
-                    v_links[row - 1, c] if row > 0 else 0,
-                    h_links[row, c] if c < n_cols - 1 else 0,
-                    v_links[row, c] if row < n_rows - 1 else 0,
-                    iotas[row, c],
-                ]
-            ],
+            tensors[row][c][active_block_ids[row, c]],
             (2, 3, 0, 1),
         )
         for c in range(n_cols)

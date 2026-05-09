@@ -1,11 +1,9 @@
 """Generic scheduled block-sparse execution helpers."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
-
-import jax
-import jax.numpy as jnp
+from typing import Callable
 
 from vmc.operators.local_terms import BucketedOperators, TransitionOperator
 
@@ -14,8 +12,6 @@ __all__ = [
     "BlockEvalPass",
     "BlockEvalSchedule",
     "build_eval_schedule",
-    "gather_block",
-    "scatter_block_grad",
 ]
 
 
@@ -42,24 +38,6 @@ class BlockEvalSchedule:
     rows: tuple[tuple[BlockEvalPass, ...], ...]
 
 
-def gather_block(blocks: jax.Array, block_id: jax.Array | int) -> jax.Array:
-    """Gather one active dense block from a stacked block array."""
-    return blocks[block_id]
-
-
-def scatter_block_grad(
-    block_grad: jax.Array,
-    *,
-    block_id: jax.Array | int,
-    n_blocks: int,
-) -> jax.Array:
-    """Scatter one active dense-block gradient into a stacked block array."""
-    return jnp.zeros(
-        (n_blocks, *block_grad.shape),
-        dtype=block_grad.dtype,
-    ).at[block_id].set(block_grad)
-
-
 def build_eval_schedule(
     terms: BucketedOperators,
     eval_span: Callable[[TransitionOperator], tuple[int, int]],
@@ -83,7 +61,7 @@ def build_eval_schedule(
 
 
 def _group_column_by_dc(
-    col_terms: tuple[tuple[Any, tuple[tuple[int, int], ...]], ...],
+    col_terms: tuple[tuple[TransitionOperator, tuple[tuple[int, int], ...]], ...],
     eval_span: Callable[[TransitionOperator], tuple[int, int]],
 ) -> tuple[BlockEvalColumn, ...]:
     grouped: dict[int, list] = {}
@@ -91,6 +69,5 @@ def _group_column_by_dc(
         _dr, dc = eval_span(term)
         grouped.setdefault(dc, []).append((term, contributions))
     return tuple(
-        BlockEvalColumn(dc=dc, terms=tuple(grouped[dc]))
-        for dc in sorted(grouped)
+        BlockEvalColumn(dc=dc, terms=tuple(grouped[dc])) for dc in sorted(grouped)
     )

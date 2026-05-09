@@ -3,9 +3,52 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 import jax
+import jax.numpy as jnp
+import numpy as np
+
+SparseOutcomeRows = Mapping[tuple[int, ...], Sequence[tuple[tuple[int, ...], complex]]]
+
+
+def _pack_sparse_rows(
+    block_counts: tuple[int, ...],
+    outcomes_by_input: SparseOutcomeRows,
+    *,
+    n_output_blocks: int,
+    max_count: int,
+    matrix_dtype: np.dtype | type,
+) -> tuple[jax.Array, jax.Array, int, jax.Array, jax.Array, jax.Array, jax.Array]:
+    starts = np.zeros(block_counts, dtype=np.int32)
+    counts = np.zeros(block_counts, dtype=np.int32)
+    total_outputs = sum(len(outcomes) for outcomes in outcomes_by_input.values())
+    output_block_ids = np.full((total_outputs, n_output_blocks), -1, dtype=np.int32)
+    matrix_elements = np.zeros((total_outputs,), dtype=matrix_dtype)
+    cursor = 0
+    for input_ids, outcomes in outcomes_by_input.items():
+        starts[input_ids] = cursor
+        counts[input_ids] = len(outcomes)
+        for out_idx, (block_ids, matrix_element) in enumerate(outcomes):
+            output_block_ids[cursor + out_idx] = block_ids
+            matrix_elements[cursor + out_idx] = matrix_element
+        cursor += len(outcomes)
+    proposal_weights = np.abs(matrix_elements) ** 2
+    proposal_norms = np.zeros(block_counts, dtype=proposal_weights.dtype)
+    for input_ids, outcomes in outcomes_by_input.items():
+        start = int(starts[input_ids])
+        proposal_norms[input_ids] = np.sum(
+            proposal_weights[start : start + len(outcomes)]
+        )
+    return (
+        jnp.asarray(starts),
+        jnp.asarray(counts),
+        max_count,
+        jnp.asarray(output_block_ids),
+        jnp.asarray(matrix_elements),
+        jnp.asarray(proposal_weights),
+        jnp.asarray(proposal_norms),
+    )
 
 
 @dataclass(frozen=True)
@@ -106,6 +149,25 @@ class PlaquetteMatrixTable:
     proposal_weights: jax.Array
     proposal_norms: jax.Array
 
+    @classmethod
+    def from_rows(
+        cls,
+        block_counts: tuple[int, int, int, int],
+        outcomes_by_input: SparseOutcomeRows,
+        *,
+        max_count: int,
+        matrix_dtype: np.dtype | type,
+    ) -> "PlaquetteMatrixTable":
+        return cls(
+            *_pack_sparse_rows(
+                block_counts,
+                outcomes_by_input,
+                n_output_blocks=4,
+                max_count=max_count,
+                matrix_dtype=matrix_dtype,
+            )
+        )
+
     def flat_index(
         self,
         input_blocks: tuple[int, int, int, int],
@@ -140,6 +202,37 @@ class HoppingMatrixTable:
     matrix_elements: jax.Array
     proposal_weights: jax.Array
     proposal_norms: jax.Array
+
+    @classmethod
+    def empty(cls, block_counts: tuple[int, int]) -> "HoppingMatrixTable":
+        return cls(
+            starts=jnp.zeros(block_counts, dtype=jnp.int32),
+            counts=jnp.zeros(block_counts, dtype=jnp.int32),
+            max_count=0,
+            output_block_ids=jnp.full((0, 2), -1, dtype=jnp.int32),
+            matrix_elements=jnp.zeros((0,), dtype=jnp.float64),
+            proposal_weights=jnp.zeros((0,), dtype=jnp.float64),
+            proposal_norms=jnp.zeros(block_counts, dtype=jnp.float64),
+        )
+
+    @classmethod
+    def from_rows(
+        cls,
+        block_counts: tuple[int, int],
+        outcomes_by_input: SparseOutcomeRows,
+        *,
+        max_count: int,
+        matrix_dtype: np.dtype | type = np.float64,
+    ) -> "HoppingMatrixTable":
+        return cls(
+            *_pack_sparse_rows(
+                block_counts,
+                outcomes_by_input,
+                n_output_blocks=2,
+                max_count=max_count,
+                matrix_dtype=matrix_dtype,
+            )
+        )
 
     def flat_index(
         self,

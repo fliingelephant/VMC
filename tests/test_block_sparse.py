@@ -1,5 +1,3 @@
-import jax.numpy as jnp
-
 from vmc.operators.local_terms import (
     LocalHamiltonian,
     OneSiteOperator,
@@ -8,29 +6,9 @@ from vmc.operators.local_terms import (
     merge_operators,
     support_span,
 )
-from vmc.peps.common.block_sparse import (
-    build_eval_schedule,
-    gather_block,
-    scatter_block_grad,
-)
+import jax.numpy as jnp
 
-
-def test_block_gather_and_gradient_scatter_use_single_active_block():
-    blocks = jnp.arange(24).reshape((3, 2, 4))
-    block_grad = jnp.ones((2, 4))
-
-    assert jnp.array_equal(gather_block(blocks, 1), blocks[1])
-    assert jnp.array_equal(
-        scatter_block_grad(block_grad, block_id=2, n_blocks=3),
-        jnp.array(
-            [
-                [[0, 0, 0, 0], [0, 0, 0, 0]],
-                [[0, 0, 0, 0], [0, 0, 0, 0]],
-                [[1, 1, 1, 1], [1, 1, 1, 1]],
-            ],
-            dtype=block_grad.dtype,
-        ),
-    )
+from vmc.peps.common.block_sparse import build_eval_schedule
 
 
 def test_eval_schedule_groups_same_row_dr_col_by_dc():

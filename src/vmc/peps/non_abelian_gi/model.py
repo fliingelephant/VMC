@@ -20,7 +20,10 @@ from vmc.peps.non_abelian_gi.builders import (
     build_pure_gauge_tables,
     build_vertical_hopping_matrix_tables,
 )
-from vmc.peps.non_abelian_gi.contraction import non_abelian_gi_apply
+from vmc.peps.non_abelian_gi.contraction import (
+    active_block_ids_from_fields,
+    non_abelian_gi_apply,
+)
 from vmc.utils.utils import random_tensor
 
 if TYPE_CHECKING:
@@ -456,21 +459,14 @@ class NonAbelianGIPEPS(nnx.Module):
         v_links: jax.Array,
         iotas: jax.Array,
     ) -> jax.Array:
-        n_rows, n_cols = self.shape
-        h_padded = jnp.pad(h_links, ((0, 0), (1, 1)))
-        v_padded = jnp.pad(v_links, ((1, 1), (0, 0)))
-        r_idx = jnp.arange(n_rows)[:, None]
-        c_idx = jnp.arange(n_cols)[None, :]
-        return self.tables.block_id_lookup[
-            r_idx,
-            c_idx,
+        return active_block_ids_from_fields(
+            self.tables.block_id_lookup,
             matter,
-            h_padded[:, :-1],
-            v_padded[:-1, :],
-            h_padded[:, 1:],
-            v_padded[1:, :],
+            h_links,
+            v_links,
             iotas,
-        ]
+            self.shape,
+        )
 
 
 def _path_masks(

@@ -10,10 +10,11 @@ import jax.numpy as jnp
 from flax import nnx
 
 from vmc.core import make_mc_sampler
-from vmc.operators.local_terms import merge_operators
+from vmc.operators.local_terms import PlaquetteOperator, merge_operators
 from vmc.peps import NoTruncation, build_mc_kernels
 from vmc.peps.common.contraction import _forward_with_cache
 from vmc.peps.gi import GILocalHamiltonian, GIPEPS, GIPEPSConfig
+from vmc.peps.gi import model as gi_model
 from vmc.peps.gi.local_terms import (
     HorizontalHiggsLinkTerm,
     HorizontalMatterHoppingTerm,
@@ -21,6 +22,56 @@ from vmc.peps.gi.local_terms import (
     VerticalMatterHoppingTerm,
 )
 from vmc.peps.gi.model import assemble_tensors, estimate
+
+
+def test_gipeps_plaquette_transition_carries_current_amplitude(monkeypatch):
+    cfg = GIPEPSConfig(
+        shape=(2, 3),
+        N=2,
+        phys_dim=1,
+        Qx=0,
+        degeneracy_per_charge=(1,),
+        charge_of_site=(0,),
+    )
+    model = GIPEPS(
+        rngs=nnx.Rngs(0),
+        config=cfg,
+        contraction_strategy=NoTruncation(),
+    )
+    init_cache, transition, _estimate = build_mc_kernels(
+        model,
+        GILocalHamiltonian(
+            shape=cfg.shape,
+            terms=(PlaquetteOperator(row=0, col=0),),
+        ),
+    )
+    sample = GIPEPS.flatten_sample(
+        jnp.zeros(cfg.shape, dtype=jnp.int32),
+        jnp.zeros((cfg.shape[0], cfg.shape[1] - 1), dtype=jnp.int32),
+        jnp.zeros((cfg.shape[0] - 1, cfg.shape[1]), dtype=jnp.int32),
+    )
+    tensors = [[jnp.ones_like(jnp.asarray(tensor)) for tensor in row] for row in model.tensors]
+    two_col_calls = 0
+    original = gi_model._contract_2row_2col
+
+    def count_two_col(*args, **kwargs):
+        nonlocal two_col_calls
+        two_col_calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(gi_model, "_contract_2row_2col", count_two_col)
+
+    transition(
+        tensors,
+        sample,
+        jax.random.PRNGKey(0),
+        jax.tree_util.tree_map(
+            lambda x: x[0],
+            init_cache(tensors, jnp.stack([sample])),
+        ),
+    )
+
+    assert two_col_calls == 1
 
 
 class GIMatterTest(unittest.TestCase):

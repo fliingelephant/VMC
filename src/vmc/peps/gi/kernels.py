@@ -1,4 +1,5 @@
 """GI-PEPS kernel dispatch extension for the generic MC sampler."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -11,7 +12,8 @@ from vmc.operators.time_dependent import TimeDependentHamiltonian
 from vmc.peps.gi import model as gi_model
 from vmc.peps.gi.local_terms import HorizontalHiggsLinkTerm, VerticalHiggsLinkTerm
 from vmc.peps.gi.model import GIPEPS, _link_value_or_zero, _site_cfg_index
-from vmc.peps.standard.kernels import Cache, Context, LocalEstimates, build_mc_kernels
+from vmc.peps.common.kernels import Cache, Context, LocalEstimates, _broadcast_coeffs
+from vmc.peps.common.kernels import build_mc_kernels
 
 __all__ = ["build_mc_kernels"]
 
@@ -69,8 +71,7 @@ def build_mc_kernels(
         shape,
         eval_span=type(model).eval_span,
     )
-    has_time_dep = any(s is not None for s in coeff_structure.schedules)
-    static_coeffs = None if has_time_dep else coeff_structure.build_coeffs()
+    static_coeffs = coeff_structure.static_coeffs()
 
     def init_cache(
         tensors: Any,
@@ -85,21 +86,23 @@ def build_mc_kernels(
             for row in range(n_rows - 1, -1, -1):
                 envs[row] = env
                 row_mpo = gi_model._build_row_mpo_gi(
-                    tensors, sites, h_links, v_links, config, row, n_cols, mask_per_charge
+                    tensors,
+                    sites,
+                    h_links,
+                    v_links,
+                    config,
+                    row,
+                    n_cols,
+                    mask_per_charge,
                 )
                 env = gi_model._apply_mpo_from_below(env, row_mpo, strategy)
             return tuple(envs)
 
-        dynamic_coeffs = None if not has_time_dep else coeff_structure.build_coeffs(t)
         return Cache(
             bottom_envs=jax.vmap(build_one)(config_states),
-            coeffs=(
-                None
-                if dynamic_coeffs is None
-                else jnp.broadcast_to(
-                    dynamic_coeffs,
-                    (config_states.shape[0], dynamic_coeffs.shape[0]),
-                )
+            coeffs=_broadcast_coeffs(
+                coeff_structure.dynamic_coeffs(t),
+                config_states.shape[0],
             ),
         )
 
@@ -122,10 +125,14 @@ def build_mc_kernels(
             charge_to_indices,
             charge_deg,
         )
-        return config_state_next, key_next, Context(
-            amp=amp,
-            top_envs=top_envs,
-            coeffs=cache.coeffs,
+        return (
+            config_state_next,
+            key_next,
+            Context(
+                amp=amp,
+                top_envs=top_envs,
+                coeffs=cache.coeffs,
+            ),
         )
 
     def estimate(
@@ -171,7 +178,9 @@ def build_mc_kernels(
 
         local_log_derivatives = jnp.concatenate(grad_parts) / context.amp
         active_slice_indices = None if full_gradient else jnp.concatenate(p_parts)
-        return Cache(bottom_envs=tuple(envs_next), coeffs=context.coeffs), LocalEstimates(
+        return Cache(
+            bottom_envs=tuple(envs_next), coeffs=context.coeffs
+        ), LocalEstimates(
             local_log_derivatives=local_log_derivatives,
             local_estimate=local_energy,
             active_slice_indices=active_slice_indices,

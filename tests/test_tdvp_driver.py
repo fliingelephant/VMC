@@ -10,7 +10,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from vmc.drivers import TDVPDriver
+from vmc.drivers import ImaginaryTimeUnit, TDVPDriver
 import vmc.drivers.tdvp as tdvp_module
 from vmc.gauge import GaugeConfig
 from vmc.operators import (
@@ -19,7 +19,15 @@ from vmc.operators import (
     LocalHamiltonian,
     TimeDependentHamiltonian,
 )
+from vmc.gauge_groups import SU2
+from nonabelian_exact import exact_pure_gauge_hamiltonian
 from vmc.peps import BlockadePEPS, BlockadePEPSConfig, NoTruncation, PEPS
+from vmc.peps import (
+    NonAbelianGIPEPS,
+    NonAbelianGIPEPSConfig,
+    PlaquetteTerm,
+    build_link_casimir_terms,
+)
 from vmc.peps.gi import GILocalHamiltonian, GIPEPS, GIPEPSConfig
 from vmc.peps.gi.local_terms import build_electric_terms
 from vmc.preconditioners import (
@@ -58,6 +66,31 @@ def _diag_hamiltonian(shape: tuple[int, int], value: float) -> LocalHamiltonian:
             ),
         ),
     )
+
+
+def _su2_config(
+    *,
+    shape: tuple[int, int],
+    j_max_twice: int,
+    D: int,
+    chi: int,
+) -> NonAbelianGIPEPSConfig:
+    return NonAbelianGIPEPSConfig(
+        shape=shape,
+        gauge_group=SU2(j_max_twice=j_max_twice),
+        D=D,
+        chi=chi,
+    )
+
+
+def _set_su2_2x2_loop_amplitudes(model: NonAbelianGIPEPS, amplitudes: jax.Array) -> None:
+    root_amplitudes = jnp.exp(0.25 * jnp.log(amplitudes.astype(jnp.complex128)))
+    for row in range(model.shape[0]):
+        for col in range(model.shape[1]):
+            tensor = jnp.asarray(model.tensors[row][col])
+            model.tensors[row][col][...] = tensor.at[:, 0, 0, 0, 0].set(
+                root_amplitudes[: tensor.shape[0]]
+            )
 
 
 class TDVPKernelCacheTest(unittest.TestCase):
@@ -243,6 +276,97 @@ class TDVPKernelCacheTest(unittest.TestCase):
         driver.run(2 * driver.dt)
         self.assertEqual(driver.step_count, 2)
         self.assertAlmostEqual(driver.t, 0.2, places=12)
+
+    def test_su2_driver_reports_ed_ground_energy_for_exact_2x2_state(self) -> None:
+        electric_coeff = 0.7
+        plaquette_coeff = -1.2
+        model = NonAbelianGIPEPS(
+            rngs=nnx.Rngs(0),
+            config=_su2_config(shape=(2, 2), j_max_twice=2, D=1, chi=1),
+            contraction_strategy=NoTruncation(),
+        )
+        _samples, hamiltonian_matrix = exact_pure_gauge_hamiltonian(
+            model,
+            electric_coeff=electric_coeff,
+            plaquette_coeff=plaquette_coeff,
+        )
+        eigenvalues, eigenvectors = jnp.linalg.eigh(hamiltonian_matrix)
+        _set_su2_2x2_loop_amplitudes(model, eigenvectors[:, 0])
+        link_terms = build_link_casimir_terms(model.shape, model.gauge_group)
+        driver = TDVPDriver(
+            model,
+            LocalHamiltonian(
+                shape=model.shape,
+                terms=(*link_terms, PlaquetteTerm(row=0, col=0)),
+                coeffs=(jnp.asarray(electric_coeff),) * len(link_terms)
+                + (jnp.asarray(plaquette_coeff),),
+            ),
+            preconditioner=_ZeroPreconditioner(),
+            dt=0.1,
+            n_samples=4,
+            n_chains=2,
+            full_gradient=False,
+        )
+        driver.run(driver.dt)
+
+        self.assertEqual(driver.step_count, 1)
+        self.assertAlmostEqual(
+            float(driver.energy.mean.real),
+            float(eigenvalues[0]),
+            places=12,
+        )
+
+    def test_su2_imaginary_time_optimization_approaches_2x2_ed_energy(self) -> None:
+        electric_coeff = 0.7
+        plaquette_coeff = -1.2
+        model = NonAbelianGIPEPS(
+            rngs=nnx.Rngs(2),
+            config=_su2_config(shape=(2, 2), j_max_twice=1, D=2, chi=4),
+        )
+        eigenvalues, _eigenvectors = jnp.linalg.eigh(
+            exact_pure_gauge_hamiltonian(
+                model,
+                electric_coeff=electric_coeff,
+                plaquette_coeff=plaquette_coeff,
+            )[1]
+        )
+        link_terms = build_link_casimir_terms(model.shape, model.gauge_group)
+        driver = TDVPDriver(
+            model,
+            LocalHamiltonian(
+                shape=model.shape,
+                terms=(*link_terms, PlaquetteTerm(row=0, col=0)),
+                coeffs=(jnp.asarray(electric_coeff),) * len(link_terms)
+                + (jnp.asarray(plaquette_coeff),),
+            ),
+            preconditioner=SRPreconditioner(
+                strategy=DirectSolve(solver=solve_svd),
+                diag_shift=1e-3,
+            ),
+            dt=0.03,
+            time_unit=ImaginaryTimeUnit(),
+            sampler_key=jax.random.key(0),
+            n_samples=128,
+            n_chains=16,
+            full_gradient=True,
+        )
+        self.assertGreater(
+            int(jnp.unique(driver._sampler_configuration, axis=0).shape[0]),
+            1,
+        )
+
+        driver.run(20 * driver.dt)
+
+        self.assertEqual(driver.step_count, 20)
+        self.assertGreater(
+            int(jnp.unique(driver._sampler_configuration, axis=0).shape[0]),
+            1,
+        )
+        self.assertLess(float(driver.energy.error_of_mean.real), 2e-3)
+        self.assertLess(
+            abs(float(driver.energy.mean.real) - float(eigenvalues[0])),
+            2e-3,
+        )
 
 if __name__ == "__main__":
     unittest.main()

@@ -107,8 +107,8 @@ def compute_gauge_projection(
     offset = 0
     for r in range(n_rows):
         for c in range(n_cols):
-            u, dn, l, ri = PEPS.site_dims(r, c, n_rows, n_cols, D)
-            sz = d * u * dn * l * ri
+            u, dn, left, ri = PEPS.site_dims(r, c, n_rows, n_cols, D)
+            sz = d * u * dn * left * ri
             offsets.append(offset)
             site_sizes.append(sz)
             offset += sz
@@ -118,8 +118,8 @@ def compute_gauge_projection(
 
     def get_tensor(r, c):
         i = site_idx(r, c)
-        u, dn, l, ri = PEPS.site_dims(r, c, n_rows, n_cols, D)
-        return params_flat[offsets[i]:offsets[i] + site_sizes[i]].reshape(d, u, dn, l, ri)
+        u, dn, left, ri = PEPS.site_dims(r, c, n_rows, n_cols, D)
+        return params_flat[offsets[i]:offsets[i] + site_sizes[i]].reshape(d, u, dn, left, ri)
 
     # Enumerate bonds
     h_bond_idx = {}

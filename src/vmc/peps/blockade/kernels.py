@@ -1,4 +1,5 @@
 """Blockade-PEPS kernel dispatch extension for the generic MC sampler."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -11,7 +12,8 @@ from vmc.peps.blockade import model as blockade_model
 from vmc.peps.blockade.model import BlockadePEPS
 from vmc.peps.common.contraction import _apply_mpo_from_below
 from vmc.peps.common.energy import _estimate_sweep
-from vmc.peps.standard.kernels import Cache, Context, LocalEstimates, build_mc_kernels
+from vmc.peps.common.kernels import Cache, Context, LocalEstimates, _broadcast_coeffs
+from vmc.peps.common.kernels import build_mc_kernels
 
 __all__ = ["build_mc_kernels"]
 
@@ -38,17 +40,20 @@ def build_mc_kernels(
 
     all_operators = (operator,) + observables
     terms, coeff_structure = merge_operators(
-        all_operators, shape, eval_span=type(model).eval_span,
+        all_operators,
+        shape,
+        eval_span=type(model).eval_span,
     )
-    has_time_dep = any(s is not None for s in coeff_structure.schedules)
-    static_coeffs = None if has_time_dep else coeff_structure.build_coeffs()
+    static_coeffs = coeff_structure.static_coeffs()
 
     def init_cache(
         tensors: Any,
         config_states: jax.Array,
         t: float | jax.Array | None = None,
     ) -> Cache:
-        config_states_flat = config_states.reshape(config_states.shape[0], n_rows * n_cols)
+        config_states_flat = config_states.reshape(
+            config_states.shape[0], n_rows * n_cols
+        )
 
         def build_one(config_state: jax.Array):
             indices = BlockadePEPS.unflatten_sample(config_state, shape)
@@ -63,16 +68,11 @@ def build_mc_kernels(
                 env = _apply_mpo_from_below(env, row_mpo, strategy)
             return tuple(envs)
 
-        dynamic_coeffs = None if not has_time_dep else coeff_structure.build_coeffs(t)
         return Cache(
             bottom_envs=jax.vmap(build_one)(config_states_flat),
-            coeffs=(
-                None
-                if dynamic_coeffs is None
-                else jnp.broadcast_to(
-                    dynamic_coeffs,
-                    (config_states_flat.shape[0], dynamic_coeffs.shape[0]),
-                )
+            coeffs=_broadcast_coeffs(
+                coeff_structure.dynamic_coeffs(t),
+                config_states_flat.shape[0],
             ),
         )
 
@@ -91,7 +91,11 @@ def build_mc_kernels(
             mask_per_charge,
             strategy,
         )
-        return config_state_next, key_next, Context(amp=amp, top_envs=top_envs, coeffs=cache.coeffs)
+        return (
+            config_state_next,
+            key_next,
+            Context(amp=amp, top_envs=top_envs, coeffs=cache.coeffs),
+        )
 
     def estimate(
         tensors: Any,
@@ -155,17 +159,23 @@ def build_mc_kernels(
                 if full_gradient:
                     grad_full = jnp.zeros_like(jnp.asarray(tensors[row][col]))
                     grad_parts.append(
-                        grad_full.at[indices[row, col], cfg_idx].set(env_grad).reshape(-1)
+                        grad_full.at[indices[row, col], cfg_idx]
+                        .set(env_grad)
+                        .reshape(-1)
                     )
                 else:
                     grad_parts.append(env_grad.reshape(-1))
-                    combined_idx = indices[row, col] * nc_per_site[row * n_cols + col] + cfg_idx
+                    combined_idx = (
+                        indices[row, col] * nc_per_site[row * n_cols + col] + cfg_idx
+                    )
                     p_parts.append(
                         jnp.full((env_grad.size,), combined_idx, dtype=jnp.int16)
                     )
         local_log_derivatives = jnp.concatenate(grad_parts) / context.amp
         active_slice_indices = None if full_gradient else jnp.concatenate(p_parts)
-        return Cache(bottom_envs=tuple(envs_next), coeffs=context.coeffs), LocalEstimates(
+        return Cache(
+            bottom_envs=tuple(envs_next), coeffs=context.coeffs
+        ), LocalEstimates(
             local_log_derivatives=local_log_derivatives,
             local_estimate=local_energy,
             active_slice_indices=active_slice_indices,

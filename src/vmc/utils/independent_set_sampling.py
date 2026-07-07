@@ -8,8 +8,6 @@ from typing import Callable, Iterator, Sequence
 import jax
 import jax.numpy as jnp
 
-from vmc.utils.utils import occupancy_to_spin
-
 __all__ = [
     "DiscardBlockedSampler",
     "IndependentSetSampler",

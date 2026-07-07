@@ -381,7 +381,7 @@ class GradsAndEnergyTest(unittest.TestCase):
 
     def test_grads_and_energy_shapes(self):
         """Test that grads_and_energy returns correct shapes."""
-        from vmc.peps.standard.kernels import Context
+        from vmc.peps.common.kernels import Context
 
         config = BlockadePEPSConfig(shape=(3, 3), D0=2, D1=2)
         model = BlockadePEPS(
@@ -572,7 +572,7 @@ class DiagonalEnergyTest(unittest.TestCase):
 
     def test_diagonal_energy_direct(self):
         """Test that diagonal energy matches direct computation."""
-        from vmc.peps.standard.kernels import Context
+        from vmc.peps.common.kernels import Context
 
         shape = (2, 2)
         Omega = 0.0  # No X term for this test

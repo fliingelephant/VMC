@@ -1,13 +1,13 @@
 """PEPS kernel bundle for the canonical sampling core."""
+
 from __future__ import annotations
 
-from typing import Any, Callable, NamedTuple
+from typing import Any, Callable
 
 from vmc import config  # noqa: F401 - JAX config must be imported first
 
 import jax
 import jax.numpy as jnp
-from plum import dispatch
 
 from vmc.peps.common.contraction import (
     _apply_mpo_from_below,
@@ -16,82 +16,25 @@ from vmc.peps.common.contraction import (
     _contract_bottom,
 )
 from vmc.peps.common.energy import _estimate_sweep, _update_left_env_1row
+from vmc.peps.common.kernels import (
+    Cache,
+    Context,
+    LocalEstimates,
+    _assemble_log_derivatives,
+    _broadcast_coeffs,
+    build_mc_kernels,
+)
+from vmc.peps.standard.fermionic import build_fermionic_kernels
 from vmc.peps.standard.model import PEPS
 from vmc.operators.local_terms import (
     merge_operators,
 )
 from vmc.utils.utils import _metropolis_hastings_accept
 
-__all__ = [
-    "Cache",
-    "Context",
-    "LocalEstimates",
-    "build_mc_kernels",
-]
+__all__ = ["build_mc_kernels"]
 
 
-class Cache(NamedTuple):
-    """Persistent cache across sweeps."""
-
-    bottom_envs: Any
-    coeffs: jax.Array | None = None
-
-
-class Context(NamedTuple):
-    """Transient transition output consumed by estimate()."""
-
-    amp: jax.Array
-    top_envs: Any
-    coeffs: jax.Array | None = None
-
-
-class LocalEstimates(NamedTuple):
-    """Per-sweep local quantities."""
-
-    local_log_derivatives: jax.Array
-    local_estimate: jax.Array
-    active_slice_indices: jax.Array | None
-    amp: jax.Array | None = None
-
-
-def _assemble_log_derivatives(
-    tensors: Any,
-    params_per_site: Any,
-    total_active_params: int,
-    shape: tuple[int, int],
-    env_grads: list[list[jax.Array]],
-    config_state: jax.Array,
-    amp: jax.Array,
-    *,
-    full_gradient: bool,
-) -> tuple[jax.Array, jax.Array | None]:
-    n_rows, n_cols = shape
-    config_2d = config_state.reshape(shape)
-
-    if full_gradient:
-        grad_parts = []
-        for row in range(n_rows):
-            for col in range(n_cols):
-                grad_full = jnp.zeros_like(tensors[row][col])
-                grad_full = grad_full.at[config_2d[row, col]].set(env_grads[row][col])
-                grad_parts.append(grad_full.reshape(-1))
-        return jnp.concatenate(grad_parts) / amp, None
-
-    grad_parts = [
-        env_grads[row][col].reshape(-1)
-        for row in range(n_rows)
-        for col in range(n_cols)
-    ]
-    active_slice_indices = jnp.repeat(
-        config_state.astype(jnp.int8),
-        params_per_site,
-        axis=0,
-        total_repeat_length=total_active_params,
-    )
-    return jnp.concatenate(grad_parts) / amp, active_slice_indices
-
-
-@dispatch
+@build_mc_kernels.dispatch
 def build_mc_kernels(
     model: PEPS,
     operator: object,
@@ -113,6 +56,13 @@ def build_mc_kernels(
     entrypoint that calls the sampler and donate chain state buffers there, e.g.
     donate `(config_states, chain_keys, cache)`.
     """
+    if model.grading is not None:
+        return build_fermionic_kernels(
+            model,
+            operator,
+            full_gradient=full_gradient,
+            observables=observables,
+        )
     shape = model.shape
     n_rows, n_cols = shape
     n_sites = int(n_rows * n_cols)
@@ -124,10 +74,11 @@ def build_mc_kernels(
 
     all_operators = (operator,) + observables
     terms, coeff_structure = merge_operators(
-        all_operators, shape, eval_span=type(model).eval_span,
+        all_operators,
+        shape,
+        eval_span=type(model).eval_span,
     )
-    has_time_dep = any(s is not None for s in coeff_structure.schedules)
-    static_coeffs = None if has_time_dep else coeff_structure.build_coeffs()
+    static_coeffs = coeff_structure.static_coeffs()
 
     def init_cache(
         tensors: Any,
@@ -147,16 +98,11 @@ def build_mc_kernels(
                 env = _apply_mpo_from_below(env, mpo, strategy)
             return tuple(envs)
 
-        dynamic_coeffs = None if not has_time_dep else coeff_structure.build_coeffs(t)
         return Cache(
             bottom_envs=jax.vmap(build_one_bottom_envs)(samples_flat),
-            coeffs=(
-                None
-                if dynamic_coeffs is None
-                else jnp.broadcast_to(
-                    dynamic_coeffs,
-                    (samples_flat.shape[0], dynamic_coeffs.shape[0]),
-                )
+            coeffs=_broadcast_coeffs(
+                coeff_structure.dynamic_coeffs(t),
+                samples_flat.shape[0],
             ),
         )
 
@@ -249,10 +195,14 @@ def build_mc_kernels(
 
             top_env = strategy.apply(top_env, tuple(updated_row))
 
-        return sample.reshape(-1), key, Context(
-            amp=_contract_bottom(top_env),
-            top_envs=tuple(top_envs_cache),
-            coeffs=cache.coeffs,
+        return (
+            sample.reshape(-1),
+            key,
+            Context(
+                amp=_contract_bottom(top_env),
+                top_envs=tuple(top_envs_cache),
+                coeffs=cache.coeffs,
+            ),
         )
 
     def estimate(

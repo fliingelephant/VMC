@@ -1,16 +1,20 @@
 """Canonical standard PEPS model container."""
+
 from __future__ import annotations
 
 from vmc import config  # noqa: F401 - JAX config must be imported first
 
+import functools
 from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from flax import nnx
 
 from vmc.peps.common.strategy import ContractionStrategy, Variational
-from vmc.peps.standard.compat import peps_apply
+from vmc.peps.grading import Grading, even_mask
+from vmc.peps.standard.compat import graded_peps_apply, peps_apply
 from vmc.operators.local_terms import support_span
 from vmc.utils.utils import random_tensor
 
@@ -44,11 +48,24 @@ class PEPS(nnx.Module):
         phys_dim: int = 2,
         contraction_strategy: ContractionStrategy | None = None,
         dtype: "DTypeLike" = jnp.complex128,
+        grading: Grading | None = None,
     ):
         self.shape = (int(shape[0]), int(shape[1]))
         self.bond_dim = int(bond_dim)
         self.phys_dim = int(phys_dim)
         self.dtype = jnp.dtype(dtype)
+        self.grading = grading
+        if grading is not None:
+            if (
+                len(grading.phys_parity) != self.phys_dim
+                or len(grading.filling) != self.phys_dim
+                or sum(grading.filling) != self.shape[0] * self.shape[1]
+                or not 1 <= grading.n_even <= self.bond_dim
+            ):
+                raise ValueError(
+                    "grading inconsistent with lattice, physical, or bond dimensions"
+                )
+            self.apply = functools.partial(graded_peps_apply, grading=grading)
         if contraction_strategy is None:
             contraction_strategy = Variational(
                 truncate_bond_dimension=self.bond_dim * self.bond_dim
@@ -68,17 +85,16 @@ class PEPS(nnx.Module):
         self.tensors = [
             [
                 nnx.Param(
-                    random_tensor(
-                        rngs,
-                        (
-                            self.phys_dim,
-                            *self.site_dims(r, c, n_rows, n_cols, self.bond_dim),
-                        ),
-                        self.dtype,
+                    random_tensor(rngs, (self.phys_dim, *dims), self.dtype)
+                    * (
+                        1.0
+                        if grading is None
+                        else jnp.asarray(even_mask(grading, dims))
                     ),
                     dtype=self.dtype,
                 )
                 for c in range(n_cols)
+                for dims in [self.site_dims(r, c, n_rows, n_cols, self.bond_dim)]
             ]
             for r in range(n_rows)
         ]
@@ -100,6 +116,14 @@ class PEPS(nnx.Module):
     def random_physical_configuration(
         self, key: jax.Array, n_samples: int = 1
     ) -> jax.Array:
+        if self.grading is not None:
+            base = jnp.asarray(
+                np.repeat(np.arange(self.phys_dim), self.grading.filling),
+                dtype=jnp.int32,
+            )
+            return jax.vmap(lambda k: jax.random.permutation(k, base))(
+                jax.random.split(key, n_samples)
+            ).reshape(n_samples, self.shape[0], self.shape[1])
         return jax.random.randint(
             key,
             (n_samples, self.shape[0], self.shape[1]),

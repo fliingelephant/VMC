@@ -1,4 +1,5 @@
 """Compatibility surfaces for standard PEPS."""
+
 from __future__ import annotations
 
 import functools
@@ -17,9 +18,16 @@ from vmc.peps.common.energy import (
     _compute_all_gradients,
 )
 from vmc.peps.common.strategy import ContractionStrategy
+from vmc.peps.grading import (
+    FermionSigns,
+    Grading,
+    _grading_statics,
+    column_prefix_parities,
+)
 from vmc.utils.utils import spin_to_occupancy
 
 __all__ = [
+    "graded_peps_apply",
     "peps_apply",
     "local_estimate",
     "_value",
@@ -56,12 +64,98 @@ def _peps_apply_bwd(shape, strategy, residuals, g):
             grad_full = jnp.zeros_like(jnp.asarray(tensors[r][c]))
             grad_leaves.append(grad_full.at[spins[r, c]].set(g * env_grads[r][c]))
     return (
-        jax.tree_util.tree_unflatten(jax.tree_util.tree_structure(tensors), grad_leaves),
+        jax.tree_util.tree_unflatten(
+            jax.tree_util.tree_structure(tensors), grad_leaves
+        ),
         None,
     )
 
 
 peps_apply.defvjp(_peps_apply_fwd, _peps_apply_bwd)
+
+
+def _decorate(
+    tensors: list[list[jax.Array]],
+    prefix: jax.Array,
+    masks: list,
+    right_par: list,
+) -> list[list[jax.Array]]:
+    """Graded assembly rule: mask x right-leg gate sign ``(-1)^{prefix * P}``."""
+    return [
+        [
+            jnp.asarray(tensors[r][c])
+            * masks[r][c]
+            * (1.0 - 2.0 * prefix[r, c] * right_par[r][c])
+            for c in range(len(tensors[0]))
+        ]
+        for r in range(len(tensors))
+    ]
+
+
+def _graded_forward(
+    tensors: list[list[jax.Array]],
+    spins: jax.Array,
+    shape: tuple[int, int],
+    strategy: ContractionStrategy,
+    grading: Grading,
+) -> tuple[jax.Array, list[tuple]]:
+    """Masked, gate-signed forward pass caching the top boundaries."""
+    masks, right_par, _ = _grading_statics(grading, tensors)
+    prefix = column_prefix_parities(jnp.asarray(grading.phys_parity)[spins])
+    return _forward_with_cache(
+        _decorate(tensors, prefix, masks, right_par), spins, shape, strategy
+    )
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(2, 3, 4))
+def graded_peps_apply(
+    tensors: list[list[jax.Array]],
+    sample: jax.Array,
+    shape: tuple[int, int],
+    strategy: ContractionStrategy,
+    grading: Grading,
+) -> jax.Array:
+    """Amplitude of a graded PEPS sample."""
+    spins = spin_to_occupancy(sample).reshape(shape)
+    return _graded_forward(tensors, spins, shape, strategy, grading)[0]
+
+
+def _graded_peps_apply_fwd(tensors, sample, shape, strategy, grading):
+    spins = spin_to_occupancy(sample).reshape(shape)
+    masks, right_par, _ = _grading_statics(grading, tensors)
+    prefix = column_prefix_parities(jnp.asarray(grading.phys_parity)[spins])
+    decorated = _decorate(tensors, prefix, masks, right_par)
+    amp, top_envs = _forward_with_cache(decorated, spins, shape, strategy)
+    return amp, (decorated, spins, prefix, top_envs)
+
+
+def _graded_peps_apply_bwd(shape, strategy, grading, residuals, g):
+    decorated, spins, prefix, top_envs = residuals
+    n_rows, n_cols = shape
+    masks, right_par, _ = _grading_statics(grading, decorated)
+    env_grads = _compute_all_gradients(decorated, spins, shape, strategy, top_envs)
+    grad_leaves = []
+    for r in range(n_rows):
+        for c in range(n_cols):
+            grad_leaves.append(
+                jnp.zeros_like(decorated[r][c])
+                .at[spins[r, c]]
+                .set(
+                    g
+                    * env_grads[r][c]
+                    * masks[r][c][spins[r, c]]
+                    * (1.0 - 2.0 * prefix[r, c] * right_par[r][c])
+                )
+            )
+    return (
+        jax.tree_util.tree_unflatten(
+            jax.tree_util.tree_structure(decorated), grad_leaves
+        ),
+        None,
+    )
+
+
+graded_peps_apply.defvjp(_graded_peps_apply_fwd, _graded_peps_apply_bwd)
 
 
 def _value(
@@ -72,9 +166,9 @@ def _value(
     sample = jnp.asarray(sample)
     tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
     if sample.ndim == 2:
-        return jax.vmap(
-            lambda s: model.apply(tensors, s, model.shape, model.strategy)
-        )(sample)
+        return jax.vmap(lambda s: model.apply(tensors, s, model.shape, model.strategy))(
+            sample
+        )
     return model.apply(tensors, sample, model.shape, model.strategy)
 
 
@@ -85,9 +179,7 @@ def _grad(
     full_gradient: bool = False,
 ) -> tuple[jax.Array, jax.Array | None]:
     """Compute amplitude gradient for standard PEPS sample(s)."""
-    _, grad_row, p_row = _value_and_grad(
-        model, sample, full_gradient=full_gradient
-    )
+    _, grad_row, p_row = _value_and_grad(model, sample, full_gradient=full_gradient)
     return grad_row, p_row
 
 
@@ -117,16 +209,25 @@ def _value_and_grad(
         return amp, grad_flat, None
 
     spins = spin_to_occupancy(sample).reshape(shape)
+    if model.grading is not None:
+        masks, right_par, _ = _grading_statics(model.grading, tensors)
+        prefix = column_prefix_parities(jnp.asarray(model.grading.phys_parity)[spins])
+        tensors = _decorate(tensors, prefix, masks, right_par)
     amp, top_envs = _forward_with_cache(tensors, spins, shape, model.strategy)
     env_grads = _compute_all_gradients(tensors, spins, shape, model.strategy, top_envs)
+    if model.grading is not None:
+        for r in range(n_rows):
+            for c in range(n_cols):
+                env_grads[r][c] = env_grads[r][c] * (
+                    masks[r][c][spins[r, c]]
+                    * (1.0 - 2.0 * prefix[r, c] * right_par[r][c])
+                )
 
     grad_parts, p_parts = [], []
     for r in range(n_rows):
         for c in range(n_cols):
             grad_parts.append(env_grads[r][c].reshape(-1))
-            up, down, left, right = model.site_dims(
-                r, c, n_rows, n_cols, bond_dim
-            )
+            up, down, left, right = model.site_dims(r, c, n_rows, n_cols, bond_dim)
             params_per_phys = up * down * left * right
             p_parts.append(jnp.full((params_per_phys,), spins[r, c], dtype=jnp.int8))
 
@@ -146,7 +247,9 @@ def local_estimate(
     amps = jnp.asarray(amps)
     shape = model.shape
     bucketed_terms, coeff_structure = merge_operators(
-        (operator,), shape, eval_span=type(model).eval_span,
+        (operator,),
+        shape,
+        eval_span=type(model).eval_span,
     )
     base_coeffs = coeff_structure.build_coeffs()
     coeffs = base_coeffs if coeffs is None else base_coeffs * coeffs
@@ -178,11 +281,24 @@ def local_estimate(
         return jax.vmap(diag_only)(samples)
 
     tensors = [[jnp.asarray(t) for t in row] for row in model.tensors]
+    grading = model.grading
+    if grading is not None:
+        masks, right_par, down_par = _grading_statics(grading, tensors)
+        down_flip = [[1.0 - 2.0 * par for par in row] for row in down_par]
+        right_flip = [[1.0 - 2.0 * par for par in row] for row in right_par]
 
     def per_sample(sample, amp):
         occupancy = spin_to_occupancy(sample)
         spins = occupancy.reshape(shape)
-        _, top_envs = _forward_with_cache(tensors, spins, shape, model.strategy)
+        if grading is None:
+            decorated, env_config = tensors, None
+        else:
+            parities = jnp.asarray(grading.phys_parity)[spins]
+            prefix = column_prefix_parities(parities)
+            suffix = (jnp.sum(parities, axis=0) + prefix + parities) % 2
+            decorated = _decorate(tensors, prefix, masks, right_par)
+            env_config = FermionSigns(prefix, suffix, down_flip, right_flip)
+        _, top_envs = _forward_with_cache(decorated, spins, shape, model.strategy)
 
         def build_row_mpo(
             tensors: Any,
@@ -192,13 +308,14 @@ def local_estimate(
             return _build_row_mpo(tensors, sample[row], row, shape[1])
 
         _, energies, _ = _estimate_sweep(
-            tensors,
+            decorated,
             spins,
             amp,
             top_envs,
             strategy=model.strategy,
             terms=bucketed_terms,
             build_row_mpo=build_row_mpo,
+            env_config=env_config,
             coeffs=coeffs,
             collect_grads=False,
         )

@@ -1,4 +1,5 @@
 """Common PEPS contraction primitives."""
+
 from __future__ import annotations
 
 from vmc import config  # noqa: F401 - JAX config must be imported first
@@ -18,7 +19,10 @@ __all__ = [
     "_forward_with_cache",
     "_apply_mpo_from_below",
     "_compute_right_envs",
+    "_contract_1row_1col",
+    "_contract_1row_2col",
 ]
+
 
 def _build_row_mpo(tensors, row_indices, row, n_cols):
     """Build row-MPO for PEPS contraction."""
@@ -63,7 +67,9 @@ def _apply_mpo_from_below(
     strategy: ContractionStrategy,
 ) -> tuple:
     """Apply MPO to boundary boundary state from below (for backward sweep)."""
-    return strategy.apply(bottom_mps, tuple(jnp.transpose(w, (0, 1, 3, 2)) for w in mpo))
+    return strategy.apply(
+        bottom_mps, tuple(jnp.transpose(w, (0, 1, 3, 2)) for w in mpo)
+    )
 
 
 def _compute_right_envs(
@@ -81,19 +87,80 @@ def _compute_right_envs(
         # top: (a, u, b), mpo: (c, d, u, v), bot: (e, v, f), right_env: (b, d, f) -> (a, c, e)
         right_envs[c] = jnp.einsum(
             "aub,cduv,evf,bdf->ace",
-            top_env[c + 1], mpo_row[c + 1], bottom_env[c + 1], right_envs[c + 1],
+            top_env[c + 1],
+            mpo_row[c + 1],
+            bottom_env[c + 1],
+            right_envs[c + 1],
             optimize=[(0, 3), (0, 2), (0, 1)],
         )
     return right_envs
 
 
-def _contract_2row_2col(left_env, top_env, mpo0_c, mpo1_c, mpo0_c1, mpo1_c1, bottom_env, right_env, c):
+def _contract_1row_1col(left_env, top, mpo, bottom, right_env):
+    """Contract a one-row, one-column window to a scalar amplitude."""
+    return jnp.einsum(
+        "ace,aub,cduv,evf,bdf->",
+        left_env,
+        top,
+        mpo,
+        bottom,
+        right_env,
+        optimize=[(0, 1), (1, 2), (1, 2), (0, 1)],
+    )
+
+
+def _contract_1row_2col(
+    left_env,
+    top_left,
+    mpo_left,
+    bottom_left,
+    top_right,
+    mpo_right,
+    bottom_right,
+    right_env,
+):
+    """Contract a one-row, two-column window to a scalar amplitude."""
+    return jnp.einsum(
+        "ace,aub,cduv,evf,bgh,digw,fwj,hij->",
+        left_env,
+        top_left,
+        mpo_left,
+        bottom_left,
+        top_right,
+        mpo_right,
+        bottom_right,
+        right_env,
+        optimize=[(0, 1), (0, 6), (0, 5), (0, 3), (1, 2), (1, 2), (0, 1)],
+    )
+
+
+def _contract_2row_2col(
+    left_env, top_env, mpo0_c, mpo1_c, mpo0_c1, mpo1_c1, bottom_env, right_env, c
+):
     """Contract 2-row, 2-column window for amplitude."""
     return jnp.einsum(
         "alxe,aub,lruv,xyvw,ewf,bgc,rsgh,ythi,fij,cstj->",
-        left_env, top_env[c], mpo0_c, mpo1_c, bottom_env[c],
-        top_env[c + 1], mpo0_c1, mpo1_c1, bottom_env[c + 1], right_env,
-        optimize=[(0, 1), (0, 8), (0, 7), (0, 6), (0, 4), (0, 4), (1, 2), (1, 2), (0, 1)],
+        left_env,
+        top_env[c],
+        mpo0_c,
+        mpo1_c,
+        bottom_env[c],
+        top_env[c + 1],
+        mpo0_c1,
+        mpo1_c1,
+        bottom_env[c + 1],
+        right_env,
+        optimize=[
+            (0, 1),
+            (0, 8),
+            (0, 7),
+            (0, 6),
+            (0, 4),
+            (0, 4),
+            (1, 2),
+            (1, 2),
+            (0, 1),
+        ],
     )
 
 
@@ -101,6 +168,11 @@ def _contract_2row_1col(left_env, top, mpo0, mpo1, bottom, right_env):
     """Contract 2-row, 1-column for amplitude (last column)."""
     return jnp.einsum(
         "alxe,aub,lruv,xyvw,ewf,bryf->",
-        left_env, top, mpo0, mpo1, bottom, right_env,
+        left_env,
+        top,
+        mpo0,
+        mpo1,
+        bottom,
+        right_env,
         optimize=[(0, 1), (0, 4), (1, 2), (1, 2), (0, 1)],
     )

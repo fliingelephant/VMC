@@ -29,7 +29,6 @@ from plum import dispatch
 
 from vmc.peps.blockade.compat import blockade_apply
 from vmc.peps.common.contraction import (
-    _apply_mpo_from_below,
     _compute_right_envs,
     _contract_2row_1col,
     _contract_2row_2col,

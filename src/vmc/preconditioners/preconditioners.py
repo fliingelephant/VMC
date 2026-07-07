@@ -16,7 +16,6 @@ from plum import dispatch
 
 from vmc.qgt import QGT, Jacobian, ParameterSpace, SampleSpace, SlicedJacobian
 from vmc.qgt.jacobian import SliceOrdering, SiteOrdering, jacobian_mean
-from vmc.qgt.qgt import _params_per_site
 from vmc.qgt.solvers import solve_cg, solve_cholesky, solve_svd
 
 if TYPE_CHECKING:

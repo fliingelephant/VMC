@@ -107,17 +107,55 @@ def _graded_forward(
     )
 
 
+@functools.partial(jax.custom_vjp, nondiff_argnums=(2, 3, 4))
 def graded_peps_apply(
     tensors: list[list[jax.Array]],
     sample: jax.Array,
     shape: tuple[int, int],
     strategy: ContractionStrategy,
-    *,
     grading: Grading,
 ) -> jax.Array:
     """Amplitude of a graded PEPS sample."""
     spins = spin_to_occupancy(sample).reshape(shape)
     return _graded_forward(tensors, spins, shape, strategy, grading)[0]
+
+
+def _graded_peps_apply_fwd(tensors, sample, shape, strategy, grading):
+    spins = spin_to_occupancy(sample).reshape(shape)
+    masks, right_par, _ = _grading_statics(grading, tensors)
+    prefix = column_prefix_parities(jnp.asarray(grading.phys_parity)[spins])
+    decorated = _decorate(tensors, prefix, masks, right_par)
+    amp, top_envs = _forward_with_cache(decorated, spins, shape, strategy)
+    return amp, (decorated, spins, prefix, top_envs)
+
+
+def _graded_peps_apply_bwd(shape, strategy, grading, residuals, g):
+    decorated, spins, prefix, top_envs = residuals
+    n_rows, n_cols = shape
+    masks, right_par, _ = _grading_statics(grading, decorated)
+    env_grads = _compute_all_gradients(decorated, spins, shape, strategy, top_envs)
+    grad_leaves = []
+    for r in range(n_rows):
+        for c in range(n_cols):
+            grad_leaves.append(
+                jnp.zeros_like(decorated[r][c])
+                .at[spins[r, c]]
+                .set(
+                    g
+                    * env_grads[r][c]
+                    * masks[r][c][spins[r, c]]
+                    * (1.0 - 2.0 * prefix[r, c] * right_par[r][c])
+                )
+            )
+    return (
+        jax.tree_util.tree_unflatten(
+            jax.tree_util.tree_structure(decorated), grad_leaves
+        ),
+        None,
+    )
+
+
+graded_peps_apply.defvjp(_graded_peps_apply_fwd, _graded_peps_apply_bwd)
 
 
 def _value(

@@ -184,7 +184,9 @@ def test_local_estimate_matches_jw_dense(shape) -> None:
         )
         _, jvp_val = jax.jvp(
             lambda ts: jnp.log(
-                graded_peps_apply(ts, cfg, shape, NoTruncation(), grading=grading)
+                _graded_forward(ts, cfg.reshape(shape), shape, NoTruncation(), grading)[
+                    0
+                ]
             ),
             (tensors,),
             (tangent,),
@@ -210,6 +212,13 @@ def test_local_estimate_matches_jw_dense(shape) -> None:
         assert abs(
             complex(jnp.dot(grad_c, tangent_active) - expected_dpsi)
         ) < 1e-9 * max(1.0, abs(complex(expected_dpsi)))
+
+        amp_f, grad_f, p_f = _value_and_grad(model, cfg, full_gradient=True)
+        assert p_f is None
+        assert abs(complex(amp_f - psi[idx])) < 1e-10 * abs(complex(psi[idx]))
+        assert abs(complex(jnp.dot(grad_f, tangent_flat) - expected_dpsi)) < 1e-9 * max(
+            1.0, abs(complex(expected_dpsi))
+        )
 
     sector = jnp.asarray(sector_configs(shape, grading.filling[1]))
     sector_idx = jnp.asarray([basis_index(s) for s in np.asarray(sector)])

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import vmc.config  # noqa: F401 - JAX config must be imported first
 
+import functools
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -18,6 +19,7 @@ from vmc.peps.non_abelian_gi.contraction import (
     active_block_ids_from_fields,
     flatten_matter_sample,
     flatten_sample,
+    graded_non_abelian_gi_apply,
     non_abelian_gi_apply,
     unflatten_matter_sample,
     unflatten_sample,
@@ -54,6 +56,7 @@ class NonAbelianGIPEPSConfig:
     matter_irreps: tuple[int, ...] = (0,)
     matter_numbers: tuple[int, ...] = (0,)
     particle_number: int = 0
+    n_even: int | None = None
     dtype: "DTypeLike" = jnp.complex128
 
     def __post_init__(self) -> None:
@@ -93,6 +96,8 @@ class NonAbelianGIPEPSConfig:
             raise ValueError(
                 "Singlet/fundamental SU(2) matter requires even particle_number."
             )
+        if self.n_even is not None and not 0 <= self.n_even <= self.D:
+            raise ValueError("n_even must lie in [0, D].")
 
 
 class NonAbelianGIPEPS(nnx.Module):
@@ -116,7 +121,14 @@ class NonAbelianGIPEPS(nnx.Module):
         self.matter_irreps = tuple(int(irrep) for irrep in config.matter_irreps)
         self.matter_numbers = tuple(int(number) for number in config.matter_numbers)
         self.particle_number = int(config.particle_number)
+        self.n_even = None if config.n_even is None else int(config.n_even)
         self.dtype = jnp.dtype(config.dtype)
+        if self.n_even is not None:
+            self.apply = functools.partial(
+                graded_non_abelian_gi_apply,
+                matter_parity=jnp.asarray([n % 2 for n in self.matter_numbers]),
+                n_even=self.n_even,
+            )
 
         self.tables = build_pure_gauge_tables(
             self.gauge_group,

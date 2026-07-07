@@ -63,7 +63,7 @@ def _random_graded_tensors(seed: int, shape: tuple[int, int], grading: Grading):
     tensors = [
         [
             (rng.standard_normal((2, *dims)) + 1j * rng.standard_normal((2, *dims)))
-            * even_mask(grading, dims)
+            * even_mask(grading.phys_parity, dims, grading.n_even)
             for c in range(n_cols)
             for dims in [PEPS.site_dims(r, c, n_rows, n_cols, 2)]
         ]

@@ -160,13 +160,55 @@ Phase 2 (LGT string signs):
    the Phase-1 gate.
 2. Parity column + string signs in `non_abelian_gi` hopping (correctness
    fix), with the Phase-2 gate.
-3. Deferred, each behind an explicit criterion:
-   - parity-graded degeneracy legs for LGT matter (expressiveness upgrade;
-     the sampled-basis analogue of fermionic rishons) — when matter physics
-     demands it;
-   - folding standard PEPS into the sector-PEPS model as the trivial-group
-     point — only if net slimmer with zero efficiency loss on the dense
-     path.
+3. Parity-graded degeneracy legs for LGT matter (§8.3, accepted 2026-07-07;
+   the sampled-basis analogue of fermionic rishons). Pinned construction:
+
+   - **Config.** `NonAbelianGIPEPSConfig.n_even: int | None = None`; `None`
+     is today's ungraded ansatz (statistics via ME strings only, phase 2).
+     Set, it grades every degeneracy leg with the contiguous parity layout
+     of §5 (dimension-1 boundary legs are all-even). The physical parity of
+     a block is `matter_numbers[matter_state_by_block] mod 2`; gauge links
+     stay bosonic (no parity on irrep labels).
+   - **Assembly.** Per-site static mask over `(block, up, down, left,
+     right)` keeping entries with `P_phys(block) + Σ P_legs` even, folded
+     into the tensors once per kernel call; sample-keyed right-leg gate
+     `(−1)^{prefix[r,c]·P_right}` with `prefix` the matter-parity column
+     prefixes (phase-2 data). Gates are block-independent, so one decorated
+     site array serves row MPOs, `_block_mpo` gathers, and `_folded_mpo`
+     candidate folds alike.
+   - **Ansatz/operator split.** Because a hop moves exactly one fermion,
+     every matter-hop window corrects the *ansatz* side unconditionally:
+     horizontal windows flip the right site's down leg and carry the
+     re-gauge scalar `(−1)^{suffix[r,c+1]}` (the phase-1 pair-cancelled
+     re-gauge, matter parities in place of occupation parities); vertical
+     windows flip the lower site's right leg, scalar-free. The JW string
+     stays the *operator*-side decorator of phase 2, unchanged. Invariant 3
+     is preserved verbatim.
+   - **Transition.** Plaquette and iota moves conserve matter parity, so
+     they run on the decorated tensors with zero changes and the cached
+     bottom envs stay valid. The horizontal hopping phase transposes the
+     phase-1 Phase-A scheme: fresh row gates from maintained `pi_row`,
+     stale rebuilt-at-phase-start bottom envs re-gauged through per-column
+     interface exponents `delta` (accepted hop at bond (c,c+1) toggles
+     `delta[c+1]` only), working MPOs stripped at row end; the maintained
+     amp is magnitude-true under the scalar drift and acceptance reads
+     magnitudes only. The vertical hopping phase is Phase-B: gate flips are
+     in-window (below-pair prefixes never change), bottom envs stay exact.
+     Proposal combos are still drawn from `|λ|²` tables — statistics never
+     enters weights or Hastings ratios.
+   - **Gradients.** Environment gradients of the decorated network are
+     un-decorated at the sampled block by `mask[block] × gate`, exactly the
+     phase-1 rule; masked entries have identically zero gradients and ride
+     the existing sliced-Jacobian machinery.
+   - **Gate.** Independent reference contraction of the masked/gated block
+     network per sample; kernel local energies against the dense fermionic
+     Hamiltonian over the full valid basis with the graded ansatz; sampler
+     stationarity against `|ψ_graded|²`; `n_even=None` byte-identical to
+     phase-2 kernels.
+
+4. Deferred: folding standard PEPS into the sector-PEPS model as the
+   trivial-group point — only if net slimmer with zero efficiency loss on
+   the dense path.
 
 ## 9. Invariants
 

@@ -35,7 +35,9 @@ from vmc.peps.non_abelian_gi.contraction import (
     active_block_ids_from_fields,
     active_block_ids_from_sample,
     build_row_mpo_from_blocks,
+    decorate_blocks,
     flatten_like_sample,
+    graded_block_statics,
     unflatten_spin_network_sample,
 )
 from vmc.peps.grading import column_prefix_parities
@@ -84,6 +86,7 @@ class SpinNetworkTwoRowEnvs(NamedTuple):
     hopping_tables: HoppingFactorTables | None
     j_r_by_block: jax.Array
     j_d_by_block: jax.Array
+    right_flips: list | None = None
 
 
 class SpinNetworkRowEnvs(NamedTuple):
@@ -97,6 +100,8 @@ class SpinNetworkRowEnvs(NamedTuple):
     hopping_tables: HoppingFactorTables | None
     j_r_by_block: jax.Array
     h_hop_signs: jax.Array | None = None
+    down_flips: list | None = None
+    regauge_signs: jax.Array | None = None
 
 
 def _window_combos(
@@ -342,6 +347,13 @@ def _horizontal_hop_energy(
     total = jnp.zeros((), dtype=tensors[row][col].dtype)
     if max(t.max_candidates for pair in endpoint_tables for t in pair) == 0:
         return total
+    site_right = tensors[row][col + 1]
+    if envs.down_flips is not None:
+        # Candidate gates below the window re-gauge to the right site's
+        # down-leg flip plus the scalar suffix sign (graded degeneracy legs).
+        site_right = (
+            site_right * envs.down_flips[row][col + 1][None, None, :, None, None]
+        )
     blocks = (
         envs.active_block_ids[row, col],
         envs.active_block_ids[row, col + 1],
@@ -363,10 +375,12 @@ def _horizontal_hop_energy(
             _folded_mpo(tensors[row][col], factors[combo, 0], out_blocks[combo, 0]),
             envs.bottom_env[col],
             envs.top_env[col + 1],
-            _folded_mpo(tensors[row][col + 1], factors[combo, 1], out_blocks[combo, 1]),
+            _folded_mpo(site_right, factors[combo, 1], out_blocks[combo, 1]),
             envs.bottom_env[col + 1],
             envs.right_envs[col + 1],
         )
+    if envs.down_flips is not None:
+        total = total * envs.regauge_signs[row, col + 1]
     return total
 
 
@@ -382,6 +396,13 @@ def _transition_energy(
     total = jnp.zeros((), dtype=tensors[row][col].dtype)
     if max(t.max_candidates for pair in endpoint_tables for t in pair) == 0:
         return total
+    site_bottom = tensors[row + 1][col]
+    if envs.right_flips is not None:
+        # The moved parity flips only the lower site's in-window right-leg
+        # gate (graded degeneracy legs); the string is empty.
+        site_bottom = (
+            site_bottom * envs.right_flips[row + 1][col][None, None, None, None, :]
+        )
     blocks = (
         envs.active_block_ids[row, col],
         envs.active_block_ids[row + 1, col],
@@ -401,7 +422,7 @@ def _transition_energy(
             envs.left_env,
             envs.top_env[col],
             _folded_mpo(tensors[row][col], factors[combo, 0], out_blocks[combo, 0]),
-            _folded_mpo(tensors[row + 1][col], factors[combo, 1], out_blocks[combo, 1]),
+            _folded_mpo(site_bottom, factors[combo, 1], out_blocks[combo, 1]),
             envs.bottom_env_next[col],
             envs.right_envs[col],
         )
@@ -714,13 +735,31 @@ def _horizontal_hopping_sweep_row(
     iota_by_block: jax.Array,
     *,
     row: int,
+    gauge: tuple | None = None,
 ) -> tuple[
-    jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, tuple, jax.Array | None
+    jax.Array,
+    jax.Array,
+    jax.Array,
+    jax.Array,
+    jax.Array,
+    tuple,
+    jax.Array | None,
+    jax.Array | None,
 ]:
     dtype = tensors[row][0].dtype
-    right_envs = _compute_right_envs(top_env, row_mpo, bottom_env, dtype)
-    left_env = jnp.ones((1, 1, 1), dtype=dtype)
     row_mpo_list = list(row_mpo)
+    if gauge is not None:
+        right_par_row, down_par_row, pi_row, delta = gauge
+        # Fresh true right-leg gates for this row plus the down-leg interface
+        # exponents re-gauging the stale bottom envs; stripped at row end.
+        row_mpo_list = [
+            _block_mpo(tensors[row][c], active_block_ids[row, c])
+            * (1.0 - 2.0 * pi_row[c] * right_par_row[c])[None, :, None, None]
+            * (1.0 - 2.0 * delta[c] * down_par_row[c])[None, None, None, :]
+            for c in range(len(row_mpo_list))
+        ]
+    right_envs = _compute_right_envs(top_env, tuple(row_mpo_list), bottom_env, dtype)
+    left_env = jnp.ones((1, 1, 1), dtype=dtype)
     if amp_cur is None and len(row_mpo) > 1:
         amp_cur = _contract_1row_2col(
             left_env,
@@ -742,6 +781,7 @@ def _horizontal_hopping_sweep_row(
             row_mpo_list,
             left_env,
             amp_cur,
+            delta,
         ) = _horizontal_hopping_sweep_site(
             key,
             tensors,
@@ -761,8 +801,28 @@ def _horizontal_hopping_sweep_row(
             iota_by_block,
             row=row,
             col=col,
+            gauge=None
+            if gauge is None
+            else (right_par_row, down_par_row, pi_row, delta),
         )
-    return key, matter, h_links, iotas, active_block_ids, tuple(row_mpo_list), amp_cur
+    if gauge is not None:
+        row_mpo_list = [
+            row_mpo_list[c]
+            * (1.0 - 2.0 * delta[c] * down_par_row[c])[None, None, None, :]
+            for c in range(len(row_mpo_list))
+        ]
+    else:
+        delta = None
+    return (
+        key,
+        matter,
+        h_links,
+        iotas,
+        active_block_ids,
+        tuple(row_mpo_list),
+        amp_cur,
+        delta,
+    )
 
 
 def _horizontal_hopping_sweep_site(
@@ -785,8 +845,17 @@ def _horizontal_hopping_sweep_site(
     *,
     row: int,
     col: int,
+    gauge: tuple | None = None,
 ) -> tuple[
-    jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, list, jax.Array, jax.Array
+    jax.Array,
+    jax.Array,
+    jax.Array,
+    jax.Array,
+    jax.Array,
+    list,
+    jax.Array,
+    jax.Array,
+    jax.Array | None,
 ]:
     endpoint_tables = (
         hopping_tables.h_src[row][col],
@@ -799,7 +868,17 @@ def _horizontal_hopping_sweep_site(
             row_mpo[col],
             bottom_env[col],
         )
-        return key, matter, h_links, iotas, active_block_ids, row_mpo, left_env, amp_cur
+        return (
+            key,
+            matter,
+            h_links,
+            iotas,
+            active_block_ids,
+            row_mpo,
+            left_env,
+            amp_cur,
+            None if gauge is None else gauge[3],
+        )
     input_blocks = (active_block_ids[row, col], active_block_ids[row, col + 1])
     key, output_blocks, output_legs, can_propose, z_in = _sample_window_outcome(
         key,
@@ -839,6 +918,24 @@ def _horizontal_hopping_sweep_site(
 
     mpo_left = _block_mpo(tensors[row][col], safe_blocks[0])
     mpo_right = _block_mpo(tensors[row][col + 1], safe_blocks[1])
+    if gauge is not None:
+        # Candidate gates: right gates from the row prefixes (unchanged by the
+        # hop), interface down gates with the bond's toggle at column col + 1.
+        right_par_row, down_par_row, pi_row, delta = gauge
+        mpo_left = (
+            mpo_left
+            * (1.0 - 2.0 * pi_row[col] * right_par_row[col])[None, :, None, None]
+            * (1.0 - 2.0 * delta[col] * down_par_row[col])[None, None, None, :]
+        )
+        mpo_right = (
+            mpo_right
+            * (1.0 - 2.0 * pi_row[col + 1] * right_par_row[col + 1])[
+                None, :, None, None
+            ]
+            * (1.0 - 2.0 * ((delta[col + 1] + 1) % 2) * down_par_row[col + 1])[
+                None, None, None, :
+            ]
+        )
     prefix_current = _update_left_env_1row(
         left_env,
         top_env[col],
@@ -884,6 +981,7 @@ def _horizontal_hopping_sweep_site(
         row_mpo,
         jnp.where(accept, prefix_proposed, prefix_current),
         jnp.where(accept, amp_proposed, amp_cur),
+        None if gauge is None else delta.at[col + 1].set((delta[col + 1] + accept) % 2),
     )
 
 
@@ -905,6 +1003,7 @@ def _vertical_hopping_sweep_row_pair(
     iota_by_block: jax.Array,
     *,
     row: int,
+    gauge: tuple | None = None,
 ) -> tuple[
     jax.Array,
     jax.Array,
@@ -966,6 +1065,7 @@ def _vertical_hopping_sweep_row_pair(
             iota_by_block,
             row=row,
             col=col,
+            gauge=gauge,
         )
     return (
         key,
@@ -1000,6 +1100,7 @@ def _vertical_hopping_sweep_site(
     *,
     row: int,
     col: int,
+    gauge: tuple | None = None,
 ) -> tuple[
     jax.Array,
     jax.Array,
@@ -1073,6 +1174,20 @@ def _vertical_hopping_sweep_site(
 
     mpo_top = _block_mpo(tensors[row][col], safe_blocks[0])
     mpo_bottom = _block_mpo(tensors[row + 1][col], safe_blocks[1])
+    if gauge is not None:
+        # Candidate right gates: the top prefix is untouched by the hop; the
+        # lower prefix flips with the moved parity (in-window, scalar-free).
+        rp_top, rp_bot, pi_top, parity_vec = gauge
+        mpo_top = mpo_top * (1.0 - 2.0 * pi_top[col] * rp_top[col])[None, :, None, None]
+        mpo_bottom = (
+            mpo_bottom
+            * (
+                1.0
+                - 2.0
+                * ((pi_top[col] + parity_vec[matter[row, col]] + 1) % 2)
+                * rp_bot[col]
+            )[None, :, None, None]
+        )
     prefix_current = _update_left_env_2row(
         left_env,
         top_env[col],
@@ -1325,14 +1440,22 @@ def build_mc_kernels(
     )
     if matter_hopping_terms and phys_dim == 1:
         raise ValueError("Matter hopping terms require phys_dim > 1.")
-    matter_parity = (
-        jnp.asarray([n % 2 for n in model.matter_numbers])
-        if any(
-            isinstance(term, FermionicHorizontalMatterHoppingTerm)
-            for term in matter_hopping_terms
-        )
-        else None
+    matter_parity = jnp.asarray([n % 2 for n in model.matter_numbers])
+    needs_string_signs = any(
+        isinstance(term, FermionicHorizontalMatterHoppingTerm)
+        for term in matter_hopping_terms
     )
+    if model.n_even is None:
+        masks = right_par = down_par = down_flips = right_flips = None
+    else:
+        masks, right_par, down_par = graded_block_statics(
+            model.tensors,
+            matter_state_by_block,
+            matter_parity,
+            model.n_even,
+        )
+        down_flips = [[1.0 - 2.0 * par for par in row] for row in down_par]
+        right_flips = [[1.0 - 2.0 * par for par in row] for row in right_par]
 
     def build_row_mpos(
         tensors: Any,
@@ -1352,10 +1475,19 @@ def build_mc_kernels(
             env = _apply_mpo_from_below(env, row_mpos[row], strategy)
         return tuple(envs)
 
+    def regate(tensors: Any, matter: jax.Array) -> Any:
+        """Mask and right-leg-gate the site tensors for the given matter field."""
+        if masks is None:
+            return tensors
+        return decorate_blocks(
+            tensors, column_prefix_parities(matter_parity[matter]), masks, right_par
+        )
+
     def build_bottom_envs(tensors: Any, sample: jax.Array) -> tuple:
+        matter = unflatten_spin_network_sample(sample, shape)[0]
         return build_bottom_envs_from_row_mpos(
             build_row_mpos(
-                tensors,
+                regate(tensors, matter),
                 active_block_ids_from_sample(block_id_lookup, sample, shape),
             )
         )
@@ -1467,7 +1599,22 @@ def build_mc_kernels(
             shape,
         )
         dtype = tensors[0][0].dtype
-        row_mpos = build_row_mpos(tensors, active_block_ids)
+        if masks is None:
+            tm = tg = tensors
+        else:
+            tm = [
+                [jnp.asarray(tensors[r][c]) * masks[r][c] for c in range(n_cols)]
+                for r in range(n_rows)
+            ]
+            pi0 = column_prefix_parities(matter_parity[matter])
+            tg = [
+                [
+                    tm[r][c] * (1.0 - 2.0 * pi0[r, c] * right_par[r][c])
+                    for c in range(n_cols)
+                ]
+                for r in range(n_rows)
+            ]
+        row_mpos = build_row_mpos(tg, active_block_ids)
 
         if n_rows > 1 and n_cols > 1:
             top_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
@@ -1484,7 +1631,7 @@ def build_mc_kernels(
                     amp_cur,
                 ) = _plaquette_sweep_row_pair(
                     key,
-                    tensors,
+                    tg,
                     h_links,
                     v_links,
                     iotas,
@@ -1503,7 +1650,7 @@ def build_mc_kernels(
                 top_env = strategy.apply(top_env, row_mpos[row])
             if phys_dim == 1:
                 return finish_transition(
-                    tensors,
+                    tg,
                     sample,
                     key,
                     cache,
@@ -1517,7 +1664,7 @@ def build_mc_kernels(
 
         if phys_dim == 1:
             return finish_transition(
-                tensors,
+                tg,
                 sample,
                 key,
                 cache,
@@ -1532,6 +1679,9 @@ def build_mc_kernels(
         bottom_envs_h = build_bottom_envs_from_row_mpos(row_mpos)
         top_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
         amp_cur = None
+        pi_row = delta = (
+            None if masks is None else jnp.zeros((n_cols,), dtype=matter.dtype)
+        )
         for row in range(n_rows):
             (
                 key,
@@ -1541,9 +1691,10 @@ def build_mc_kernels(
                 active_block_ids,
                 row_mpos[row],
                 amp_cur,
+                delta,
             ) = _horizontal_hopping_sweep_row(
                 key,
-                tensors,
+                tm,
                 matter,
                 h_links,
                 iotas,
@@ -1557,11 +1708,16 @@ def build_mc_kernels(
                 j_r_by_block,
                 iota_by_block,
                 row=row,
+                gauge=None
+                if masks is None
+                else (right_par[row], down_par[row], pi_row, delta),
             )
             top_env = strategy.apply(top_env, row_mpos[row])
+            if masks is not None:
+                pi_row = (pi_row + matter_parity[matter[row]]) % 2
         if n_rows == 1:
             return finish_transition(
-                tensors,
+                regate(tensors, matter),
                 sample,
                 key,
                 cache,
@@ -1576,6 +1732,7 @@ def build_mc_kernels(
         bottom_envs_v = build_bottom_envs_from_row_mpos(row_mpos)
         top_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
         amp_cur = None
+        pi_top = None if masks is None else jnp.zeros((n_cols,), dtype=matter.dtype)
         for row in range(n_rows - 1):
             (
                 key,
@@ -1588,7 +1745,7 @@ def build_mc_kernels(
                 amp_cur,
             ) = _vertical_hopping_sweep_row_pair(
                 key,
-                tensors,
+                tm,
                 matter,
                 v_links,
                 iotas,
@@ -1603,10 +1760,15 @@ def build_mc_kernels(
                 j_d_by_block,
                 iota_by_block,
                 row=row,
+                gauge=None
+                if masks is None
+                else (right_par[row], right_par[row + 1], pi_top, matter_parity),
             )
             top_env = strategy.apply(top_env, row_mpos[row])
+            if masks is not None:
+                pi_top = (pi_top + matter_parity[matter[row]]) % 2
         return finish_transition(
-            tensors,
+            regate(tensors, matter),
             sample,
             key,
             cache,
@@ -1632,14 +1794,22 @@ def build_mc_kernels(
             iotas,
             shape,
         )
-        if matter_parity is None:
-            h_hop_signs = None
-        else:
+        if needs_string_signs or masks is not None:
             parities = matter_parity[matter]
             prefix = column_prefix_parities(parities)
             below = (jnp.sum(parities, axis=0) + prefix + parities) % 2
-            h_hop_signs = 1.0 - 2.0 * ((below[:, :-1] + prefix[:, 1:]) % 2)
-        row_mpos = build_row_mpos(tensors, active_block_ids)
+        h_hop_signs = (
+            1.0 - 2.0 * ((below[:, :-1] + prefix[:, 1:]) % 2)
+            if needs_string_signs
+            else None
+        )
+        if masks is None:
+            tg = tensors
+            regauge_signs = None
+        else:
+            tg = decorate_blocks(tensors, prefix, masks, right_par)
+            regauge_signs = 1.0 - 2.0 * below
+        row_mpos = build_row_mpos(tg, active_block_ids)
         coeffs = static_coeffs if context.coeffs is None else context.coeffs
         local_estimates = jnp.zeros(len(bucketed_terms), dtype=context.amp.dtype)
         for term, contributions in bucketed_terms.diagonal:
@@ -1692,11 +1862,13 @@ def build_mc_kernels(
                         hopping_tables,
                         j_r_by_block,
                         h_hop_signs,
+                        down_flips,
+                        regauge_signs,
                     )
                     for column in dr1_columns[c]:
                         for term, contributions in column.terms:
                             term_energy = (
-                                _transition_energy(term, envs, tensors) / context.amp
+                                _transition_energy(term, envs, tg) / context.amp
                             )
                             for op_idx, coeff_idx in contributions:
                                 coeff = 1.0 if coeffs is None else coeffs[coeff_idx]
@@ -1743,11 +1915,12 @@ def build_mc_kernels(
                         hopping_tables,
                         j_r_by_block,
                         j_d_by_block,
+                        right_flips,
                     )
                     for column in row_pass.columns[c]:
                         for term, contributions in column.terms:
                             term_energy = (
-                                _transition_energy(term, envs, tensors) / context.amp
+                                _transition_energy(term, envs, tg) / context.amp
                             )
                             for op_idx, coeff_idx in contributions:
                                 coeff = 1.0 if coeffs is None else coeffs[coeff_idx]
@@ -1765,6 +1938,13 @@ def build_mc_kernels(
             bottom_env = _apply_mpo_from_below(bottom_env, row_mpo, strategy)
             next_row_mpo = row_mpo
 
+        if masks is not None:
+            for r in range(n_rows):
+                for c in range(n_cols):
+                    env_grads[r][c] = env_grads[r][c] * (
+                        masks[r][c][active_block_ids[r, c]]
+                        * (1.0 - 2.0 * prefix[r, c] * right_par[r][c])
+                    )
         local_log_derivatives, active_slice_indices = _assemble_log_derivatives(
             tensors,
             params_per_site,

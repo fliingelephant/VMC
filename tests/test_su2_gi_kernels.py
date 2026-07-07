@@ -376,7 +376,7 @@ def test_su2_transition_sweeps_plaquettes_before_matter_bonds(monkeypatch):
     ):
         del tensors, args, kwargs
         calls.append(("horizontal", row))
-        return key, matter, h_links, iotas, active_block_ids, row_mpo, None
+        return key, matter, h_links, iotas, active_block_ids, row_mpo, None, None
 
     def vertical_sweep(
         key,
@@ -589,7 +589,7 @@ def test_su2_iota_heatbath_uses_one_site_environment(monkeypatch):
         **kwargs,
     ):
         del tensors, args, kwargs
-        return key, matter, h_links, iotas, active_block_ids, row_mpo, None
+        return key, matter, h_links, iotas, active_block_ids, row_mpo, None, None
 
     monkeypatch.setattr(su2_kernels, "_contract_1row_1col", count_scalar)
     monkeypatch.setattr(su2_kernels, "_compute_single_gradient", count_gradient)

@@ -12,8 +12,13 @@ import jax.numpy as jnp
 
 from vmc.peps.common.contraction import _contract_bottom
 from vmc.peps.common.kernels import Context
+from vmc.peps.grading import column_prefix_parities
 from vmc.peps.non_abelian_gi import NonAbelianGIPEPS, build_row_mpo
-from vmc.peps.non_abelian_gi.contraction import flatten_like_sample
+from vmc.peps.non_abelian_gi.contraction import (
+    decorate_blocks,
+    flatten_like_sample,
+    graded_block_statics,
+)
 from vmc.peps.non_abelian_gi.factors import PLAQUETTE_KEY_LEGS, PLAQUETTE_LEG_FWD
 
 
@@ -23,6 +28,15 @@ def context_for_sample(
     sample: jax.Array,
 ) -> Context:
     """Estimate-ready context (amplitude + cached top boundaries)."""
+    if model.n_even is not None:
+        matter_parity = jnp.asarray([n % 2 for n in model.matter_numbers])
+        matter = NonAbelianGIPEPS.unflatten_spin_network_sample(sample, model.shape)[0]
+        masks, right_par, _ = graded_block_statics(
+            tensors, model.tables.matter_state_by_block, matter_parity, model.n_even
+        )
+        tensors = decorate_blocks(
+            tensors, column_prefix_parities(matter_parity[matter]), masks, right_par
+        )
     top_envs = []
     top_env = tuple(
         jnp.ones((1, 1, 1), dtype=jnp.asarray(tensors[0][0]).dtype)

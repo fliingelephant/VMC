@@ -72,13 +72,22 @@ def leg_parities(dim: int, n_even: int) -> np.ndarray:
     return (np.arange(dim) >= n_even).astype(np.int64)
 
 
-def even_mask(grading: Grading, dims: tuple[int, int, int, int]) -> np.ndarray:
-    """0/1 mask over ``(phys, up, down, left, right)`` keeping even entries."""
-    total = np.asarray(grading.phys_parity).reshape(-1, 1, 1, 1, 1)
+def even_mask(
+    parities: np.ndarray,
+    dims: tuple[int, int, int, int],
+    n_even: int,
+) -> np.ndarray:
+    """0/1 mask over ``(leading, up, down, left, right)`` keeping even entries.
+
+    ``parities`` grades the leading axis (physical labels for standard PEPS,
+    vertex blocks for LGT); the four virtual legs carry the contiguous
+    ``n_even`` layout.
+    """
+    total = np.asarray(parities).reshape(-1, 1, 1, 1, 1)
     for axis, dim in enumerate(dims):
         shape = [1] * 5
         shape[axis + 1] = dim
-        total = total + leg_parities(dim, grading.n_even).reshape(shape)
+        total = total + leg_parities(dim, n_even).reshape(shape)
     return (total % 2 == 0).astype(np.float64)
 
 
@@ -86,7 +95,11 @@ def _grading_statics(grading: Grading, tensors: list[list]) -> tuple[list, list,
     """Per-site even masks and right/down leg parity vectors (jnp constants)."""
     site_dims = [[jnp.asarray(t).shape[1:] for t in row] for row in tensors]
     masks = [
-        [jnp.asarray(even_mask(grading, dims)) for dims in row] for row in site_dims
+        [
+            jnp.asarray(even_mask(grading.phys_parity, dims, grading.n_even))
+            for dims in row
+        ]
+        for row in site_dims
     ]
     right_par, down_par = (
         [

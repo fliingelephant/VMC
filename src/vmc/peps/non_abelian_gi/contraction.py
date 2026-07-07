@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from vmc.peps.common.contraction import _contract_bottom
+from vmc.peps.grading import column_prefix_parities, even_mask, leg_parities
 from vmc.peps.non_abelian_gi.tables import PureGaugeTables
 
 __all__ = [
@@ -13,14 +15,74 @@ __all__ = [
     "active_block_ids_from_sample",
     "build_row_mpo",
     "build_row_mpo_from_blocks",
+    "decorate_blocks",
     "flatten_like_sample",
     "flatten_matter_sample",
     "flatten_sample",
+    "graded_block_statics",
+    "graded_non_abelian_gi_apply",
     "non_abelian_gi_apply",
     "unflatten_matter_sample",
     "unflatten_sample",
     "unflatten_spin_network_sample",
 ]
+
+
+def graded_block_statics(
+    tensors: list[list[jax.Array]],
+    matter_state_by_block: jax.Array,
+    matter_parity: np.ndarray,
+    n_even: int,
+) -> tuple[list, list, list]:
+    """Per-site block masks and right/down leg parity vectors (jnp constants).
+
+    The leading (block) axis is graded by the matter parity of each block's
+    matter state; degeneracy legs carry the contiguous ``n_even`` layout.
+    """
+    states = np.asarray(matter_state_by_block)
+    site_dims = [[jnp.asarray(t).shape for t in row] for row in tensors]
+    masks = [
+        [
+            jnp.asarray(
+                even_mask(
+                    np.asarray(matter_parity)[states[r, c, : dims[0]]],
+                    dims[1:],
+                    n_even,
+                )
+            )
+            for c, dims in enumerate(row)
+        ]
+        for r, row in enumerate(site_dims)
+    ]
+    right_par, down_par = (
+        [
+            [
+                jnp.asarray(leg_parities(dims[axis], n_even), dtype=jnp.float64)
+                for dims in row
+            ]
+            for row in site_dims
+        ]
+        for axis in (4, 2)
+    )
+    return masks, right_par, down_par
+
+
+def decorate_blocks(
+    tensors: list[list[jax.Array]],
+    prefix: jax.Array,
+    masks: list,
+    right_par: list,
+) -> list[list[jax.Array]]:
+    """Graded assembly on ``(block, up, down, left, right)`` site tensors."""
+    return [
+        [
+            jnp.asarray(tensors[r][c])
+            * masks[r][c]
+            * (1.0 - 2.0 * prefix[r, c] * right_par[r][c])
+            for c in range(len(tensors[0]))
+        ]
+        for r in range(len(tensors))
+    ]
 
 
 def flatten_sample(
@@ -203,3 +265,28 @@ def non_abelian_gi_apply(
             ),
         )
     return _contract_bottom(boundary)
+
+
+def graded_non_abelian_gi_apply(
+    tensors: list[list[jax.Array]],
+    sample: jax.Array,
+    shape: tuple[int, int],
+    tables: PureGaugeTables,
+    strategy: object,
+    *,
+    matter_parity: jax.Array,
+    n_even: int,
+) -> jax.Array:
+    """Amplitude of a graded (fermionic-matter) GI-PEPS sample."""
+    matter = unflatten_spin_network_sample(sample, shape)[0]
+    masks, right_par, _ = graded_block_statics(
+        tensors, tables.matter_state_by_block, matter_parity, n_even
+    )
+    prefix = column_prefix_parities(jnp.asarray(matter_parity)[matter])
+    return non_abelian_gi_apply(
+        decorate_blocks(tensors, prefix, masks, right_par),
+        sample,
+        shape,
+        tables,
+        strategy,
+    )

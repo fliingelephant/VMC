@@ -20,6 +20,7 @@ from vmc.operators import (
     TimeDependentHamiltonian,
 )
 from vmc.gauge_groups import SU2
+from nonabelian_exact import exact_pure_gauge_hamiltonian
 from vmc.peps import BlockadePEPS, BlockadePEPSConfig, NoTruncation, PEPS
 from vmc.peps import (
     NonAbelianGIPEPS,
@@ -80,57 +81,6 @@ def _su2_config(
         D=D,
         chi=chi,
     )
-
-
-def _su2_2x2_loop_sample(model: NonAbelianGIPEPS, j_twice: int) -> jax.Array:
-    return NonAbelianGIPEPS.flatten_sample(
-        jnp.asarray([[j_twice], [j_twice]], dtype=jnp.int32),
-        jnp.asarray([[j_twice, j_twice]], dtype=jnp.int32),
-        jnp.zeros(model.shape, dtype=jnp.int32),
-    )
-
-
-def _su2_2x2_hamiltonian(
-    model: NonAbelianGIPEPS,
-    *,
-    electric_coeff: float,
-    plaquette_coeff: float,
-) -> jax.Array:
-    samples = tuple(_su2_2x2_loop_sample(model, j) for j in model.gauge_group.irreps())
-    sample_keys = {tuple(sample.tolist()): idx for idx, sample in enumerate(samples)}
-    hamiltonian = jnp.zeros((len(samples), len(samples)), dtype=jnp.complex128)
-    table = model.plaquette_matrix_tables[0][0]
-    for source_idx, sample in enumerate(samples):
-        h_links, v_links, _iotas = NonAbelianGIPEPS.unflatten_sample(sample, model.shape)
-        electric = sum(
-            electric_coeff * model.gauge_group.casimir(int(link))
-            for link in (*h_links.reshape(-1), *v_links.reshape(-1))
-        )
-        hamiltonian = hamiltonian.at[source_idx, source_idx].set(electric)
-        input_blocks = tuple(int(value) for value in model.active_block_ids(sample).reshape(-1))
-        for out_idx in range(int(table.counts[input_blocks])):
-            output_blocks = table.output_block_ids[
-                table.flat_index(input_blocks, out_idx)
-            ]
-            links = jnp.stack(
-                [
-                    model.tables.j_r_by_block[0, 0, output_blocks[0]],
-                    model.tables.j_d_by_block[0, 1, output_blocks[1]],
-                    model.tables.j_r_by_block[1, 0, output_blocks[2]],
-                    model.tables.j_d_by_block[0, 0, output_blocks[0]],
-                ]
-            )
-            candidate = NonAbelianGIPEPS.flatten_sample(
-                jnp.asarray([[links[0]], [links[2]]], dtype=jnp.int32),
-                jnp.asarray([[links[3], links[1]]], dtype=jnp.int32),
-                jnp.zeros(model.shape, dtype=jnp.int32),
-            )
-            target_idx = sample_keys[tuple(candidate.tolist())]
-            hamiltonian = hamiltonian.at[target_idx, source_idx].add(
-                plaquette_coeff
-                * table.matrix_elements[table.flat_index(input_blocks, out_idx)]
-            )
-    return hamiltonian
 
 
 def _set_su2_2x2_loop_amplitudes(model: NonAbelianGIPEPS, amplitudes: jax.Array) -> None:
@@ -335,7 +285,7 @@ class TDVPKernelCacheTest(unittest.TestCase):
             config=_su2_config(shape=(2, 2), j_max_twice=2, D=1, chi=1),
             contraction_strategy=NoTruncation(),
         )
-        hamiltonian_matrix = _su2_2x2_hamiltonian(
+        _samples, hamiltonian_matrix = exact_pure_gauge_hamiltonian(
             model,
             electric_coeff=electric_coeff,
             plaquette_coeff=plaquette_coeff,
@@ -374,11 +324,11 @@ class TDVPKernelCacheTest(unittest.TestCase):
             config=_su2_config(shape=(2, 2), j_max_twice=1, D=2, chi=4),
         )
         eigenvalues, _eigenvectors = jnp.linalg.eigh(
-            _su2_2x2_hamiltonian(
+            exact_pure_gauge_hamiltonian(
                 model,
                 electric_coeff=electric_coeff,
                 plaquette_coeff=plaquette_coeff,
-            )
+            )[1]
         )
         link_terms = build_link_casimir_terms(model.shape, model.gauge_group)
         driver = TDVPDriver(

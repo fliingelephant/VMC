@@ -9,47 +9,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-SparseOutcomeRows = Mapping[tuple[int, ...], Sequence[tuple[tuple[int, ...], complex]]]
-
-
-def _pack_sparse_rows(
-    block_counts: tuple[int, ...],
-    outcomes_by_input: SparseOutcomeRows,
-    *,
-    n_output_blocks: int,
-    max_count: int,
-    matrix_dtype: np.dtype | type,
-) -> tuple[jax.Array, jax.Array, int, jax.Array, jax.Array, jax.Array, jax.Array]:
-    starts = np.zeros(block_counts, dtype=np.int32)
-    counts = np.zeros(block_counts, dtype=np.int32)
-    total_outputs = sum(len(outcomes) for outcomes in outcomes_by_input.values())
-    output_block_ids = np.full((total_outputs, n_output_blocks), -1, dtype=np.int32)
-    matrix_elements = np.zeros((total_outputs,), dtype=matrix_dtype)
-    cursor = 0
-    for input_ids, outcomes in outcomes_by_input.items():
-        starts[input_ids] = cursor
-        counts[input_ids] = len(outcomes)
-        for out_idx, (block_ids, matrix_element) in enumerate(outcomes):
-            output_block_ids[cursor + out_idx] = block_ids
-            matrix_elements[cursor + out_idx] = matrix_element
-        cursor += len(outcomes)
-    proposal_weights = np.abs(matrix_elements) ** 2
-    proposal_norms = np.zeros(block_counts, dtype=proposal_weights.dtype)
-    for input_ids, outcomes in outcomes_by_input.items():
-        start = int(starts[input_ids])
-        proposal_norms[input_ids] = np.sum(
-            proposal_weights[start : start + len(outcomes)]
-        )
-    return (
-        jnp.asarray(starts),
-        jnp.asarray(counts),
-        max_count,
-        jnp.asarray(output_block_ids),
-        jnp.asarray(matrix_elements),
-        jnp.asarray(proposal_weights),
-        jnp.asarray(proposal_norms),
-    )
-
 
 @dataclass(frozen=True)
 class PureGaugeTables:
@@ -74,6 +33,91 @@ class PureGaugeTables:
     j_r_by_block: jax.Array
     j_d_by_block: jax.Array
     iota_by_block: jax.Array
+
+    @classmethod
+    def from_blocks(
+        cls,
+        *,
+        group: Any,
+        shape: tuple[int, int],
+        matter_irreps: tuple[int, ...],
+        matter_numbers: tuple[int, ...],
+        blocks: tuple[tuple[tuple[Any, ...], ...], ...],
+    ) -> "PureGaugeTables":
+        n_rows, n_cols = shape
+        phys_dim = len(matter_irreps)
+        max_iotas = max(
+            block.iota + 1
+            for row in blocks
+            for site_blocks in row
+            for block in site_blocks
+        )
+        n_irreps = len(group.irreps())
+        max_blocks = max(len(site_blocks) for row in blocks for site_blocks in row)
+        block_id_lookup = np.full(
+            (
+                n_rows,
+                n_cols,
+                phys_dim,
+                n_irreps,
+                n_irreps,
+                n_irreps,
+                n_irreps,
+                max_iotas,
+            ),
+            -1,
+            dtype=np.int32,
+        )
+        matter_state_by_block = np.full(
+            (n_rows, n_cols, max_blocks), -1, dtype=np.int32
+        )
+        j_l_by_block = np.full((n_rows, n_cols, max_blocks), -1, dtype=np.int32)
+        j_u_by_block = np.full((n_rows, n_cols, max_blocks), -1, dtype=np.int32)
+        j_r_by_block = np.full((n_rows, n_cols, max_blocks), -1, dtype=np.int32)
+        j_d_by_block = np.full((n_rows, n_cols, max_blocks), -1, dtype=np.int32)
+        iota_by_block = np.full((n_rows, n_cols, max_blocks), -1, dtype=np.int32)
+        lookup_rows = []
+        for r, row in enumerate(blocks):
+            lookup_row = []
+            for c, site_blocks in enumerate(row):
+                lookup = {}
+                for block_id, block in enumerate(site_blocks):
+                    matter_state = block.matter_state
+                    key = (
+                        matter_state,
+                        block.j_l,
+                        block.j_u,
+                        block.j_r,
+                        block.j_d,
+                        block.iota,
+                    )
+                    lookup[key] = block_id
+                    block_id_lookup[(r, c, *key)] = block_id
+                    matter_state_by_block[r, c, block_id] = matter_state
+                    j_l_by_block[r, c, block_id] = block.j_l
+                    j_u_by_block[r, c, block_id] = block.j_u
+                    j_r_by_block[r, c, block_id] = block.j_r
+                    j_d_by_block[r, c, block_id] = block.j_d
+                    iota_by_block[r, c, block_id] = block.iota
+                lookup_row.append(lookup)
+            lookup_rows.append(tuple(lookup_row))
+        return cls(
+            group=group,
+            shape=shape,
+            phys_dim=phys_dim,
+            matter_irreps=tuple(int(irrep) for irrep in matter_irreps),
+            matter_numbers=tuple(int(number) for number in matter_numbers),
+            blocks=blocks,
+            _block_ids=tuple(lookup_rows),
+            max_iotas=max_iotas,
+            block_id_lookup=jnp.asarray(block_id_lookup),
+            matter_state_by_block=jnp.asarray(matter_state_by_block),
+            j_l_by_block=jnp.asarray(j_l_by_block),
+            j_u_by_block=jnp.asarray(j_u_by_block),
+            j_r_by_block=jnp.asarray(j_r_by_block),
+            j_d_by_block=jnp.asarray(j_d_by_block),
+            iota_by_block=jnp.asarray(iota_by_block),
+        )
 
     def active_legs(self, r: int, c: int) -> tuple[bool, bool, bool, bool]:
         """Return active ``(left, up, right, down)`` legs at a site."""
@@ -111,145 +155,79 @@ class PureGaugeTables:
 
 
 @dataclass(frozen=True)
-class PlaquetteLinkTransitions:
-    """Dense static plaquette-link topology table.
+class FusionOutputs:
+    """Static ``irrep x operator-irrep -> output irreps`` fusion table."""
 
-    Link order is ``(top, right, bottom, left)``. The table records candidate
-    output link irreps from acting with the representation carried by the
-    plaquette operator. Magnetic matrix elements are intentionally not stored
-    here.
+    outputs: jax.Array  # (n_irreps, max_outputs) int32, -1 padded
+    counts: jax.Array  # (n_irreps,) int32
+
+
+def pack_fusion_outputs(
+    n_irreps: int,
+    outputs_by_irrep: Mapping[int, Sequence[int]],
+) -> FusionOutputs:
+    max_outputs = max((len(v) for v in outputs_by_irrep.values()), default=0)
+    outputs = np.full((n_irreps, max_outputs), -1, dtype=np.int32)
+    counts = np.zeros((n_irreps,), dtype=np.int32)
+    for irrep, outs in outputs_by_irrep.items():
+        counts[irrep] = len(outs)
+        outputs[irrep, : len(outs)] = outs
+    return FusionOutputs(outputs=jnp.asarray(outputs), counts=jnp.asarray(counts))
+
+
+@dataclass(frozen=True)
+class VertexFactorTable:
+    """Per-(site, role, orientation) Schur factors of a string operator.
+
+    Key = ``(input block, new sectors of the touched legs)``; the key arity is
+    the number of touched legs (two for plaquette corners, one for hopping
+    endpoints). ``out_blocks[start:start+count]`` lists the candidate output
+    blocks for one key and ``factors`` their scalar reduced matrix elements,
+    so ``<out|O|in> = kappa * prod_x factors_x``. Everything is O(n_blocks)
+    per vertex; no array is indexed by more than one block axis.
     """
 
-    output_links: jax.Array
-    counts: jax.Array
-    max_outputs: int
-
-    def outputs(
-        self,
-        top: int,
-        right: int,
-        bottom: int,
-        left: int,
-    ) -> tuple[tuple[int, int, int, int], ...]:
-        """Return valid output link tuples for one input plaquette."""
-        count = int(self.counts[top, right, bottom, left])
-        links = self.output_links[top, right, bottom, left, :count]
-        return tuple(tuple(int(value) for value in row) for row in links)
-
-
-@dataclass(frozen=True)
-class PlaquetteMatrixTable:
-    """Row-sparse plaquette matrix elements indexed by four corner block ids."""
-
-    starts: jax.Array
-    counts: jax.Array
-    max_count: int
-    output_block_ids: jax.Array
-    matrix_elements: jax.Array
-    proposal_weights: jax.Array
-    proposal_norms: jax.Array
+    group_starts: jax.Array  # (n_blocks, n_irreps[, n_irreps]) int32
+    group_counts: jax.Array  # (n_blocks, n_irreps[, n_irreps]) int32
+    max_candidates: int
+    out_blocks: jax.Array  # (total,) int32
+    factors: jax.Array  # (total,)
+    w2_sums: jax.Array  # (n_blocks, n_irreps[, n_irreps]) float64
 
     @classmethod
     def from_rows(
         cls,
-        block_counts: tuple[int, int, int, int],
-        outcomes_by_input: SparseOutcomeRows,
+        n_blocks: int,
+        n_irreps: int,
+        key_arity: int,
+        rows: Mapping[tuple[int, ...], Sequence[tuple[int, complex]]],
         *,
-        max_count: int,
-        matrix_dtype: np.dtype | type,
-    ) -> "PlaquetteMatrixTable":
-        return cls(
-            *_pack_sparse_rows(
-                block_counts,
-                outcomes_by_input,
-                n_output_blocks=4,
-                max_count=max_count,
-                matrix_dtype=matrix_dtype,
+        factor_dtype: np.dtype | type,
+    ) -> "VertexFactorTable":
+        key_shape = (n_blocks,) + (n_irreps,) * key_arity
+        starts = np.zeros(key_shape, dtype=np.int32)
+        counts = np.zeros(key_shape, dtype=np.int32)
+        w2_sums = np.zeros(key_shape, dtype=np.float64)
+        max_candidates = max((len(v) for v in rows.values()), default=0)
+        total = sum(len(v) for v in rows.values())
+        out_blocks = np.full((total,), -1, dtype=np.int32)
+        factors = np.zeros((total,), dtype=factor_dtype)
+        cursor = 0
+        for key, candidates in rows.items():
+            starts[key] = cursor
+            counts[key] = len(candidates)
+            for out_block, factor in candidates:
+                out_blocks[cursor] = out_block
+                factors[cursor] = factor
+                cursor += 1
+            w2_sums[key] = np.sum(
+                np.abs(factors[cursor - len(candidates) : cursor]) ** 2
             )
-        )
-
-    def flat_index(
-        self,
-        input_blocks: tuple[int, int, int, int],
-        out_idx: int,
-    ) -> int:
-        """Return the flat sparse-outcome index for an input row and local slot."""
-        return int(self.starts[input_blocks]) + out_idx
-
-    def find_outcome(
-        self,
-        input_blocks: tuple[int, int, int, int],
-        output_blocks: tuple[int, int, int, int],
-    ) -> int:
-        """Return the outcome slot for ``input_blocks -> output_blocks``."""
-        count = int(self.counts[input_blocks])
-        start = int(self.starts[input_blocks])
-        for out_idx in range(count):
-            candidate = self.output_block_ids[start + out_idx]
-            if tuple(int(x) for x in candidate) == output_blocks:
-                return out_idx
-        return -1
-
-
-@dataclass(frozen=True)
-class HoppingMatrixTable:
-    """Row-sparse matter-hopping matrix elements indexed by endpoint block ids."""
-
-    starts: jax.Array
-    counts: jax.Array
-    max_count: int
-    output_block_ids: jax.Array
-    matrix_elements: jax.Array
-    proposal_weights: jax.Array
-    proposal_norms: jax.Array
-
-    @classmethod
-    def empty(cls, block_counts: tuple[int, int]) -> "HoppingMatrixTable":
         return cls(
-            starts=jnp.zeros(block_counts, dtype=jnp.int32),
-            counts=jnp.zeros(block_counts, dtype=jnp.int32),
-            max_count=0,
-            output_block_ids=jnp.full((0, 2), -1, dtype=jnp.int32),
-            matrix_elements=jnp.zeros((0,), dtype=jnp.float64),
-            proposal_weights=jnp.zeros((0,), dtype=jnp.float64),
-            proposal_norms=jnp.zeros(block_counts, dtype=jnp.float64),
+            group_starts=jnp.asarray(starts),
+            group_counts=jnp.asarray(counts),
+            max_candidates=max_candidates,
+            out_blocks=jnp.asarray(out_blocks),
+            factors=jnp.asarray(factors),
+            w2_sums=jnp.asarray(w2_sums),
         )
-
-    @classmethod
-    def from_rows(
-        cls,
-        block_counts: tuple[int, int],
-        outcomes_by_input: SparseOutcomeRows,
-        *,
-        max_count: int,
-        matrix_dtype: np.dtype | type = np.float64,
-    ) -> "HoppingMatrixTable":
-        return cls(
-            *_pack_sparse_rows(
-                block_counts,
-                outcomes_by_input,
-                n_output_blocks=2,
-                max_count=max_count,
-                matrix_dtype=matrix_dtype,
-            )
-        )
-
-    def flat_index(
-        self,
-        input_blocks: tuple[int, int],
-        out_idx: int,
-    ) -> int:
-        return int(self.starts[input_blocks]) + out_idx
-
-    def find_outcome(
-        self,
-        input_blocks: tuple[int, int],
-        output_blocks: tuple[int, int],
-    ) -> int:
-        count = int(self.counts[input_blocks])
-        start = int(self.starts[input_blocks])
-        for out_idx in range(count):
-            candidate = self.output_block_ids[start + out_idx]
-            if tuple(int(x) for x in candidate) == output_blocks:
-                return out_idx
-        return -1

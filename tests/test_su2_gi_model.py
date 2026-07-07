@@ -22,7 +22,7 @@ def test_su2_gipeps_is_exported_from_public_peps_surface():
 def test_su2_gipeps_uses_generic_non_abelian_sampled_block_contract():
     from vmc.peps.non_abelian_gi import (
         NonAbelianGIPEPS,
-        PlaquetteMatrixTable,
+        PlaquetteFactorTables,
         PureGaugeTables,
     )
 
@@ -38,9 +38,8 @@ def test_su2_gipeps_uses_generic_non_abelian_sampled_block_contract():
 
     assert isinstance(model, NonAbelianGIPEPS)
     assert isinstance(model.tables, PureGaugeTables)
-    assert isinstance(model.plaquette_matrix_tables[0][0], PlaquetteMatrixTable)
-    assert model.horizontal_hopping_matrix_tables == ((), ())
-    assert model.vertical_hopping_matrix_tables == ((),)
+    assert isinstance(model.plaquette_factor_tables, PlaquetteFactorTables)
+    assert model.hopping_factor_tables is None
 
 
 def test_su2_kernel_dispatch_is_registered_from_public_peps_surface():
@@ -106,7 +105,7 @@ def test_su2_gipeps_initial_tensors_are_unbiased_random_blocks():
     assert jnp.array_equal(model.tensors[0][0].get_value(), expected)
 
 
-def test_su2_gipeps_closes_over_plaquette_link_transition_metadata():
+def test_su2_gipeps_builds_fusion_metadata():
     model = NonAbelianGIPEPS(
         rngs=nnx.Rngs(0),
         config=NonAbelianGIPEPSConfig(
@@ -117,10 +116,13 @@ def test_su2_gipeps_closes_over_plaquette_link_transition_metadata():
         ),
     )
 
-    assert model.plaquette_link_transitions.outputs(0, 0, 0, 0) == ((1, 1, 1, 1),)
+    tabs = model.plaquette_factor_tables
+    for fusion in (tabs.fuse_op, tabs.fuse_rev):
+        assert int(fusion.counts[0]) == 1
+        assert int(fusion.outputs[0, 0]) == 1
 
 
-def test_su2_gipeps_closes_over_plaquette_matrix_metadata():
+def test_su2_gipeps_closes_over_plaquette_factor_metadata():
     model = NonAbelianGIPEPS(
         rngs=nnx.Rngs(0),
         config=NonAbelianGIPEPSConfig(
@@ -131,19 +133,12 @@ def test_su2_gipeps_closes_over_plaquette_matrix_metadata():
         ),
     )
 
-    matrix_table = model.plaquette_matrix_tables[0][0]
-    output_blocks = matrix_table.output_block_ids[
-        matrix_table.flat_index((0, 0, 0, 0), 0)
-    ]
-    output_links = [
-        model.tables.j_r_by_block[0, 0, output_blocks[0]],
-        model.tables.j_d_by_block[0, 1, output_blocks[1]],
-        model.tables.j_r_by_block[1, 0, output_blocks[2]],
-        model.tables.j_d_by_block[0, 0, output_blocks[0]],
-    ]
-
-    assert matrix_table.counts[0, 0, 0, 0] == 1
-    assert [int(value) for value in output_links] == [1, 1, 1, 1]
+    forward, _ = model.plaquette_factor_tables.tl[0][0]
+    vac = model.tables.block_id(0, 0, 0, 0, 0, 0, 0)
+    assert int(forward.group_counts[vac, 1, 1]) == 1
+    out = int(forward.out_blocks[int(forward.group_starts[vac, 1, 1])])
+    block = model.tables.blocks[0][0][out]
+    assert (block.j_l, block.j_u, block.j_r, block.j_d) == (0, 0, 1, 1)
 
 
 def test_su2_gipeps_flatten_unflatten_roundtrip():

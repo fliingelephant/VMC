@@ -83,7 +83,7 @@ def _assemble_log_derivatives(
         for col in range(n_cols)
     ]
     active_slice_indices = jnp.repeat(
-        config_state.astype(jnp.int8),
+        config_state.astype(jnp.int16),
         params_per_site,
         axis=0,
         total_repeat_length=total_active_params,

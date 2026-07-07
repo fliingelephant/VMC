@@ -31,73 +31,42 @@ __all__ = [
 ]
 
 
+@dataclass(frozen=True, init=False)
+class _SiteDiagonalTerm(DiagonalOperator):
+    row: int
+    col: int
+
+    def __init__(self, *, row: int, col: int, diag: jax.Array) -> None:
+        super().__init__(sites=((row, col),), diag=diag)
+        object.__setattr__(self, "row", row)
+        object.__setattr__(self, "col", col)
+
+    def tree_flatten(self):
+        return (self.diag,), (self.row, self.col)
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        (diag,) = children
+        row, col = aux_data
+        return cls(row=row, col=col, diag=diag)
+
+
 @jax.tree_util.register_pytree_node_class
 @dataclass(frozen=True, init=False)
-class HorizontalLinkCasimirTerm(DiagonalOperator):
+class HorizontalLinkCasimirTerm(_SiteDiagonalTerm):
     """Diagonal electric-energy term on one horizontal link."""
 
-    row: int
-    col: int
-
-    def __init__(self, *, row: int, col: int, diag: jax.Array) -> None:
-        super().__init__(sites=((row, col),), diag=diag)
-        object.__setattr__(self, "row", row)
-        object.__setattr__(self, "col", col)
-
-    def tree_flatten(self):
-        return (self.diag,), (self.row, self.col)
-
-    @classmethod
-    def tree_unflatten(cls, aux_data, children):
-        (diag,) = children
-        row, col = aux_data
-        return cls(row=row, col=col, diag=diag)
-
 
 @jax.tree_util.register_pytree_node_class
 @dataclass(frozen=True, init=False)
-class VerticalLinkCasimirTerm(DiagonalOperator):
+class VerticalLinkCasimirTerm(_SiteDiagonalTerm):
     """Diagonal electric-energy term on one vertical link."""
 
-    row: int
-    col: int
-
-    def __init__(self, *, row: int, col: int, diag: jax.Array) -> None:
-        super().__init__(sites=((row, col),), diag=diag)
-        object.__setattr__(self, "row", row)
-        object.__setattr__(self, "col", col)
-
-    def tree_flatten(self):
-        return (self.diag,), (self.row, self.col)
-
-    @classmethod
-    def tree_unflatten(cls, aux_data, children):
-        (diag,) = children
-        row, col = aux_data
-        return cls(row=row, col=col, diag=diag)
-
 
 @jax.tree_util.register_pytree_node_class
 @dataclass(frozen=True, init=False)
-class MatterNumberTerm(DiagonalOperator):
+class MatterNumberTerm(_SiteDiagonalTerm):
     """Diagonal matter-number term on one site."""
-
-    row: int
-    col: int
-
-    def __init__(self, *, row: int, col: int, diag: jax.Array) -> None:
-        super().__init__(sites=((row, col),), diag=diag)
-        object.__setattr__(self, "row", row)
-        object.__setattr__(self, "col", col)
-
-    def tree_flatten(self):
-        return (self.diag,), (self.row, self.col)
-
-    @classmethod
-    def tree_unflatten(cls, aux_data, children):
-        (diag,) = children
-        row, col = aux_data
-        return cls(row=row, col=col, diag=diag)
 
 
 @jax.tree_util.register_pytree_node_class

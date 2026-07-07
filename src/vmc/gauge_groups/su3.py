@@ -9,24 +9,14 @@ import math
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 
-from vmc.peps.non_abelian_gi.builders import (
-    build_horizontal_hopping_matrix_table,
-    build_horizontal_hopping_matrix_tables,
-    build_plaquette_link_transitions,
-    build_plaquette_matrix_table,
-    build_plaquette_matrix_tables,
-    build_pure_gauge_tables,
-    build_vertical_hopping_matrix_table,
-    build_vertical_hopping_matrix_tables,
+from vmc.peps.non_abelian_gi.builders import build_pure_gauge_tables
+from vmc.peps.non_abelian_gi.factors import (
+    coupling_tensor,
+    fundamental_irrep,
+    vertex_tensor,
 )
-from vmc.peps.non_abelian_gi.tables import (
-    HoppingMatrixTable,
-    PlaquetteLinkTransitions,
-    PlaquetteMatrixTable,
-    PureGaugeTables,
-)
+from vmc.peps.non_abelian_gi.tables import PureGaugeTables
 
 
 @dataclass(frozen=True)
@@ -54,10 +44,6 @@ class SU3:
     @property
     def antifundamental(self) -> int:
         return self.label((0, 1))
-
-    @property
-    def random_init_sweeps(self) -> int:
-        return self.max_weight_sum
 
     def irreps(self) -> tuple[int, ...]:
         return tuple(range(len(_IRREP_WEIGHTS)))
@@ -120,6 +106,9 @@ class VertexBlock:
     j_d: int
     iota: int
     internal_irreps: tuple[int, ...]
+    matter_state: int = 0
+    matter_irrep: int = 0
+    matter_number: int = 0
 
 
 _IRREP_WEIGHTS = ((0, 0), (1, 0), (0, 1))
@@ -250,30 +239,6 @@ def _coupling_tensor(
     return basis[0]
 
 
-@cache
-def _link_operator_tensor(
-    input_irrep: int,
-    output_irrep: int,
-    operator_irrep: int,
-) -> jax.Array:
-    in_dim = _IRREP_DIMS[input_irrep]
-    out_dim = _IRREP_DIMS[output_irrep]
-    op_dim = _IRREP_DIMS[operator_irrep]
-    if output_irrep not in _fuse_labels(input_irrep, operator_irrep):
-        return jnp.zeros(
-            (out_dim, out_dim, in_dim, in_dim, op_dim, op_dim),
-            dtype=jnp.complex128,
-        )
-    coupling = _coupling_tensor(output_irrep, operator_irrep, input_irrep)
-    prefactor = jnp.sqrt(in_dim / out_dim)
-    return prefactor * jnp.einsum(
-        "oai,pbj->opijab",
-        coupling,
-        coupling.conj(),
-        optimize=True,
-    )
-
-
 def _dual_label(irrep: int) -> int:
     if irrep == 1:
         return 2
@@ -282,335 +247,24 @@ def _dual_label(irrep: int) -> int:
     return 0
 
 
+@fundamental_irrep.dispatch
+def fundamental_irrep(group: SU3) -> int:
+    return group.fundamental
+
+
+@coupling_tensor.dispatch
+def coupling_tensor(group: SU3, out: int, op: int, inp: int) -> jax.Array:
+    # The invariant-basis coupling is unit-Frobenius; its columns are equal
+    # by Schur, so sqrt(dim) rescales it to the isometric Wigner coupling.
+    return _coupling_tensor(out, op, inp) * math.sqrt(group.dim(out))
+
+
+@vertex_tensor.dispatch
+def vertex_tensor(group: SU3, block: VertexBlock) -> jax.Array:
+    return vertex_intertwiner_tensor(block)
+
+
 _IRREP_DIMS = tuple((p + 1) * (q + 1) * (p + q + 2) // 2 for p, q in _IRREP_WEIGHTS)
-
-
-@build_plaquette_link_transitions.dispatch
-def build_plaquette_link_transitions(group: SU3) -> PlaquetteLinkTransitions:
-    return _build_su3_plaquette_link_transitions(group)
-
-
-@cache
-def _build_su3_plaquette_link_transitions(group: SU3) -> PlaquetteLinkTransitions:
-    """Build static plaquette link-output candidates for ``U_square + h.c.``."""
-    n_irreps = len(group.irreps())
-    outputs_by_input: dict[tuple[int, int, int, int], tuple[tuple[int, ...], ...]] = {}
-    max_outputs = 0
-    for top in group.irreps():
-        for right in group.irreps():
-            for bottom in group.irreps():
-                for left in group.irreps():
-                    forward = tuple(
-                        (out_top, out_right, out_bottom, out_left)
-                        for out_top in group.fuse(top, group.fundamental)
-                        for out_right in group.fuse(right, group.fundamental)
-                        for out_bottom in group.fuse(bottom, group.antifundamental)
-                        for out_left in group.fuse(left, group.antifundamental)
-                    )
-                    backward = tuple(
-                        (out_top, out_right, out_bottom, out_left)
-                        for out_top in group.fuse(top, group.antifundamental)
-                        for out_right in group.fuse(right, group.antifundamental)
-                        for out_bottom in group.fuse(bottom, group.fundamental)
-                        for out_left in group.fuse(left, group.fundamental)
-                    )
-                    outputs = tuple(sorted(set(forward + backward)))
-                    key = (top, right, bottom, left)
-                    outputs_by_input[key] = outputs
-                    max_outputs = max(max_outputs, len(outputs))
-    output_links = np.full(
-        (n_irreps, n_irreps, n_irreps, n_irreps, max_outputs, 4),
-        -1,
-        dtype=np.int32,
-    )
-    counts = np.zeros((n_irreps, n_irreps, n_irreps, n_irreps), dtype=np.int32)
-    for key, outputs in outputs_by_input.items():
-        counts[key] = len(outputs)
-        for out_idx, output in enumerate(outputs):
-            output_links[key + (out_idx,)] = output
-    return PlaquetteLinkTransitions(
-        jnp.asarray(output_links),
-        jnp.asarray(counts),
-        max_outputs,
-    )
-
-
-@build_plaquette_matrix_table.dispatch
-def build_plaquette_matrix_table(
-    group: SU3,
-    tables: PureGaugeTables,
-    *,
-    row: int,
-    col: int,
-) -> PlaquetteMatrixTable:
-    n_rows, n_cols = tables.shape
-    if not (0 <= row < n_rows - 1 and 0 <= col < n_cols - 1):
-        raise IndexError(f"Plaquette {(row, col)} is outside shape {tables.shape}.")
-    link_transitions = build_plaquette_link_transitions(group)
-    site_coords = ((row, col), (row, col + 1), (row + 1, col), (row + 1, col + 1))
-    block_counts = tuple(tables.n_blocks(r, c) for r, c in site_coords)
-    outcomes_by_input = {}
-    max_outputs = 0
-    for input_ids in product(*(range(count) for count in block_counts)):
-        input_blocks = _plaquette_blocks(tables, site_coords, input_ids)
-        if not _plaquette_input_consistent(input_blocks):
-            outcomes_by_input[input_ids] = []
-            continue
-        outcomes = _plaquette_output_outcomes(
-            group, tables, site_coords, input_blocks, link_transitions
-        )
-        outcomes_by_input[input_ids] = outcomes
-        max_outputs = max(max_outputs, len(outcomes))
-    return PlaquetteMatrixTable.from_rows(
-        block_counts,
-        {
-            input_ids: tuple(
-                (block_ids, matrix_element)
-                for _links, _iotas, block_ids, matrix_element in outcomes
-            )
-            for input_ids, outcomes in outcomes_by_input.items()
-        },
-        max_count=max_outputs,
-        matrix_dtype=np.complex128,
-    )
-
-
-@build_plaquette_matrix_tables.dispatch
-def build_plaquette_matrix_tables(
-    group: SU3,
-    tables: PureGaugeTables,
-) -> tuple[tuple[PlaquetteMatrixTable, ...], ...]:
-    n_rows, n_cols = tables.shape
-    return tuple(
-        tuple(
-            build_plaquette_matrix_table(group, tables, row=row, col=col)
-            for col in range(n_cols - 1)
-        )
-        for row in range(n_rows - 1)
-    )
-
-
-@build_horizontal_hopping_matrix_table.dispatch
-def build_horizontal_hopping_matrix_table(
-    group: SU3,
-    tables: PureGaugeTables,
-    *,
-    row: int,
-    col: int,
-) -> HoppingMatrixTable:
-    if tables.phys_dim != 1:
-        raise NotImplementedError("SU(3) matter hopping is not implemented yet.")
-    return HoppingMatrixTable.empty(
-        (tables.n_blocks(row, col), tables.n_blocks(row, col + 1))
-    )
-
-
-@build_horizontal_hopping_matrix_tables.dispatch
-def build_horizontal_hopping_matrix_tables(
-    group: SU3,
-    tables: PureGaugeTables,
-) -> tuple[tuple[HoppingMatrixTable, ...], ...]:
-    n_rows, n_cols = tables.shape
-    return tuple(
-        tuple(
-            build_horizontal_hopping_matrix_table(group, tables, row=row, col=col)
-            for col in range(n_cols - 1)
-        )
-        for row in range(n_rows)
-    )
-
-
-@build_vertical_hopping_matrix_table.dispatch
-def build_vertical_hopping_matrix_table(
-    group: SU3,
-    tables: PureGaugeTables,
-    *,
-    row: int,
-    col: int,
-) -> HoppingMatrixTable:
-    if tables.phys_dim != 1:
-        raise NotImplementedError("SU(3) matter hopping is not implemented yet.")
-    return HoppingMatrixTable.empty(
-        (tables.n_blocks(row, col), tables.n_blocks(row + 1, col))
-    )
-
-
-@build_vertical_hopping_matrix_tables.dispatch
-def build_vertical_hopping_matrix_tables(
-    group: SU3,
-    tables: PureGaugeTables,
-) -> tuple[tuple[HoppingMatrixTable, ...], ...]:
-    n_rows, n_cols = tables.shape
-    return tuple(
-        tuple(
-            build_vertical_hopping_matrix_table(group, tables, row=row, col=col)
-            for col in range(n_cols)
-        )
-        for row in range(n_rows - 1)
-    )
-
-
-def _plaquette_blocks(
-    tables: PureGaugeTables,
-    site_coords: tuple[tuple[int, int], ...],
-    block_ids: tuple[int, int, int, int],
-) -> tuple[VertexBlock, VertexBlock, VertexBlock, VertexBlock]:
-    return tuple(
-        tables.blocks[r][c][block_id]
-        for (r, c), block_id in zip(site_coords, block_ids, strict=True)
-    )
-
-
-def _plaquette_input_consistent(
-    blocks: tuple[VertexBlock, VertexBlock, VertexBlock, VertexBlock],
-) -> bool:
-    tl, tr, bl, br = blocks
-    return (
-        tl.j_r == tr.j_l and bl.j_r == br.j_l and tl.j_d == bl.j_u and tr.j_d == br.j_u
-    )
-
-
-def _plaquette_output_outcomes(
-    group: SU3,
-    tables: PureGaugeTables,
-    site_coords: tuple[tuple[int, int], ...],
-    input_blocks: tuple[VertexBlock, VertexBlock, VertexBlock, VertexBlock],
-    link_transitions: PlaquetteLinkTransitions,
-) -> list[
-    tuple[
-        tuple[int, int, int, int],
-        tuple[int, int, int, int],
-        tuple[int, int, int, int],
-        complex,
-    ]
-]:
-    tl, tr, bl, _br = input_blocks
-    input_links = (tl.j_r, tr.j_d, bl.j_r, tl.j_d)
-    outcomes = []
-    for output_links in link_transitions.outputs(*input_links):
-        output_block_ids = _plaquette_output_block_ids(
-            tables,
-            site_coords,
-            input_blocks,
-            output_links,
-        )
-        for block_ids in product(*output_block_ids):
-            output_blocks = _plaquette_blocks(tables, site_coords, block_ids)
-            matrix_element = _plaquette_matrix_element(
-                group, input_blocks, output_blocks
-            )
-            if abs(matrix_element) <= 1e-12:
-                continue
-            outcomes.append(
-                (
-                    output_links,
-                    tuple(block.iota for block in output_blocks),
-                    block_ids,
-                    matrix_element,
-                )
-            )
-    return outcomes
-
-
-def _plaquette_output_block_ids(
-    tables: PureGaugeTables,
-    site_coords: tuple[tuple[int, int], ...],
-    input_blocks: tuple[VertexBlock, VertexBlock, VertexBlock, VertexBlock],
-    output_links: tuple[int, int, int, int],
-) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-    tl, tr, bl, br = input_blocks
-    top, right, bottom, left = output_links
-    keys = (
-        (tl.j_l, tl.j_u, top, left),
-        (top, tr.j_u, tr.j_r, right),
-        (bl.j_l, left, bottom, bl.j_d),
-        (bottom, right, br.j_r, br.j_d),
-    )
-    return tuple(
-        _site_block_ids_for_links(tables, r, c, key)
-        for (r, c), key in zip(site_coords, keys, strict=True)
-    )
-
-
-def _site_block_ids_for_links(
-    tables: PureGaugeTables,
-    row: int,
-    col: int,
-    links: tuple[int, int, int, int],
-) -> tuple[int, ...]:
-    j_l, j_u, j_r, j_d = links
-    return tuple(
-        block_id
-        for block_id, block in enumerate(tables.blocks[row][col])
-        if (block.j_l, block.j_u, block.j_r, block.j_d) == (j_l, j_u, j_r, j_d)
-    )
-
-
-@cache
-def _plaquette_matrix_element(
-    group: SU3,
-    input_blocks: tuple[VertexBlock, VertexBlock, VertexBlock, VertexBlock],
-    output_blocks: tuple[VertexBlock, VertexBlock, VertexBlock, VertexBlock],
-) -> complex:
-    forward = _oriented_plaquette_matrix_element(group, input_blocks, output_blocks)
-    backward = _oriented_plaquette_matrix_element(group, output_blocks, input_blocks)
-    return complex(forward + backward)
-
-
-@cache
-def _oriented_plaquette_matrix_element(
-    group: SU3,
-    input_blocks: tuple[VertexBlock, VertexBlock, VertexBlock, VertexBlock],
-    output_blocks: tuple[VertexBlock, VertexBlock, VertexBlock, VertexBlock],
-) -> complex:
-    tl_in, tr_in, bl_in, br_in = input_blocks
-    tl_out, tr_out, bl_out, br_out = output_blocks
-    tl_overlap = _vertex_overlap(tl_in, tl_out, affected_axes=(2, 3))
-    tr_overlap = _vertex_overlap(tr_in, tr_out, affected_axes=(0, 3))
-    bl_overlap = _vertex_overlap(bl_in, bl_out, affected_axes=(1, 2))
-    br_overlap = _vertex_overlap(br_in, br_out, affected_axes=(0, 1))
-    top_link = _link_operator_tensor(tl_in.j_r, tl_out.j_r, group.fundamental)
-    right_link = _link_operator_tensor(tr_in.j_d, tr_out.j_d, group.fundamental)
-    bottom_link = _link_operator_tensor(bl_in.j_r, bl_out.j_r, group.antifundamental)
-    left_link = _link_operator_tensor(tl_in.j_d, tl_out.j_d, group.antifundamental)
-    return complex(
-        jnp.einsum(
-            "ABab,ACacxy,CDcd,DFdfyz,EFef,HEhewz,GHgh,BGbgwx->",
-            tl_overlap,
-            top_link,
-            tr_overlap,
-            right_link,
-            br_overlap,
-            bottom_link,
-            bl_overlap,
-            left_link,
-            optimize=True,
-        )
-    )
-
-
-@cache
-def _vertex_overlap(
-    input_block: VertexBlock,
-    output_block: VertexBlock,
-    *,
-    affected_axes: tuple[int, int],
-) -> jax.Array:
-    input_tensor = vertex_intertwiner_tensor(input_block)
-    output_tensor = vertex_intertwiner_tensor(output_block)
-    external_axes = tuple(axis for axis in range(4) if axis not in affected_axes)
-    out_dims = tuple(output_tensor.shape[axis] for axis in affected_axes)
-    in_dims = tuple(input_tensor.shape[axis] for axis in affected_axes)
-    ext_dim = math.prod(output_tensor.shape[axis] for axis in external_axes)
-    output_flat = jnp.transpose(output_tensor, affected_axes + external_axes).reshape(
-        math.prod(out_dims),
-        ext_dim,
-    )
-    input_flat = jnp.transpose(input_tensor, affected_axes + external_axes).reshape(
-        math.prod(in_dims),
-        ext_dim,
-    )
-    return (output_flat.conj() @ input_flat.T).reshape(*out_dims, *in_dims)
 
 
 def build_pure_gauge_vertex_blocks(
@@ -657,89 +311,20 @@ def build_pure_gauge_tables(
     n_rows, n_cols = shape
     if n_rows <= 0 or n_cols <= 0:
         raise ValueError("shape must have positive dimensions.")
-    rows: list[tuple[tuple[VertexBlock, ...], ...]] = []
-    lookup_rows: list[tuple[dict[tuple[int, int, int, int, int, int], int], ...]] = []
-    for row_idx in range(n_rows):
-        row = []
-        lookup_row = []
-        for col_idx in range(n_cols):
-            active_legs = (
-                col_idx > 0,
-                row_idx > 0,
-                col_idx < n_cols - 1,
-                row_idx < n_rows - 1,
-            )
-            blocks = build_pure_gauge_vertex_blocks(
-                group,
-                active_legs=active_legs,
-                target_charge=target_charge,
-            )
-            row.append(blocks)
-            lookup_row.append(
-                {
-                    (
-                        0,
-                        block.j_l,
-                        block.j_u,
-                        block.j_r,
-                        block.j_d,
-                        block.iota,
-                    ): block_id
-                    for block_id, block in enumerate(blocks)
-                }
-            )
-        rows.append(tuple(row))
-        lookup_rows.append(tuple(lookup_row))
-    blocks_by_site = tuple(rows)
-    max_iotas = max(
-        block.iota + 1 for row in blocks_by_site for blocks in row for block in blocks
-    )
-    n_irreps = len(group.irreps())
-    max_blocks = max(len(blocks) for row in blocks_by_site for blocks in row)
-    block_id_lookup = np.full(
-        (n_rows, n_cols, 1, n_irreps, n_irreps, n_irreps, n_irreps, max_iotas),
-        -1,
-        dtype=np.int32,
-    )
-    matter_state_by_block = np.full((n_rows, n_cols, max_blocks), -1, dtype=np.int32)
-    j_l_by_block = np.full((n_rows, n_cols, max_blocks), -1, dtype=np.int32)
-    j_u_by_block = np.full((n_rows, n_cols, max_blocks), -1, dtype=np.int32)
-    j_r_by_block = np.full((n_rows, n_cols, max_blocks), -1, dtype=np.int32)
-    j_d_by_block = np.full((n_rows, n_cols, max_blocks), -1, dtype=np.int32)
-    iota_by_block = np.full((n_rows, n_cols, max_blocks), -1, dtype=np.int32)
-    for row_idx, row in enumerate(blocks_by_site):
-        for col_idx, blocks in enumerate(row):
-            for block_id, block in enumerate(blocks):
-                block_id_lookup[
-                    row_idx,
-                    col_idx,
-                    0,
-                    block.j_l,
-                    block.j_u,
-                    block.j_r,
-                    block.j_d,
-                    block.iota,
-                ] = block_id
-                matter_state_by_block[row_idx, col_idx, block_id] = 0
-                j_l_by_block[row_idx, col_idx, block_id] = block.j_l
-                j_u_by_block[row_idx, col_idx, block_id] = block.j_u
-                j_r_by_block[row_idx, col_idx, block_id] = block.j_r
-                j_d_by_block[row_idx, col_idx, block_id] = block.j_d
-                iota_by_block[row_idx, col_idx, block_id] = block.iota
-    return PureGaugeTables(
+    return PureGaugeTables.from_blocks(
         group=group,
         shape=shape,
-        phys_dim=1,
         matter_irreps=(0,),
         matter_numbers=(0,),
-        blocks=blocks_by_site,
-        _block_ids=tuple(lookup_rows),
-        max_iotas=max_iotas,
-        block_id_lookup=jnp.asarray(block_id_lookup),
-        matter_state_by_block=jnp.asarray(matter_state_by_block),
-        j_l_by_block=jnp.asarray(j_l_by_block),
-        j_u_by_block=jnp.asarray(j_u_by_block),
-        j_r_by_block=jnp.asarray(j_r_by_block),
-        j_d_by_block=jnp.asarray(j_d_by_block),
-        iota_by_block=jnp.asarray(iota_by_block),
+        blocks=tuple(
+            tuple(
+                build_pure_gauge_vertex_blocks(
+                    group,
+                    active_legs=(c > 0, r > 0, c < n_cols - 1, r < n_rows - 1),
+                    target_charge=target_charge,
+                )
+                for c in range(n_cols)
+            )
+            for r in range(n_rows)
+        ),
     )

@@ -7,6 +7,7 @@ from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from plum import dispatch
 
 from vmc.operators.local_terms import (
@@ -32,7 +33,10 @@ from vmc.peps.common.energy import (
 )
 from vmc.peps.non_abelian_gi.contraction import (
     active_block_ids_from_fields,
-    build_row_mpo,
+    active_block_ids_from_sample,
+    build_row_mpo_from_blocks,
+    flatten_like_sample,
+    unflatten_spin_network_sample,
 )
 from vmc.peps.non_abelian_gi.local_terms import (
     HorizontalLinkCasimirTerm,
@@ -44,15 +48,23 @@ from vmc.peps.non_abelian_gi.local_terms import (
     link_casimir_energy,
     matter_number_energy,
 )
-from vmc.peps.non_abelian_gi.model import NonAbelianGIPEPS
-from vmc.peps.non_abelian_gi.tables import (
-    HoppingMatrixTable,
-    PlaquetteLinkTransitions,
-    PlaquetteMatrixTable,
-    PureGaugeTables,
+from vmc.peps.non_abelian_gi.factors import (
+    HOPPING_KEY_LEGS,
+    HOPPING_LEG_FWD,
+    PLAQUETTE_KEY_LEGS,
+    PLAQUETTE_LEG_FWD,
+    HoppingFactorTables,
+    PlaquetteFactorTables,
 )
-from vmc.peps.standard.kernels import Cache, Context, LocalEstimates, build_mc_kernels
-from vmc.utils.utils import _hastings_ratio, _metropolis_hastings_accept
+from vmc.peps.non_abelian_gi.model import NonAbelianGIPEPS
+from vmc.peps.standard.kernels import (
+    Cache,
+    Context,
+    LocalEstimates,
+    _assemble_log_derivatives,
+    build_mc_kernels,
+)
+from vmc.utils.utils import _metropolis_hastings_accept
 
 __all__ = ["build_mc_kernels"]
 
@@ -65,8 +77,10 @@ class SpinNetworkTwoRowEnvs(NamedTuple):
     top_env: tuple
     bottom_env_next: tuple
     active_block_ids: jax.Array
-    matrix_tables: tuple[tuple[PlaquetteMatrixTable, ...], ...]
-    vertical_hopping_tables: tuple[tuple[HoppingMatrixTable, ...], ...]
+    plaquette_tables: PlaquetteFactorTables
+    hopping_tables: HoppingFactorTables | None
+    j_r_by_block: jax.Array
+    j_d_by_block: jax.Array
 
 
 class SpinNetworkRowEnvs(NamedTuple):
@@ -77,126 +91,115 @@ class SpinNetworkRowEnvs(NamedTuple):
     top_env: tuple
     bottom_env: tuple
     active_block_ids: jax.Array
-    horizontal_hopping_tables: tuple[tuple[HoppingMatrixTable, ...], ...]
+    hopping_tables: HoppingFactorTables | None
+    j_r_by_block: jax.Array
 
 
-def _plaquette_candidate_samples(
-    sample: jax.Array,
+def _window_combos(
+    fuse_op,
+    fuse_rev,
+    vertex_tables,
+    key_legs,
+    leg_fwd,
+    blocks,
+    links,
     *,
-    row: int,
-    col: int,
-    shape: tuple[int, int],
-    tables: PureGaugeTables,
-    link_transitions: PlaquetteLinkTransitions,
-) -> tuple[jax.Array, jax.Array]:
-    """Build padded plaquette-output samples and a validity mask."""
-    if link_transitions.max_outputs == 0:
-        return (
-            jnp.empty((0, sample.size), dtype=sample.dtype),
-            jnp.zeros((0,), dtype=jnp.bool_),
+    with_candidates,
+):
+    """Enumerate the (orientation x fusion-combo) outcomes of one window.
+
+    ``vertex_tables`` holds one ``(fwd, bwd)`` VertexFactorTable pair per
+    vertex, ``key_legs`` the moved-leg positions forming each vertex key and
+    ``leg_fwd`` whether a moved leg fuses forward under the fwd orientation.
+    Returns stacked ``legs (n, n_legs)`` and ``w2 (n,)`` (zero where
+    fusion-invalid), plus masked ``factors``/``blocks`` ``(n, n_vertices, K)``
+    when ``with_candidates``.
+    """
+    max_k = max(t.max_candidates for pair in vertex_tables for t in pair)
+    slots = jnp.arange(max_k, dtype=jnp.int32)
+    legs_parts, w2_parts, fac_parts, blk_parts = [], [], [], []
+    for orient in range(2):
+        maps = tuple(fuse_op if fwd == (orient == 0) else fuse_rev for fwd in leg_fwd)
+        ks = np.array(
+            list(product(*(range(m.outputs.shape[1]) for m in maps))),
+            dtype=np.int32,
+        ).reshape(-1, len(maps))
+        valid = jnp.ones((ks.shape[0],), dtype=bool)
+        for i, (m, link) in enumerate(zip(maps, links)):
+            valid = valid & (ks[:, i] < m.counts[link])
+        legs = jnp.where(
+            valid[:, None],
+            jnp.stack(
+                [
+                    m.outputs[link, ks[:, i]]
+                    for i, (m, link) in enumerate(zip(maps, links))
+                ],
+                axis=1,
+            ),
+            0,
         )
-
-    matter, h_links, v_links, iotas = NonAbelianGIPEPS.unflatten_spin_network_sample(
-        sample,
-        shape,
+        w2 = valid.astype(jnp.float64)
+        facs, blks = [], []
+        for vertex, (pair, key) in enumerate(zip(vertex_tables, key_legs)):
+            table = pair[orient]
+            idx = (blocks[vertex],) + tuple(legs[:, p] for p in key)
+            w2 = w2 * table.w2_sums[idx]
+            if not with_candidates:
+                continue
+            if table.max_candidates:
+                count = jnp.where(valid, table.group_counts[idx], 0)
+                ok = slots[None, :] < count[:, None]
+                flat = jnp.where(ok, table.group_starts[idx][:, None] + slots, 0)
+                facs.append(jnp.where(ok, table.factors[flat], 0.0))
+                blks.append(jnp.where(ok, table.out_blocks[flat], 0))
+            else:
+                facs.append(jnp.zeros((ks.shape[0], max_k), dtype=jnp.complex128))
+                blks.append(jnp.zeros((ks.shape[0], max_k), dtype=jnp.int32))
+        legs_parts.append(legs)
+        w2_parts.append(w2)
+        if with_candidates:
+            fac_parts.append(jnp.stack(facs, axis=1))
+            blk_parts.append(jnp.stack(blks, axis=1))
+    legs = jnp.concatenate(legs_parts, axis=0)
+    w2 = jnp.concatenate(w2_parts, axis=0)
+    if not with_candidates:
+        return legs, w2
+    return (
+        legs,
+        w2,
+        jnp.concatenate(fac_parts, axis=0),
+        jnp.concatenate(blk_parts, axis=0),
     )
-    link_outputs = link_transitions.output_links
-    lookup = tables.block_id_lookup
-    plaquette_outputs = link_outputs[
-        h_links[row, col],
-        v_links[row, col + 1],
-        h_links[row + 1, col],
-        v_links[row, col],
-    ]
-
-    candidates = []
-    valid = []
-    corner_offsets = ((0, 0), (0, 1), (1, 0), (1, 1))
-    for link_out_idx in range(link_transitions.max_outputs):
-        out_top, out_right, out_bottom, out_left = plaquette_outputs[link_out_idx]
-        links_valid = out_top >= 0
-        h_candidate = h_links.at[row, col].set(out_top)
-        h_candidate = h_candidate.at[row + 1, col].set(out_bottom)
-        v_candidate = v_links.at[row, col].set(out_left)
-        v_candidate = v_candidate.at[row, col + 1].set(out_right)
-        for candidate_iotas in product(range(tables.max_iotas), repeat=4):
-            iota_candidate = iotas
-            for (dr, dc), iota in zip(corner_offsets, candidate_iotas, strict=True):
-                iota_candidate = iota_candidate.at[row + dr, col + dc].set(iota)
-            block_valid = links_valid
-            for dr, dc in corner_offsets:
-                block_valid = block_valid & (
-                    _site_block_id(
-                        lookup,
-                        matter,
-                        h_candidate,
-                        v_candidate,
-                        iota_candidate,
-                        shape,
-                        row + dr,
-                        col + dc,
-                    )
-                    >= 0
-                )
-            candidates.append(
-                _flatten_like_sample(
-                    sample,
-                    matter,
-                    h_candidate,
-                    v_candidate,
-                    iota_candidate,
-                )
-            )
-            valid.append(block_valid)
-    return jnp.stack(candidates), jnp.stack(valid)
 
 
-def _site_block_id(
-    lookup: jax.Array,
-    matter: jax.Array,
-    h_links: jax.Array,
-    v_links: jax.Array,
-    iotas: jax.Array,
-    shape: tuple[int, int],
-    row: int,
-    col: int,
-) -> jax.Array:
-    n_rows, n_cols = shape
-    return lookup[
-        row,
-        col,
-        matter[row, col],
-        h_links[row, col - 1] if col > 0 else 0,
-        v_links[row - 1, col] if row > 0 else 0,
-        h_links[row, col] if col < n_cols - 1 else 0,
-        v_links[row, col] if row < n_rows - 1 else 0,
-        iotas[row, col],
-    ]
-
-
-def _active_block_ids(
-    lookup: jax.Array,
-    sample: jax.Array,
-    shape: tuple[int, int],
-) -> jax.Array:
-    matter, h_links, v_links, iotas = NonAbelianGIPEPS.unflatten_spin_network_sample(
-        sample,
-        shape,
+def _plaquette_geometry(
+    plaquette_tables, active_block_ids, j_r_by_block, j_d_by_block, row, col
+):
+    """Corner tables, in-blocks and current links of one plaquette window."""
+    corner_tables = (
+        plaquette_tables.tl[row][col],
+        plaquette_tables.tr[row][col + 1],
+        plaquette_tables.bl[row + 1][col],
+        plaquette_tables.br[row + 1][col + 1],
     )
-    return active_block_ids_from_fields(lookup, matter, h_links, v_links, iotas, shape)
+    blocks = (
+        active_block_ids[row, col],
+        active_block_ids[row, col + 1],
+        active_block_ids[row + 1, col],
+        active_block_ids[row + 1, col + 1],
+    )
+    links = (
+        j_r_by_block[row, col, blocks[0]],
+        j_d_by_block[row, col + 1, blocks[1]],
+        j_r_by_block[row + 1, col, blocks[2]],
+        j_d_by_block[row, col, blocks[0]],
+    )
+    return corner_tables, blocks, links
 
 
-def _flatten_like_sample(
-    sample: jax.Array,
-    matter: jax.Array,
-    h_links: jax.Array,
-    v_links: jax.Array,
-    iotas: jax.Array,
-) -> jax.Array:
-    pure_size = h_links.size + v_links.size + iotas.size
-    if sample.size == pure_size:
-        return NonAbelianGIPEPS.flatten_sample(h_links, v_links, iotas)
-    return NonAbelianGIPEPS.flatten_matter_sample(matter, h_links, v_links, iotas)
+def _folded_mpo(site_tensor, factors, blocks):
+    """lambda-weighted candidate MPO: ``sum_i factors[i] T[blocks[i]]``."""
+    return jnp.einsum("k,kabcd->cdab", factors, site_tensor[blocks], optimize=True)
 
 
 @dispatch
@@ -262,39 +265,45 @@ def _transition_energy(
     tensors: Any,
 ) -> jax.Array:
     row, col = term.row, term.col
-    table = envs.matrix_tables[row][col]
-    input_blocks = (
-        envs.active_block_ids[row, col],
-        envs.active_block_ids[row, col + 1],
-        envs.active_block_ids[row + 1, col],
-        envs.active_block_ids[row + 1, col + 1],
+    tabs = envs.plaquette_tables
+    corner_tables, blocks, links = _plaquette_geometry(
+        tabs, envs.active_block_ids, envs.j_r_by_block, envs.j_d_by_block, row, col
     )
-    count = table.counts[input_blocks]
-    start = table.starts[input_blocks]
-    total = jnp.zeros((), dtype=tensors[row][col].dtype)
-    for out_idx in range(table.max_count):
-        valid = out_idx < count
-        flat_idx = jnp.where(valid, start + out_idx, 0)
-        output_block_ids = table.output_block_ids[flat_idx]
-        safe_block_ids = jnp.where(
-            valid, output_block_ids, jnp.zeros_like(output_block_ids)
-        )
-        mpo_tl = _block_mpo(tensors[row][col], safe_block_ids[0])
-        mpo_tr = _block_mpo(tensors[row][col + 1], safe_block_ids[1])
-        mpo_bl = _block_mpo(tensors[row + 1][col], safe_block_ids[2])
-        mpo_br = _block_mpo(tensors[row + 1][col + 1], safe_block_ids[3])
-        amp = _contract_2row_2col(
+    sites = (
+        tensors[row][col],
+        tensors[row][col + 1],
+        tensors[row + 1][col],
+        tensors[row + 1][col + 1],
+    )
+    total = jnp.zeros((), dtype=sites[0].dtype)
+    if max(t.max_candidates for pair in corner_tables for t in pair) == 0:
+        return total
+    _, _, factors, out_blocks = _window_combos(
+        tabs.fuse_op,
+        tabs.fuse_rev,
+        corner_tables,
+        PLAQUETTE_KEY_LEGS,
+        PLAQUETTE_LEG_FWD,
+        blocks,
+        links,
+        with_candidates=True,
+    )
+    for combo in range(factors.shape[0]):
+        mpos = [
+            _folded_mpo(sites[v], factors[combo, v], out_blocks[combo, v])
+            for v in range(4)
+        ]
+        total = total + _contract_2row_2col(
             envs.left_env,
             envs.top_env,
-            mpo_tl,
-            mpo_bl,
-            mpo_tr,
-            mpo_br,
+            mpos[0],
+            mpos[2],
+            mpos[1],
+            mpos[3],
             envs.bottom_env_next,
             envs.right_envs[col + 1],
             col,
         )
-        total = total + jnp.where(valid, table.matrix_elements[flat_idx] * amp, 0.0)
     return total
 
 
@@ -305,34 +314,36 @@ def _transition_energy(
     tensors: Any,
 ) -> jax.Array:
     row, col = term.row, term.col
-    table = envs.horizontal_hopping_tables[row][col]
-    input_blocks = (
+    hop = envs.hopping_tables
+    endpoint_tables = (hop.h_src[row][col], hop.h_tgt[row][col + 1])
+    total = jnp.zeros((), dtype=tensors[row][col].dtype)
+    if max(t.max_candidates for pair in endpoint_tables for t in pair) == 0:
+        return total
+    blocks = (
         envs.active_block_ids[row, col],
         envs.active_block_ids[row, col + 1],
     )
-    count = table.counts[input_blocks]
-    start = table.starts[input_blocks]
-    total = jnp.zeros((), dtype=tensors[row][col].dtype)
-    for out_idx in range(table.max_count):
-        valid = out_idx < count
-        flat_idx = jnp.where(valid, start + out_idx, 0)
-        output_block_ids = table.output_block_ids[flat_idx]
-        safe_block_ids = jnp.where(
-            valid, output_block_ids, jnp.zeros_like(output_block_ids)
-        )
-        mpo_left = _block_mpo(tensors[row][col], safe_block_ids[0])
-        mpo_right = _block_mpo(tensors[row][col + 1], safe_block_ids[1])
-        amp = _contract_1row_2col(
+    _, _, factors, out_blocks = _window_combos(
+        hop.fuse_op,
+        hop.fuse_rev,
+        endpoint_tables,
+        HOPPING_KEY_LEGS,
+        HOPPING_LEG_FWD,
+        blocks,
+        (envs.j_r_by_block[row, col, blocks[0]],),
+        with_candidates=True,
+    )
+    for combo in range(factors.shape[0]):
+        total = total + _contract_1row_2col(
             envs.left_env,
             envs.top_env[col],
-            mpo_left,
+            _folded_mpo(tensors[row][col], factors[combo, 0], out_blocks[combo, 0]),
             envs.bottom_env[col],
             envs.top_env[col + 1],
-            mpo_right,
+            _folded_mpo(tensors[row][col + 1], factors[combo, 1], out_blocks[combo, 1]),
             envs.bottom_env[col + 1],
             envs.right_envs[col + 1],
         )
-        total = total + jnp.where(valid, table.matrix_elements[flat_idx] * amp, 0.0)
     return total
 
 
@@ -343,32 +354,34 @@ def _transition_energy(
     tensors: Any,
 ) -> jax.Array:
     row, col = term.row, term.col
-    table = envs.vertical_hopping_tables[row][col]
-    input_blocks = (
+    hop = envs.hopping_tables
+    endpoint_tables = (hop.v_src[row][col], hop.v_tgt[row + 1][col])
+    total = jnp.zeros((), dtype=tensors[row][col].dtype)
+    if max(t.max_candidates for pair in endpoint_tables for t in pair) == 0:
+        return total
+    blocks = (
         envs.active_block_ids[row, col],
         envs.active_block_ids[row + 1, col],
     )
-    count = table.counts[input_blocks]
-    start = table.starts[input_blocks]
-    total = jnp.zeros((), dtype=tensors[row][col].dtype)
-    for out_idx in range(table.max_count):
-        valid = out_idx < count
-        flat_idx = jnp.where(valid, start + out_idx, 0)
-        output_block_ids = table.output_block_ids[flat_idx]
-        safe_block_ids = jnp.where(
-            valid, output_block_ids, jnp.zeros_like(output_block_ids)
-        )
-        mpo_top = _block_mpo(tensors[row][col], safe_block_ids[0])
-        mpo_bottom = _block_mpo(tensors[row + 1][col], safe_block_ids[1])
-        amp = _contract_2row_1col(
+    _, _, factors, out_blocks = _window_combos(
+        hop.fuse_op,
+        hop.fuse_rev,
+        endpoint_tables,
+        HOPPING_KEY_LEGS,
+        HOPPING_LEG_FWD,
+        blocks,
+        (envs.j_d_by_block[row, col, blocks[0]],),
+        with_candidates=True,
+    )
+    for combo in range(factors.shape[0]):
+        total = total + _contract_2row_1col(
             envs.left_env,
             envs.top_env[col],
-            mpo_top,
-            mpo_bottom,
+            _folded_mpo(tensors[row][col], factors[combo, 0], out_blocks[combo, 0]),
+            _folded_mpo(tensors[row + 1][col], factors[combo, 1], out_blocks[combo, 1]),
             envs.bottom_env_next[col],
             envs.right_envs[col],
         )
-        total = total + jnp.where(valid, table.matrix_elements[flat_idx] * amp, 0.0)
     return total
 
 
@@ -390,40 +403,51 @@ def _sample_table_outcome(
     return key, out_idx, can_propose
 
 
-def _proposal_ratio(
-    table: PlaquetteMatrixTable | HoppingMatrixTable,
-    input_blocks: tuple[jax.Array, ...],
-    output_blocks: jax.Array,
-    out_idx: jax.Array,
+def _sample_window_outcome(
+    key: jax.Array,
+    fuse_op,
+    fuse_rev,
+    vertex_tables,
+    key_legs,
+    leg_fwd,
+    blocks,
+    links,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Ancestrally sample one window outcome.
+
+    Combo (orientation + new legs) is drawn proportional to the product of
+    per-vertex ``w2_sums`` and each vertex candidate proportional to
+    ``|lambda|^2``, so the realized density is ``prod|lambda|^2 / Z(in)``,
+    which is symmetric under conjugation — the Hastings ratio reduces to
+    ``Z(in)/Z(out)``.  Returns ``(key, out_blocks, new_legs, can_propose,
+    z_in)``.
+    """
+    legs, w2, factors, cand_blocks = _window_combos(
+        fuse_op,
+        fuse_rev,
+        vertex_tables,
+        key_legs,
+        leg_fwd,
+        blocks,
+        links,
+        with_candidates=True,
+    )
+    z_in = jnp.sum(w2)
+    key, combo_idx, can_propose = _sample_table_outcome(key, w2, z_in)
+    outs = []
+    for vertex in range(len(vertex_tables)):
+        weights = jnp.abs(factors[combo_idx, vertex]) ** 2
+        key, cand_idx, _ = _sample_table_outcome(key, weights, jnp.sum(weights))
+        outs.append(cand_blocks[combo_idx, vertex, cand_idx])
+    return key, jnp.stack(outs), legs[combo_idx], can_propose, z_in
+
+
+def _window_proposal_ratio(
+    z_in: jax.Array,
+    z_out: jax.Array,
     can_propose: jax.Array,
 ) -> jax.Array:
-    forward_norm = table.proposal_norms[input_blocks]
-    forward_start = table.starts[input_blocks]
-    forward_idx = jnp.where(can_propose, forward_start + out_idx, 0)
-    forward_weight = table.proposal_weights[forward_idx]
-    output_key = tuple(output_blocks[idx] for idx in range(len(input_blocks)))
-    reverse_norm = table.proposal_norms[output_key]
-    reverse_start = table.starts[output_key]
-    reverse_count = table.counts[output_key]
-    input_vec = jnp.stack(input_blocks).astype(table.output_block_ids.dtype)
-    reverse_weight = jnp.zeros((), dtype=table.proposal_weights.dtype)
-    for reverse_idx in range(table.max_count):
-        valid = reverse_idx < reverse_count
-        flat_idx = jnp.where(valid, reverse_start + reverse_idx, 0)
-        reverse_outputs = table.output_block_ids[flat_idx]
-        reverse_matches = jnp.all(reverse_outputs == input_vec)
-        reverse_weight = reverse_weight + jnp.where(
-            valid & reverse_matches,
-            table.proposal_weights[flat_idx],
-            0.0,
-        )
-    forward_prob = jnp.where(forward_norm > 0.0, forward_weight / forward_norm, 0.0)
-    reverse_prob = jnp.where(reverse_norm > 0.0, reverse_weight / reverse_norm, 0.0)
-    return jnp.where(
-        can_propose,
-        _hastings_ratio(forward_prob, reverse_prob),
-        1.0,
-    )
+    return jnp.where(can_propose, z_in / jnp.where(z_out > 0.0, z_out, 1.0), 1.0)
 
 
 def _iota_candidate_blocks(
@@ -555,18 +579,6 @@ def _iota_heatbath_sweep_site(
     return key, iotas, active_block_ids, row_mpo
 
 
-def _table_row_weights(
-    table: PlaquetteMatrixTable | HoppingMatrixTable,
-    input_blocks: tuple[jax.Array, ...],
-) -> jax.Array:
-    start = table.starts[input_blocks]
-    count = table.counts[input_blocks]
-    arange = jnp.arange(table.max_count)
-    valid = arange < count
-    safe_indices = jnp.where(valid, start + arange, 0)
-    return jnp.where(valid, table.proposal_weights[safe_indices], 0.0)
-
-
 def _plaquette_sweep_row_pair(
     key: jax.Array,
     tensors: Any,
@@ -579,7 +591,7 @@ def _plaquette_sweep_row_pair(
     top_env: tuple,
     bottom_env_next: tuple,
     amp_cur: jax.Array | None,
-    matrix_tables: tuple[tuple[PlaquetteMatrixTable, ...], ...],
+    plaquette_tables: PlaquetteFactorTables,
     j_r_by_block: jax.Array,
     j_d_by_block: jax.Array,
     iota_by_block: jax.Array,
@@ -643,7 +655,7 @@ def _plaquette_sweep_row_pair(
             bottom_env_next,
             right_envs,
             amp_cur,
-            matrix_tables[row][col],
+            plaquette_tables,
             j_r_by_block,
             j_d_by_block,
             iota_by_block,
@@ -673,7 +685,7 @@ def _horizontal_hopping_sweep_row(
     top_env: tuple,
     bottom_env: tuple,
     amp_cur: jax.Array | None,
-    hopping_tables: tuple[tuple[HoppingMatrixTable, ...], ...],
+    hopping_tables: HoppingFactorTables,
     matter_state_by_block: jax.Array,
     j_r_by_block: jax.Array,
     iota_by_block: jax.Array,
@@ -720,7 +732,7 @@ def _horizontal_hopping_sweep_row(
             bottom_env,
             right_envs,
             amp_cur,
-            hopping_tables[row][col],
+            hopping_tables,
             matter_state_by_block,
             j_r_by_block,
             iota_by_block,
@@ -743,7 +755,7 @@ def _horizontal_hopping_sweep_site(
     bottom_env: tuple,
     right_envs: list[jax.Array],
     amp_cur: jax.Array,
-    table: HoppingMatrixTable,
+    hopping_tables: HoppingFactorTables,
     matter_state_by_block: jax.Array,
     j_r_by_block: jax.Array,
     iota_by_block: jax.Array,
@@ -753,7 +765,11 @@ def _horizontal_hopping_sweep_site(
 ) -> tuple[
     jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, list, jax.Array, jax.Array
 ]:
-    if table.max_count == 0:
+    endpoint_tables = (
+        hopping_tables.h_src[row][col],
+        hopping_tables.h_tgt[row][col + 1],
+    )
+    if max(t.max_candidates for pair in endpoint_tables for t in pair) == 0:
         left_env = _update_left_env_1row(
             left_env,
             top_env[col],
@@ -762,22 +778,23 @@ def _horizontal_hopping_sweep_site(
         )
         return key, matter, h_links, iotas, active_block_ids, row_mpo, left_env, amp_cur
     input_blocks = (active_block_ids[row, col], active_block_ids[row, col + 1])
-    weights = _table_row_weights(table, input_blocks)
-    key, out_idx, can_propose = _sample_table_outcome(
+    key, output_blocks, output_legs, can_propose, z_in = _sample_window_outcome(
         key,
-        weights,
-        table.proposal_norms[input_blocks],
+        hopping_tables.fuse_op,
+        hopping_tables.fuse_rev,
+        endpoint_tables,
+        HOPPING_KEY_LEGS,
+        HOPPING_LEG_FWD,
+        input_blocks,
+        (j_r_by_block[row, col, input_blocks[0]],),
     )
-    start = table.starts[input_blocks]
-    flat_idx = jnp.where(can_propose, start + out_idx, 0)
-    output_blocks = table.output_block_ids[flat_idx]
+    output_link = output_legs[0]
     output_matter = jnp.stack(
         [
             matter_state_by_block[row, col, output_blocks[0]],
             matter_state_by_block[row, col + 1, output_blocks[1]],
         ]
     )
-    output_link = j_r_by_block[row, col, output_blocks[0]]
     output_iotas = jnp.stack(
         [
             iota_by_block[row, col, output_blocks[0]],
@@ -786,6 +803,16 @@ def _horizontal_hopping_sweep_site(
     )
     input_vec = jnp.stack(input_blocks).astype(output_blocks.dtype)
     safe_blocks = jnp.where(can_propose, output_blocks, input_vec)
+    _, w2_reverse = _window_combos(
+        hopping_tables.fuse_op,
+        hopping_tables.fuse_rev,
+        endpoint_tables,
+        HOPPING_KEY_LEGS,
+        HOPPING_LEG_FWD,
+        (safe_blocks[0], safe_blocks[1]),
+        (output_link,),
+        with_candidates=False,
+    )
 
     mpo_left = _block_mpo(tensors[row][col], safe_blocks[0])
     mpo_right = _block_mpo(tensors[row][col + 1], safe_blocks[1])
@@ -812,9 +839,7 @@ def _horizontal_hopping_sweep_site(
         key,
         jnp.abs(amp_cur) ** 2,
         jnp.abs(amp_proposed) ** 2,
-        proposal_ratio=_proposal_ratio(
-            table, input_blocks, safe_blocks, out_idx, can_propose
-        ),
+        proposal_ratio=_window_proposal_ratio(z_in, jnp.sum(w2_reverse), can_propose),
     )
     accept = accept & can_propose
 
@@ -851,7 +876,7 @@ def _vertical_hopping_sweep_row_pair(
     top_env: tuple,
     bottom_env_next: tuple,
     amp_cur: jax.Array | None,
-    hopping_tables: tuple[tuple[HoppingMatrixTable, ...], ...],
+    hopping_tables: HoppingFactorTables,
     matter_state_by_block: jax.Array,
     j_d_by_block: jax.Array,
     iota_by_block: jax.Array,
@@ -912,7 +937,7 @@ def _vertical_hopping_sweep_row_pair(
             bottom_env_next,
             right_envs,
             amp_cur,
-            hopping_tables[row][col],
+            hopping_tables,
             matter_state_by_block,
             j_d_by_block,
             iota_by_block,
@@ -945,7 +970,7 @@ def _vertical_hopping_sweep_site(
     bottom_env_next: tuple,
     right_envs: list[jax.Array],
     amp_cur: jax.Array,
-    table: HoppingMatrixTable,
+    hopping_tables: HoppingFactorTables,
     matter_state_by_block: jax.Array,
     j_d_by_block: jax.Array,
     iota_by_block: jax.Array,
@@ -963,7 +988,11 @@ def _vertical_hopping_sweep_site(
     jax.Array,
     jax.Array,
 ]:
-    if table.max_count == 0:
+    endpoint_tables = (
+        hopping_tables.v_src[row][col],
+        hopping_tables.v_tgt[row + 1][col],
+    )
+    if max(t.max_candidates for pair in endpoint_tables for t in pair) == 0:
         left_env = _update_left_env_2row(
             left_env,
             top_env[col],
@@ -983,22 +1012,23 @@ def _vertical_hopping_sweep_site(
             amp_cur,
         )
     input_blocks = (active_block_ids[row, col], active_block_ids[row + 1, col])
-    weights = _table_row_weights(table, input_blocks)
-    key, out_idx, can_propose = _sample_table_outcome(
+    key, output_blocks, output_legs, can_propose, z_in = _sample_window_outcome(
         key,
-        weights,
-        table.proposal_norms[input_blocks],
+        hopping_tables.fuse_op,
+        hopping_tables.fuse_rev,
+        endpoint_tables,
+        HOPPING_KEY_LEGS,
+        HOPPING_LEG_FWD,
+        input_blocks,
+        (j_d_by_block[row, col, input_blocks[0]],),
     )
-    start = table.starts[input_blocks]
-    flat_idx = jnp.where(can_propose, start + out_idx, 0)
-    output_blocks = table.output_block_ids[flat_idx]
+    output_link = output_legs[0]
     output_matter = jnp.stack(
         [
             matter_state_by_block[row, col, output_blocks[0]],
             matter_state_by_block[row + 1, col, output_blocks[1]],
         ]
     )
-    output_link = j_d_by_block[row, col, output_blocks[0]]
     output_iotas = jnp.stack(
         [
             iota_by_block[row, col, output_blocks[0]],
@@ -1007,6 +1037,16 @@ def _vertical_hopping_sweep_site(
     )
     input_vec = jnp.stack(input_blocks).astype(output_blocks.dtype)
     safe_blocks = jnp.where(can_propose, output_blocks, input_vec)
+    _, w2_reverse = _window_combos(
+        hopping_tables.fuse_op,
+        hopping_tables.fuse_rev,
+        endpoint_tables,
+        HOPPING_KEY_LEGS,
+        HOPPING_LEG_FWD,
+        (safe_blocks[0], safe_blocks[1]),
+        (output_link,),
+        with_candidates=False,
+    )
 
     mpo_top = _block_mpo(tensors[row][col], safe_blocks[0])
     mpo_bottom = _block_mpo(tensors[row + 1][col], safe_blocks[1])
@@ -1034,9 +1074,7 @@ def _vertical_hopping_sweep_site(
         key,
         jnp.abs(amp_cur) ** 2,
         jnp.abs(amp_proposed) ** 2,
-        proposal_ratio=_proposal_ratio(
-            table, input_blocks, safe_blocks, out_idx, can_propose
-        ),
+        proposal_ratio=_window_proposal_ratio(z_in, jnp.sum(w2_reverse), can_propose),
     )
     accept = accept & can_propose
 
@@ -1076,7 +1114,7 @@ def _plaquette_sweep_site(
     bottom_env_next: tuple,
     right_envs: list[jax.Array],
     amp_cur: jax.Array,
-    table: PlaquetteMatrixTable,
+    plaquette_tables: PlaquetteFactorTables,
     j_r_by_block: jax.Array,
     j_d_by_block: jax.Array,
     iota_by_block: jax.Array,
@@ -1094,7 +1132,10 @@ def _plaquette_sweep_site(
     jax.Array,
     jax.Array,
 ]:
-    if table.max_count == 0:
+    corner_tables, input_blocks, links = _plaquette_geometry(
+        plaquette_tables, active_block_ids, j_r_by_block, j_d_by_block, row, col
+    )
+    if max(t.max_candidates for pair in corner_tables for t in pair) == 0:
         left_env = _update_left_env_2row(
             left_env,
             top_env[col],
@@ -1113,28 +1154,15 @@ def _plaquette_sweep_site(
             left_env,
             amp_cur,
         )
-    input_blocks = (
-        active_block_ids[row, col],
-        active_block_ids[row, col + 1],
-        active_block_ids[row + 1, col],
-        active_block_ids[row + 1, col + 1],
-    )
-    weights = _table_row_weights(table, input_blocks)
-    key, out_idx, can_propose = _sample_table_outcome(
+    key, output_blocks, output_links, can_propose, z_in = _sample_window_outcome(
         key,
-        weights,
-        table.proposal_norms[input_blocks],
-    )
-    start = table.starts[input_blocks]
-    flat_idx = jnp.where(can_propose, start + out_idx, 0)
-    output_blocks = table.output_block_ids[flat_idx]
-    output_links = jnp.stack(
-        [
-            j_r_by_block[row, col, output_blocks[0]],
-            j_d_by_block[row, col + 1, output_blocks[1]],
-            j_r_by_block[row + 1, col, output_blocks[2]],
-            j_d_by_block[row, col, output_blocks[0]],
-        ]
+        plaquette_tables.fuse_op,
+        plaquette_tables.fuse_rev,
+        corner_tables,
+        PLAQUETTE_KEY_LEGS,
+        PLAQUETTE_LEG_FWD,
+        input_blocks,
+        links,
     )
     output_iotas = jnp.stack(
         [
@@ -1146,6 +1174,16 @@ def _plaquette_sweep_site(
     )
     input_vec = jnp.stack(input_blocks).astype(output_blocks.dtype)
     safe_blocks = jnp.where(can_propose, output_blocks, input_vec)
+    _, w2_reverse = _window_combos(
+        plaquette_tables.fuse_op,
+        plaquette_tables.fuse_rev,
+        corner_tables,
+        PLAQUETTE_KEY_LEGS,
+        PLAQUETTE_LEG_FWD,
+        tuple(safe_blocks[v] for v in range(4)),
+        tuple(output_links[i] for i in range(4)),
+        with_candidates=False,
+    )
 
     mpo_tl = _block_mpo(tensors[row][col], safe_blocks[0])
     mpo_tr = _block_mpo(tensors[row][col + 1], safe_blocks[1])
@@ -1177,9 +1215,7 @@ def _plaquette_sweep_site(
         key,
         jnp.abs(amp_cur) ** 2,
         jnp.abs(amp_proposed) ** 2,
-        proposal_ratio=_proposal_ratio(
-            table, input_blocks, safe_blocks, out_idx, can_propose
-        ),
+        proposal_ratio=_window_proposal_ratio(z_in, jnp.sum(w2_reverse), can_propose),
     )
     accept = accept & can_propose
 
@@ -1244,9 +1280,10 @@ def build_mc_kernels(
     j_r_by_block = tables.j_r_by_block
     j_d_by_block = tables.j_d_by_block
     iota_by_block = tables.iota_by_block
-    matrix_tables = model.plaquette_matrix_tables
-    horizontal_hopping_tables = model.horizontal_hopping_matrix_tables
-    vertical_hopping_tables = model.vertical_hopping_matrix_tables
+    plaquette_tables = model.plaquette_factor_tables
+    hopping_tables = model.hopping_factor_tables
+    total_active_params = int(sum(model.params_per_site))
+    params_per_site = jnp.asarray(model.params_per_site, dtype=jnp.int32)
     all_operators = (operator,) + observables
     bucketed_terms, coeff_structure = merge_operators(
         all_operators,
@@ -1266,15 +1303,12 @@ def build_mc_kernels(
     if has_matter_hopping_terms and phys_dim == 1:
         raise ValueError("Matter hopping terms require phys_dim > 1.")
 
-    def build_row_mpos(tensors: Any, sample: jax.Array) -> list[tuple[jax.Array, ...]]:
+    def build_row_mpos(
+        tensors: Any,
+        active_block_ids: jax.Array,
+    ) -> list[tuple[jax.Array, ...]]:
         return [
-            build_row_mpo(
-                tensors,
-                sample,
-                shape,
-                block_id_lookup,
-                row=row,
-            )
+            build_row_mpo_from_blocks(tensors, active_block_ids, row=row)
             for row in range(n_rows)
         ]
 
@@ -1288,7 +1322,12 @@ def build_mc_kernels(
         return tuple(envs)
 
     def build_bottom_envs(tensors: Any, sample: jax.Array) -> tuple:
-        return build_bottom_envs_from_row_mpos(build_row_mpos(tensors, sample))
+        return build_bottom_envs_from_row_mpos(
+            build_row_mpos(
+                tensors,
+                active_block_ids_from_sample(block_id_lookup, sample, shape),
+            )
+        )
 
     def init_cache(
         tensors: Any,
@@ -1330,11 +1369,9 @@ def build_mc_kernels(
         v_links: jax.Array,
         iotas: jax.Array,
         active_block_ids: jax.Array,
-        row_mpos: list[tuple[jax.Array, ...]] | None = None,
+        row_mpos: list[tuple[jax.Array, ...]],
     ) -> tuple[jax.Array, jax.Array, Context]:
-        final_sample = _flatten_like_sample(sample, matter, h_links, v_links, iotas)
-        if row_mpos is None:
-            row_mpos = build_row_mpos(tensors, final_sample)
+        final_sample = flatten_like_sample(sample, matter, h_links, v_links, iotas)
         if max_iotas > 1:
             bottom_envs_iota = build_bottom_envs_from_row_mpos(row_mpos)
             top_envs = [None] * n_rows
@@ -1364,7 +1401,7 @@ def build_mc_kernels(
                     row=row,
                 )
                 top_env = strategy.apply(top_env, row_mpos[row])
-            final_sample = _flatten_like_sample(
+            final_sample = flatten_like_sample(
                 sample,
                 matter,
                 h_links,
@@ -1394,14 +1431,19 @@ def build_mc_kernels(
         key: jax.Array,
         cache: Cache,
     ) -> tuple[jax.Array, jax.Array, Context]:
-        matter, h_links, v_links, iotas = (
-            NonAbelianGIPEPS.unflatten_spin_network_sample(sample, shape)
+        matter, h_links, v_links, iotas = unflatten_spin_network_sample(sample, shape)
+        active_block_ids = active_block_ids_from_fields(
+            block_id_lookup,
+            matter,
+            h_links,
+            v_links,
+            iotas,
+            shape,
         )
-        active_block_ids = _active_block_ids(block_id_lookup, sample, shape)
         dtype = tensors[0][0].dtype
+        row_mpos = build_row_mpos(tensors, active_block_ids)
 
         if n_rows > 1 and n_cols > 1:
-            row_mpos = build_row_mpos(tensors, sample)
             top_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
             amp_cur = None
             for row in range(n_rows - 1):
@@ -1426,7 +1468,7 @@ def build_mc_kernels(
                     top_env,
                     cache.bottom_envs[row + 1],
                     amp_cur,
-                    matrix_tables,
+                    plaquette_tables,
                     j_r_by_block,
                     j_d_by_block,
                     iota_by_block,
@@ -1458,16 +1500,9 @@ def build_mc_kernels(
                 v_links,
                 iotas,
                 active_block_ids,
+                row_mpos,
             )
 
-        sample_after_plaquettes = _flatten_like_sample(
-            sample,
-            matter,
-            h_links,
-            v_links,
-            iotas,
-        )
-        row_mpos = build_row_mpos(tensors, sample_after_plaquettes)
         bottom_envs_h = build_bottom_envs_from_row_mpos(row_mpos)
         top_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
         amp_cur = None
@@ -1491,7 +1526,7 @@ def build_mc_kernels(
                 top_env,
                 bottom_envs_h[row],
                 amp_cur,
-                horizontal_hopping_tables,
+                hopping_tables,
                 matter_state_by_block,
                 j_r_by_block,
                 iota_by_block,
@@ -1512,14 +1547,6 @@ def build_mc_kernels(
                 row_mpos,
             )
 
-        sample_after_horizontal = _flatten_like_sample(
-            sample,
-            matter,
-            h_links,
-            v_links,
-            iotas,
-        )
-        row_mpos = build_row_mpos(tensors, sample_after_horizontal)
         bottom_envs_v = build_bottom_envs_from_row_mpos(row_mpos)
         top_env = tuple(jnp.ones((1, 1, 1), dtype=dtype) for _ in range(n_cols))
         amp_cur = None
@@ -1545,7 +1572,7 @@ def build_mc_kernels(
                 top_env,
                 bottom_envs_v[row + 1],
                 amp_cur,
-                vertical_hopping_tables,
+                hopping_tables,
                 matter_state_by_block,
                 j_d_by_block,
                 iota_by_block,
@@ -1570,10 +1597,16 @@ def build_mc_kernels(
         sample: jax.Array,
         context: Context,
     ) -> tuple[Cache, LocalEstimates]:
-        matter, h_links, v_links, _iotas = (
-            NonAbelianGIPEPS.unflatten_spin_network_sample(sample, shape)
+        matter, h_links, v_links, iotas = unflatten_spin_network_sample(sample, shape)
+        active_block_ids = active_block_ids_from_fields(
+            block_id_lookup,
+            matter,
+            h_links,
+            v_links,
+            iotas,
+            shape,
         )
-        active_block_ids = _active_block_ids(block_id_lookup, sample, shape)
+        row_mpos = build_row_mpos(tensors, active_block_ids)
         coeffs = static_coeffs if context.coeffs is None else context.coeffs
         local_estimates = jnp.zeros(len(bucketed_terms), dtype=context.amp.dtype)
         for term, contributions in bucketed_terms.diagonal:
@@ -1592,13 +1625,7 @@ def build_mc_kernels(
         for r in range(n_rows - 1, -1, -1):
             bottom_envs[r] = bottom_env
             top_env = context.top_envs[r]
-            row_mpo = build_row_mpo(
-                tensors,
-                sample,
-                shape,
-                block_id_lookup,
-                row=r,
-            )
+            row_mpo = row_mpos[r]
             dr1_columns = empty_columns
             other_row_passes = []
             for row_pass in eval_schedule.rows[r]:
@@ -1629,7 +1656,8 @@ def build_mc_kernels(
                         top_env,
                         bottom_env,
                         active_block_ids,
-                        horizontal_hopping_tables,
+                        hopping_tables,
+                        j_r_by_block,
                     )
                     for column in dr1_columns[c]:
                         for term, contributions in column.terms:
@@ -1677,8 +1705,10 @@ def build_mc_kernels(
                         top_env,
                         bottom_env_next,
                         active_block_ids,
-                        matrix_tables,
-                        vertical_hopping_tables,
+                        plaquette_tables,
+                        hopping_tables,
+                        j_r_by_block,
+                        j_d_by_block,
                     )
                     for column in row_pass.columns[c]:
                         for term, contributions in column.terms:
@@ -1701,30 +1731,20 @@ def build_mc_kernels(
             bottom_env = _apply_mpo_from_below(bottom_env, row_mpo, strategy)
             next_row_mpo = row_mpo
 
-        grad_parts = []
-        p_parts = [] if not full_gradient else None
-        for r in range(n_rows):
-            for c in range(n_cols):
-                env_grad = env_grads[r][c]
-                if full_gradient:
-                    grad_full = jnp.zeros_like(jnp.asarray(tensors[r][c]))
-                    grad_parts.append(
-                        grad_full.at[active_block_ids[r, c]].set(env_grad).reshape(-1)
-                    )
-                    continue
-                grad_parts.append(env_grad.reshape(-1))
-                p_parts.append(
-                    jnp.full(
-                        (env_grad.size,),
-                        active_block_ids[r, c],
-                        dtype=jnp.int16,
-                    )
-                )
-        active_slice_indices = None if full_gradient else jnp.concatenate(p_parts)
+        local_log_derivatives, active_slice_indices = _assemble_log_derivatives(
+            tensors,
+            params_per_site,
+            total_active_params,
+            shape,
+            env_grads,
+            active_block_ids.reshape(-1),
+            context.amp,
+            full_gradient=full_gradient,
+        )
         return Cache(
             bottom_envs=tuple(bottom_envs), coeffs=context.coeffs
         ), LocalEstimates(
-            local_log_derivatives=jnp.concatenate(grad_parts) / context.amp,
+            local_log_derivatives=local_log_derivatives,
             local_estimate=local_estimates,
             active_slice_indices=active_slice_indices,
             amp=context.amp,

@@ -101,10 +101,10 @@ def _graded_forward(
 ) -> tuple[jax.Array, list[tuple]]:
     """Masked, gate-signed forward pass caching the top boundaries."""
     masks, right_par, _ = _grading_statics(grading, tensors)
-    decorated = _decorate(
-        tensors, column_prefix_parities(grading, spins), masks, right_par
+    prefix = column_prefix_parities(jnp.asarray(grading.phys_parity)[spins])
+    return _forward_with_cache(
+        _decorate(tensors, prefix, masks, right_par), spins, shape, strategy
     )
-    return _forward_with_cache(decorated, spins, shape, strategy)
 
 
 def graded_peps_apply(
@@ -173,7 +173,7 @@ def _value_and_grad(
     spins = spin_to_occupancy(sample).reshape(shape)
     if model.grading is not None:
         masks, right_par, _ = _grading_statics(model.grading, tensors)
-        prefix = column_prefix_parities(model.grading, spins)
+        prefix = column_prefix_parities(jnp.asarray(model.grading.phys_parity)[spins])
         tensors = _decorate(tensors, prefix, masks, right_par)
     amp, top_envs = _forward_with_cache(tensors, spins, shape, model.strategy)
     env_grads = _compute_all_gradients(tensors, spins, shape, model.strategy, top_envs)
@@ -255,8 +255,8 @@ def local_estimate(
         if grading is None:
             decorated, env_config = tensors, None
         else:
-            prefix = column_prefix_parities(grading, spins)
             parities = jnp.asarray(grading.phys_parity)[spins]
+            prefix = column_prefix_parities(parities)
             suffix = (jnp.sum(parities, axis=0) + prefix + parities) % 2
             decorated = _decorate(tensors, prefix, masks, right_par)
             env_config = FermionSigns(prefix, suffix, down_flip, right_flip)

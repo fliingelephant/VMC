@@ -10,9 +10,47 @@ import itertools
 import jax
 import jax.numpy as jnp
 
-from vmc.peps.non_abelian_gi import NonAbelianGIPEPS
+from vmc.peps.common.contraction import _contract_bottom
+from vmc.peps.common.kernels import Context
+from vmc.peps.non_abelian_gi import NonAbelianGIPEPS, build_row_mpo
 from vmc.peps.non_abelian_gi.contraction import flatten_like_sample
 from vmc.peps.non_abelian_gi.factors import PLAQUETTE_KEY_LEGS, PLAQUETTE_LEG_FWD
+
+
+def context_for_sample(
+    model: NonAbelianGIPEPS,
+    tensors: list[list[jax.Array]],
+    sample: jax.Array,
+) -> Context:
+    """Estimate-ready context (amplitude + cached top boundaries)."""
+    top_envs = []
+    top_env = tuple(
+        jnp.ones((1, 1, 1), dtype=jnp.asarray(tensors[0][0]).dtype)
+        for _ in range(model.shape[1])
+    )
+    for row in range(model.shape[0]):
+        top_envs.append(top_env)
+        top_env = model.strategy.apply(
+            top_env,
+            build_row_mpo(
+                tensors, sample, model.shape, model.tables.block_id_lookup, row=row
+            ),
+        )
+    return Context(amp=_contract_bottom(top_env), top_envs=tuple(top_envs))
+
+
+def weighted_block_tensors(model: NonAbelianGIPEPS) -> list[list[jax.Array]]:
+    """Block-index-weighted all-ones tensors giving generic nonzero amplitudes."""
+    return [
+        [
+            jnp.ones_like(jnp.asarray(tensor))
+            * jnp.arange(1, tensor.shape[0] + 1, dtype=jnp.complex128)[
+                :, None, None, None, None
+            ]
+            for tensor in row
+        ]
+        for row in model.tensors
+    ]
 
 
 def decode_rows(table, block: int, key: tuple[int, ...]) -> list[tuple[int, complex]]:
@@ -143,9 +181,7 @@ def hopping_outcomes(
                     v_new = v_links.at[row, col].set(new_link)
                 outcomes.append(
                     (
-                        flatten_like_sample(
-                            sample, matter_new, h_new, v_new, iota_new
-                        ),
+                        flatten_like_sample(sample, matter_new, h_new, v_new, iota_new),
                         me,
                     )
                 )
@@ -153,49 +189,129 @@ def hopping_outcomes(
 
 
 def valid_samples(model: NonAbelianGIPEPS) -> tuple[jax.Array, ...]:
+    """All Gauss-valid samples of ``model``, in the model's sample layout."""
     n_rows, n_cols = model.shape
     link_irreps = model.gauge_group.irreps()
     samples = []
-    for h_values in itertools.product(link_irreps, repeat=n_rows * (n_cols - 1)):
-        h_links = jnp.asarray(h_values, dtype=jnp.int32).reshape((n_rows, n_cols - 1))
-        for v_values in itertools.product(link_irreps, repeat=(n_rows - 1) * n_cols):
-            v_links = jnp.asarray(v_values, dtype=jnp.int32).reshape(
-                (n_rows - 1, n_cols)
+    for matter_values in itertools.product(
+        range(model.phys_dim), repeat=n_rows * n_cols
+    ):
+        matter = jnp.asarray(matter_values, dtype=jnp.int32).reshape(model.shape)
+        for h_values in itertools.product(link_irreps, repeat=n_rows * (n_cols - 1)):
+            h_links = jnp.asarray(h_values, dtype=jnp.int32).reshape(
+                (n_rows, n_cols - 1)
             )
-            iota_choices = []
-            for row in range(n_rows):
-                for col in range(n_cols):
-                    choices = []
-                    for iota in range(model.tables.max_iotas):
-                        block_id = model.tables.block_id_lookup[
-                            row,
-                            col,
-                            0,
-                            h_links[row, col - 1] if col > 0 else 0,
-                            v_links[row - 1, col] if row > 0 else 0,
-                            h_links[row, col] if col < n_cols - 1 else 0,
-                            v_links[row, col] if row < n_rows - 1 else 0,
-                            iota,
-                        ]
-                        if int(block_id) >= 0:
-                            choices.append(iota)
-                    if not choices:
-                        break
-                    iota_choices.append(tuple(choices))
-                else:
-                    continue
-                break
-            if len(iota_choices) != n_rows * n_cols:
-                continue
-            for iotas in itertools.product(*iota_choices):
-                samples.append(
-                    NonAbelianGIPEPS.flatten_sample(
-                        h_links,
-                        v_links,
-                        jnp.asarray(iotas, dtype=jnp.int32).reshape(model.shape),
-                    )
+            for v_values in itertools.product(
+                link_irreps, repeat=(n_rows - 1) * n_cols
+            ):
+                v_links = jnp.asarray(v_values, dtype=jnp.int32).reshape(
+                    (n_rows - 1, n_cols)
                 )
+                iota_choices = []
+                for row in range(n_rows):
+                    for col in range(n_cols):
+                        choices = []
+                        for iota in range(model.tables.max_iotas):
+                            block_id = model.tables.block_id_lookup[
+                                row,
+                                col,
+                                matter_values[row * n_cols + col],
+                                h_links[row, col - 1] if col > 0 else 0,
+                                v_links[row - 1, col] if row > 0 else 0,
+                                h_links[row, col] if col < n_cols - 1 else 0,
+                                v_links[row, col] if row < n_rows - 1 else 0,
+                                iota,
+                            ]
+                            if int(block_id) >= 0:
+                                choices.append(iota)
+                        if not choices:
+                            break
+                        iota_choices.append(tuple(choices))
+                    else:
+                        continue
+                    break
+                if len(iota_choices) != n_rows * n_cols:
+                    continue
+                for iotas in itertools.product(*iota_choices):
+                    iota_arr = jnp.asarray(iotas, dtype=jnp.int32).reshape(model.shape)
+                    samples.append(
+                        NonAbelianGIPEPS.flatten_sample(h_links, v_links, iota_arr)
+                        if model.phys_dim == 1
+                        else NonAbelianGIPEPS.flatten_matter_sample(
+                            matter, h_links, v_links, iota_arr
+                        )
+                    )
     return tuple(samples)
+
+
+def jw_string_sign(
+    parities: jax.Array,
+    site_a: tuple[int, int],
+    site_b: tuple[int, int],
+) -> int:
+    """``(-1)**(parity sum strictly between two sites)`` in column-major mode order.
+
+    Enumerates the Jordan-Wigner mode order ``(col, row)`` explicitly,
+    independently of the kernel's prefix/suffix bookkeeping.
+    """
+    n_rows, n_cols = parities.shape
+    modes = [(c, r) for c in range(n_cols) for r in range(n_rows)]
+    i, j = sorted(
+        (
+            modes.index((site_a[1], site_a[0])),
+            modes.index((site_b[1], site_b[0])),
+        )
+    )
+    return (-1) ** sum(int(parities[r, c]) for c, r in modes[i + 1 : j])
+
+
+def exact_matter_hamiltonian(
+    model: NonAbelianGIPEPS,
+    *,
+    electric_coeff: float,
+    hopping_coeff: float,
+    mass_coeff: float = 0.0,
+    plaquette_coeff: float = 0.0,
+    fermionic: bool = False,
+) -> tuple[tuple[jax.Array, ...], jax.Array]:
+    """Dense gauge+matter Hamiltonian; hops carry JW strings when ``fermionic``."""
+    samples = valid_samples(model)
+    sample_keys = {tuple(sample.tolist()): idx for idx, sample in enumerate(samples)}
+    n_rows, n_cols = model.shape
+    matter_parity = jnp.asarray([n % 2 for n in model.matter_numbers])
+    hops = tuple(
+        (row, col, True) for row in range(n_rows) for col in range(n_cols - 1)
+    ) + tuple((row, col, False) for row in range(n_rows - 1) for col in range(n_cols))
+    hamiltonian = jnp.zeros((len(samples), len(samples)), dtype=jnp.complex128)
+    for source_idx, sample in enumerate(samples):
+        matter, h_links, v_links, _iotas = (
+            NonAbelianGIPEPS.unflatten_spin_network_sample(sample, model.shape)
+        )
+        diagonal = sum(
+            electric_coeff * model.gauge_group.casimir(int(link))
+            for link in (*h_links.reshape(-1), *v_links.reshape(-1))
+        ) + sum(mass_coeff * model.matter_numbers[int(m)] for m in matter.reshape(-1))
+        hamiltonian = hamiltonian.at[source_idx, source_idx].set(diagonal)
+        parities = matter_parity[matter]
+        for row, col, horizontal in hops:
+            other = (row, col + 1) if horizontal else (row + 1, col)
+            sign = jw_string_sign(parities, (row, col), other) if fermionic else 1
+            for candidate, me in hopping_outcomes(
+                model, sample, row=row, col=col, horizontal=horizontal
+            ):
+                hamiltonian = hamiltonian.at[
+                    sample_keys[tuple(candidate.tolist())], source_idx
+                ].add(hopping_coeff * sign * me)
+        if plaquette_coeff:
+            for row in range(n_rows - 1):
+                for col in range(n_cols - 1):
+                    for candidate, me in plaquette_outcomes(
+                        model, sample, row=row, col=col
+                    ):
+                        hamiltonian = hamiltonian.at[
+                            sample_keys[tuple(candidate.tolist())], source_idx
+                        ].add(plaquette_coeff * me)
+    return samples, hamiltonian
 
 
 def exact_pure_gauge_hamiltonian(

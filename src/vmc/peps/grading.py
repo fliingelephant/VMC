@@ -101,7 +101,6 @@ def _grading_statics(grading: Grading, tensors: list[list]) -> tuple[list, list,
     return masks, right_par, down_par
 
 
-def column_prefix_parities(grading: Grading, sample: jax.Array) -> jax.Array:
-    """``prefix[r, c] = sum_{r'<r} parity(sample[r', c]) mod 2``."""
-    parities = jnp.asarray(grading.phys_parity)[sample]
+def column_prefix_parities(parities: jax.Array) -> jax.Array:
+    """``prefix[r, c] = sum_{r'<r} parities[r', c] mod 2``."""
     return jnp.cumsum(jnp.pad(parities[:-1], ((1, 0), (0, 0))), axis=0) % 2

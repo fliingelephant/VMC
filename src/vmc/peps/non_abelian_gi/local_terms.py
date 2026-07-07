@@ -17,6 +17,8 @@ from vmc.operators.local_terms import (
 )
 
 __all__ = [
+    "FermionicHorizontalMatterHoppingTerm",
+    "FermionicVerticalMatterHoppingTerm",
     "HorizontalLinkCasimirTerm",
     "HorizontalMatterHoppingTerm",
     "MatterNumberTerm",
@@ -111,6 +113,28 @@ class VerticalMatterHoppingTerm(TransitionOperator):
         del children
         row, col = aux_data
         return cls(row=row, col=col)
+
+
+@jax.tree_util.register_pytree_node_class
+@dataclass(frozen=True)
+class FermionicHorizontalMatterHoppingTerm(HorizontalMatterHoppingTerm):
+    """Fermionic matter hop on a horizontal link.
+
+    Horizontal neighbors are non-adjacent in the column-major Jordan-Wigner
+    mode order; kernels multiply the factor-table matrix element by the
+    string sign over the intervening matter parities.
+    """
+
+
+@jax.tree_util.register_pytree_node_class
+@dataclass(frozen=True)
+class FermionicVerticalMatterHoppingTerm(VerticalMatterHoppingTerm):
+    """Fermionic matter hop on a vertical link.
+
+    Vertical neighbors are adjacent in the column-major Jordan-Wigner mode
+    order, so the string is empty and the evaluation coincides with the
+    bosonic term.
+    """
 
 
 @support_span.dispatch

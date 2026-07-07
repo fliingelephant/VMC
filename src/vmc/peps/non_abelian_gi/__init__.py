@@ -12,6 +12,8 @@ from vmc.peps.non_abelian_gi.factors import (
 )
 from vmc.peps.non_abelian_gi.kernels import build_mc_kernels
 from vmc.peps.non_abelian_gi.local_terms import (
+    FermionicHorizontalMatterHoppingTerm,
+    FermionicVerticalMatterHoppingTerm,
     HorizontalLinkCasimirTerm,
     HorizontalMatterHoppingTerm,
     MatterNumberTerm,
@@ -28,6 +30,8 @@ from vmc.peps.non_abelian_gi.model import NonAbelianGIPEPS, NonAbelianGIPEPSConf
 from vmc.peps.non_abelian_gi.tables import PureGaugeTables
 
 __all__ = [
+    "FermionicHorizontalMatterHoppingTerm",
+    "FermionicVerticalMatterHoppingTerm",
     "HoppingFactorTables",
     "HorizontalLinkCasimirTerm",
     "HorizontalMatterHoppingTerm",

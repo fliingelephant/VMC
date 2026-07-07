@@ -38,7 +38,9 @@ from vmc.peps.non_abelian_gi.contraction import (
     flatten_like_sample,
     unflatten_spin_network_sample,
 )
+from vmc.peps.grading import column_prefix_parities
 from vmc.peps.non_abelian_gi.local_terms import (
+    FermionicHorizontalMatterHoppingTerm,
     HorizontalLinkCasimirTerm,
     HorizontalMatterHoppingTerm,
     MatterNumberTerm,
@@ -94,6 +96,7 @@ class SpinNetworkRowEnvs(NamedTuple):
     active_block_ids: jax.Array
     hopping_tables: HoppingFactorTables | None
     j_r_by_block: jax.Array
+    h_hop_signs: jax.Array | None = None
 
 
 def _window_combos(
@@ -314,7 +317,26 @@ def _transition_energy(
     envs: SpinNetworkRowEnvs,
     tensors: Any,
 ) -> jax.Array:
-    row, col = term.row, term.col
+    return _horizontal_hop_energy(term.row, term.col, envs, tensors)
+
+
+@_transition_energy.dispatch
+def _transition_energy(
+    term: FermionicHorizontalMatterHoppingTerm,
+    envs: SpinNetworkRowEnvs,
+    tensors: Any,
+) -> jax.Array:
+    return envs.h_hop_signs[term.row, term.col] * _horizontal_hop_energy(
+        term.row, term.col, envs, tensors
+    )
+
+
+def _horizontal_hop_energy(
+    row: int,
+    col: int,
+    envs: SpinNetworkRowEnvs,
+    tensors: Any,
+) -> jax.Array:
     hop = envs.hopping_tables
     endpoint_tables = (hop.h_src[row][col], hop.h_tgt[row][col + 1])
     total = jnp.zeros((), dtype=tensors[row][col].dtype)
@@ -1294,15 +1316,24 @@ def build_mc_kernels(
     has_time_dep = any(s is not None for s in coeff_structure.schedules)
     static_coeffs = None if has_time_dep else coeff_structure.build_coeffs()
     eval_schedule = build_eval_schedule(bucketed_terms, type(model).eval_span)
-    has_matter_hopping_terms = any(
-        isinstance(term, (HorizontalMatterHoppingTerm, VerticalMatterHoppingTerm))
+    matter_hopping_terms = tuple(
+        term
         for row_passes in bucketed_terms.rows
         for _dr, cols in row_passes
         for col_terms in cols
         for term, _contributions in col_terms
+        if isinstance(term, (HorizontalMatterHoppingTerm, VerticalMatterHoppingTerm))
     )
-    if has_matter_hopping_terms and phys_dim == 1:
+    if matter_hopping_terms and phys_dim == 1:
         raise ValueError("Matter hopping terms require phys_dim > 1.")
+    matter_parity = (
+        jnp.asarray([n % 2 for n in model.matter_numbers])
+        if any(
+            isinstance(term, FermionicHorizontalMatterHoppingTerm)
+            for term in matter_hopping_terms
+        )
+        else None
+    )
 
     def build_row_mpos(
         tensors: Any,
@@ -1602,6 +1633,13 @@ def build_mc_kernels(
             iotas,
             shape,
         )
+        if matter_parity is None:
+            h_hop_signs = None
+        else:
+            parities = matter_parity[matter]
+            prefix = column_prefix_parities(parities)
+            below = (jnp.sum(parities, axis=0) + prefix + parities) % 2
+            h_hop_signs = 1.0 - 2.0 * ((below[:, :-1] + prefix[:, 1:]) % 2)
         row_mpos = build_row_mpos(tensors, active_block_ids)
         coeffs = static_coeffs if context.coeffs is None else context.coeffs
         local_estimates = jnp.zeros(len(bucketed_terms), dtype=context.amp.dtype)
@@ -1654,6 +1692,7 @@ def build_mc_kernels(
                         active_block_ids,
                         hopping_tables,
                         j_r_by_block,
+                        h_hop_signs,
                     )
                     for column in dr1_columns[c]:
                         for term, contributions in column.terms:

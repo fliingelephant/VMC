@@ -7,21 +7,22 @@ from flax import nnx
 
 from vmc.core import make_mc_sampler
 from vmc.drivers import ImaginaryTimeUnit, TDVPDriver
-from vmc.peps.common.contraction import _contract_bottom
 from vmc.peps.common import contraction as common_contraction
 from vmc.peps.common import energy as common_energy
 from nonabelian_exact import (
+    context_for_sample,
     exact_pure_gauge_hamiltonian,
     hopping_outcomes,
     plaquette_outcomes,
     valid_samples,
+    weighted_block_tensors,
 )
 from vmc.peps.non_abelian_gi import kernels as su2_kernels
 from vmc.operators.local_terms import LocalHamiltonian
 from vmc.operators.time_dependent import AffineSchedule, TimeDependentHamiltonian
 from vmc.peps.common.strategy import NoTruncation
 from vmc.preconditioners import DirectSolve, SRPreconditioner, solve_svd
-from vmc.peps.common.kernels import Cache, Context
+from vmc.peps.common.kernels import Cache
 from vmc.peps.standard.kernels import build_mc_kernels
 from vmc.peps.non_abelian_gi import (
     NonAbelianGIPEPS,
@@ -30,7 +31,6 @@ from vmc.peps.non_abelian_gi import (
     PlaquetteTerm,
     build_link_casimir_terms,
     build_matter_number_terms,
-    build_row_mpo,
 )
 from vmc.gauge_groups import SU2
 from vmc.qgt import (
@@ -63,42 +63,8 @@ def _single_cache(cache: Cache) -> Cache:
     return jax.tree_util.tree_map(lambda x: x[0], cache)
 
 
-def _context_for_sample(
-    model: NonAbelianGIPEPS,
-    tensors: list[list[jax.Array]],
-    sample: jax.Array,
-) -> Context:
-    top_envs = []
-    top_env = tuple(
-        jnp.ones((1, 1, 1), dtype=jnp.asarray(tensors[0][0]).dtype)
-        for _ in range(model.shape[1])
-    )
-    for row in range(model.shape[0]):
-        top_envs.append(top_env)
-        top_env = model.strategy.apply(
-            top_env,
-            build_row_mpo(
-                tensors, sample, model.shape, model.tables.block_id_lookup, row=row
-            ),
-        )
-    return Context(amp=_contract_bottom(top_env), top_envs=tuple(top_envs))
-
-
 def _active_blocks(model: NonAbelianGIPEPS, sample: jax.Array) -> tuple[int, ...]:
     return tuple(int(value) for value in model.active_block_ids(sample).reshape(-1))
-
-
-def _weighted_block_tensors(model: NonAbelianGIPEPS) -> list[list[jax.Array]]:
-    return [
-        [
-            jnp.ones_like(jnp.asarray(tensor))
-            * jnp.arange(1, tensor.shape[0] + 1, dtype=jnp.complex128)[
-                :, None, None, None, None
-            ]
-            for tensor in row
-        ]
-        for row in model.tensors
-    ]
 
 
 def _recursive_closure_ids(fn: FunctionType) -> set[int]:
@@ -495,7 +461,7 @@ def test_su2_horizontal_matter_hopping_kernel_uses_sparse_connected_table():
     assert len(outcomes) == 1
     candidate, matrix_element = outcomes[0]
 
-    context = _context_for_sample(model, tensors, sample)
+    context = context_for_sample(model, tensors, sample)
     _cache_next, estimates = estimate(tensors, sample, context)
     expected = matrix_element * (
         model.apply(tensors, candidate, model.shape, model.tables, model.strategy)
@@ -546,7 +512,7 @@ def test_su2_estimate_reuses_dr1_right_envs_for_gradients_and_terms(monkeypatch)
     tensors = [
         [jnp.ones_like(jnp.asarray(tensor)) for tensor in row] for row in model.tensors
     ]
-    context = _context_for_sample(model, tensors, sample)
+    context = context_for_sample(model, tensors, sample)
     calls = 0
     original_common = common_energy._compute_right_envs
     original_su2 = su2_kernels._compute_right_envs
@@ -708,7 +674,7 @@ def test_su2_kernel_estimates_plaquette_term_from_factor_tables():
         [jnp.ones_like(jnp.asarray(tensor)) for tensor in row] for row in model.tensors
     ]
 
-    context = _context_for_sample(model, tensors, sample)
+    context = context_for_sample(model, tensors, sample)
     _cache_next, estimates = jax.jit(estimate)(tensors, sample, context)
 
     amp = model.apply(tensors, sample, model.shape, model.tables, model.strategy)
@@ -746,7 +712,7 @@ def test_su2_kernel_sums_all_static_plaquette_outcomes():
         [jnp.ones_like(jnp.asarray(tensor)) for tensor in row] for row in model.tensors
     ]
 
-    context = _context_for_sample(model, tensors, sample)
+    context = context_for_sample(model, tensors, sample)
     _cache_next, estimates = estimate(tensors, sample, context)
 
     amp = model.apply(tensors, sample, model.shape, model.tables, model.strategy)
@@ -836,7 +802,7 @@ def test_su2_sliced_gradients_reconstruct_full_gradients():
     operator = LocalHamiltonian(shape=model.shape, terms=())
     sample = plaquette_outcomes(model, model.all_zero_sample())[0][0]
     tensors = [[jnp.asarray(tensor) for tensor in row] for row in model.tensors]
-    context = _context_for_sample(model, tensors, sample)
+    context = context_for_sample(model, tensors, sample)
 
     _init_cache, _transition, estimate_full = build_mc_kernels(
         model,
@@ -880,7 +846,7 @@ def test_su2_plaquette_transition_satisfies_exact_detailed_balance_on_2x2():
         config=_su2_config(shape=(2, 2), j_max_twice=2, D=2, chi=4),
         contraction_strategy=NoTruncation(),
     )
-    tensors = _weighted_block_tensors(model)
+    tensors = weighted_block_tensors(model)
     samples = valid_samples(model)
     weights = [
         jnp.abs(model.apply(tensors, sample, model.shape, model.tables, model.strategy))
@@ -939,7 +905,7 @@ def test_su2_sliced_qgt_matches_full_qgt_on_2x2():
         contraction_strategy=NoTruncation(),
     )
     operator = LocalHamiltonian(shape=model.shape, terms=())
-    tensors = _weighted_block_tensors(model)
+    tensors = weighted_block_tensors(model)
     samples = valid_samples(model)
     _init_cache, _transition, estimate_full = build_mc_kernels(
         model,
@@ -955,7 +921,7 @@ def test_su2_sliced_qgt_matches_full_qgt_on_2x2():
     sliced_grads = []
     active_slices = []
     for sample in samples:
-        context = _context_for_sample(model, tensors, sample)
+        context = context_for_sample(model, tensors, sample)
         _cache, full_estimates = estimate_full(tensors, sample, context)
         _cache, sliced_estimates = estimate_sliced(tensors, sample, context)
         full_grads.append(full_estimates.local_log_derivatives)
@@ -988,7 +954,7 @@ def test_su2_local_energy_matches_exact_2x2_hamiltonian_matrix():
         terms=(*electric_terms, PlaquetteTerm(row=0, col=0)),
         coeffs=(jnp.asarray(0.7),) * len(electric_terms) + (jnp.asarray(-1.2),),
     )
-    tensors = _weighted_block_tensors(model)
+    tensors = weighted_block_tensors(model)
     samples, hamiltonian = exact_pure_gauge_hamiltonian(
         model,
         electric_coeff=0.7,
@@ -1003,7 +969,7 @@ def test_su2_local_energy_matches_exact_2x2_hamiltonian_matrix():
 
     _init_cache, _transition, estimate = build_mc_kernels(model, operator)
     for source_idx, sample in enumerate(samples):
-        context = _context_for_sample(model, tensors, sample)
+        context = context_for_sample(model, tensors, sample)
         _cache, estimates = estimate(tensors, sample, context)
         expected = (hamiltonian @ psi)[source_idx] / psi[source_idx]
         assert jnp.allclose(estimates.local_estimate[0], expected)
@@ -1035,7 +1001,7 @@ def test_su2_2x2_ground_state_local_energy_matches_ed():
     _init_cache, _transition, estimate = build_mc_kernels(model, operator)
 
     for sample in samples:
-        context = _context_for_sample(model, tensors, sample)
+        context = context_for_sample(model, tensors, sample)
         _cache, estimates = estimate(tensors, sample, context)
         assert jnp.allclose(estimates.local_estimate[0], ground_energy)
 
@@ -1058,7 +1024,7 @@ def test_su2_local_energy_matches_exact_3x3_hamiltonian_matrix():
         coeffs=(jnp.asarray(0.7),) * len(electric_terms)
         + (jnp.asarray(-1.2),) * len(plaquette_terms),
     )
-    tensors = _weighted_block_tensors(model)
+    tensors = weighted_block_tensors(model)
     samples, hamiltonian = exact_pure_gauge_hamiltonian(
         model,
         electric_coeff=0.7,
@@ -1074,7 +1040,7 @@ def test_su2_local_energy_matches_exact_3x3_hamiltonian_matrix():
     _init_cache, _transition, estimate = build_mc_kernels(model, operator)
     assert len(samples) == 18
     for source_idx, sample in enumerate(samples):
-        context = _context_for_sample(model, tensors, sample)
+        context = context_for_sample(model, tensors, sample)
         _cache, estimates = estimate(tensors, sample, context)
         expected = (hamiltonian @ psi)[source_idx] / psi[source_idx]
         assert jnp.allclose(estimates.local_estimate[0], expected)
@@ -1159,7 +1125,7 @@ def test_su2_kernels_run_through_generic_mc_sampler():
             PlaquetteTerm(row=0, col=0),
         ),
     )
-    tensors = _weighted_block_tensors(model)
+    tensors = weighted_block_tensors(model)
     samples = model.random_physical_configuration(jax.random.PRNGKey(0), n_samples=2)
     init_cache, transition, estimate = build_mc_kernels(model, operator)
     mc_sampler = make_mc_sampler(transition, estimate)

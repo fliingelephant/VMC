@@ -173,7 +173,7 @@ def build_fermionic_kernels(
         def build_one(sample: jax.Array) -> tuple:
             spins = sample.reshape(shape)
             decorated = _decorate(
-                tensors, column_prefix_parities(grading, spins), masks, right_par
+                tensors, column_prefix_parities(phys_parity[spins]), masks, right_par
             )
             return bottom_envs_from_mpos(
                 [_build_row_mpo(decorated, spins[r], r, n_cols) for r in range(n_rows)]
@@ -359,8 +359,8 @@ def build_fermionic_kernels(
         context: Context,
     ) -> tuple[Cache, LocalEstimates]:
         spins = config_state_next.reshape(shape)
-        prefix = column_prefix_parities(grading, spins)
         parities = phys_parity[spins]
+        prefix = column_prefix_parities(parities)
         suffix = (jnp.sum(parities, axis=0) + prefix + parities) % 2
         decorated = _decorate(tensors, prefix, masks, right_par)
 

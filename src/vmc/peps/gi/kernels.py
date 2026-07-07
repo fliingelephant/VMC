@@ -11,7 +11,8 @@ from vmc.operators.time_dependent import TimeDependentHamiltonian
 from vmc.peps.gi import model as gi_model
 from vmc.peps.gi.local_terms import HorizontalHiggsLinkTerm, VerticalHiggsLinkTerm
 from vmc.peps.gi.model import GIPEPS, _link_value_or_zero, _site_cfg_index
-from vmc.peps.standard.kernels import Cache, Context, LocalEstimates, build_mc_kernels
+from vmc.peps.common.kernels import Cache, Context, LocalEstimates, _broadcast_coeffs
+from vmc.peps.common.kernels import build_mc_kernels
 
 __all__ = ["build_mc_kernels"]
 
@@ -90,16 +91,11 @@ def build_mc_kernels(
                 env = gi_model._apply_mpo_from_below(env, row_mpo, strategy)
             return tuple(envs)
 
-        dynamic_coeffs = None if not has_time_dep else coeff_structure.build_coeffs(t)
         return Cache(
             bottom_envs=jax.vmap(build_one)(config_states),
-            coeffs=(
-                None
-                if dynamic_coeffs is None
-                else jnp.broadcast_to(
-                    dynamic_coeffs,
-                    (config_states.shape[0], dynamic_coeffs.shape[0]),
-                )
+            coeffs=_broadcast_coeffs(
+                None if not has_time_dep else coeff_structure.build_coeffs(t),
+                config_states.shape[0],
             ),
         )
 

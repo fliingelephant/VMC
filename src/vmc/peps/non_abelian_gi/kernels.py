@@ -57,11 +57,12 @@ from vmc.peps.non_abelian_gi.factors import (
     PlaquetteFactorTables,
 )
 from vmc.peps.non_abelian_gi.model import NonAbelianGIPEPS
-from vmc.peps.standard.kernels import (
+from vmc.peps.common.kernels import (
     Cache,
     Context,
     LocalEstimates,
     _assemble_log_derivatives,
+    _broadcast_coeffs,
     build_mc_kernels,
 )
 from vmc.utils.utils import _metropolis_hastings_accept
@@ -1334,16 +1335,11 @@ def build_mc_kernels(
         samples: jax.Array,
         t: float | jax.Array | None = None,
     ) -> Cache:
-        dynamic_coeffs = None if not has_time_dep else coeff_structure.build_coeffs(t)
         return Cache(
             bottom_envs=jax.vmap(lambda s: build_bottom_envs(tensors, s))(samples),
-            coeffs=(
-                None
-                if dynamic_coeffs is None
-                else jnp.broadcast_to(
-                    dynamic_coeffs,
-                    (samples.shape[0], dynamic_coeffs.shape[0]),
-                )
+            coeffs=_broadcast_coeffs(
+                None if not has_time_dep else coeff_structure.build_coeffs(t),
+                samples.shape[0],
             ),
         )
 

@@ -11,7 +11,8 @@ from vmc.peps.blockade import model as blockade_model
 from vmc.peps.blockade.model import BlockadePEPS
 from vmc.peps.common.contraction import _apply_mpo_from_below
 from vmc.peps.common.energy import _estimate_sweep
-from vmc.peps.standard.kernels import Cache, Context, LocalEstimates, build_mc_kernels
+from vmc.peps.common.kernels import Cache, Context, LocalEstimates, _broadcast_coeffs
+from vmc.peps.common.kernels import build_mc_kernels
 
 __all__ = ["build_mc_kernels"]
 
@@ -63,16 +64,11 @@ def build_mc_kernels(
                 env = _apply_mpo_from_below(env, row_mpo, strategy)
             return tuple(envs)
 
-        dynamic_coeffs = None if not has_time_dep else coeff_structure.build_coeffs(t)
         return Cache(
             bottom_envs=jax.vmap(build_one)(config_states_flat),
-            coeffs=(
-                None
-                if dynamic_coeffs is None
-                else jnp.broadcast_to(
-                    dynamic_coeffs,
-                    (config_states_flat.shape[0], dynamic_coeffs.shape[0]),
-                )
+            coeffs=_broadcast_coeffs(
+                None if not has_time_dep else coeff_structure.build_coeffs(t),
+                config_states_flat.shape[0],
             ),
         )
 

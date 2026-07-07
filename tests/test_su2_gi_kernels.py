@@ -21,7 +21,8 @@ from vmc.operators.local_terms import LocalHamiltonian
 from vmc.operators.time_dependent import AffineSchedule, TimeDependentHamiltonian
 from vmc.peps.common.strategy import NoTruncation
 from vmc.preconditioners import DirectSolve, SRPreconditioner, solve_svd
-from vmc.peps.standard.kernels import Cache, Context, build_mc_kernels
+from vmc.peps.common.kernels import Cache, Context
+from vmc.peps.standard.kernels import build_mc_kernels
 from vmc.peps.non_abelian_gi import (
     NonAbelianGIPEPS,
     NonAbelianGIPEPSConfig,

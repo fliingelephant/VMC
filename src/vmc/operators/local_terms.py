@@ -1,4 +1,5 @@
 """Local operators for PEPS energy evaluation."""
+
 from __future__ import annotations
 
 import abc
@@ -26,6 +27,8 @@ __all__ = [
     "DiagonalOperator",
     "HorizontalTwoSiteOperator",
     "VerticalTwoSiteOperator",
+    "FermionicHorizontalTwoSiteOperator",
+    "FermionicVerticalTwoSiteOperator",
     "PlaquetteOperator",
     "BucketedOperators",
     "CoefficientStructure",
@@ -51,7 +54,9 @@ def _normalize_coeffs(
             raise ValueError(f"Expected {n_terms} coefficients, got scalar.")
         return (coeff_array,)
     if coeff_array.shape != (n_terms,):
-        raise ValueError(f"Expected {n_terms} coefficients, got shape {coeff_array.shape}.")
+        raise ValueError(
+            f"Expected {n_terms} coefficients, got shape {coeff_array.shape}."
+        )
     return tuple(coeff_array[idx] for idx in range(n_terms))
 
 
@@ -167,6 +172,28 @@ class VerticalTwoSiteOperator(TransitionOperator):
 
 @jax.tree_util.register_pytree_node_class
 @dataclass(frozen=True)
+class FermionicHorizontalTwoSiteOperator(HorizontalTwoSiteOperator):
+    """Parity-odd (hopping/pairing) horizontal two-site fermionic term.
+
+    ``op`` is the bare two-site matrix; both site factors must be
+    fermion-parity odd.  Graded kernels multiply every matrix element by
+    the Jordan-Wigner string sign of the sample.
+    """
+
+
+@jax.tree_util.register_pytree_node_class
+@dataclass(frozen=True)
+class FermionicVerticalTwoSiteOperator(VerticalTwoSiteOperator):
+    """Parity-odd (hopping/pairing) vertical two-site fermionic term.
+
+    Vertical neighbors are adjacent in the column-major Jordan-Wigner mode
+    order, so the string is empty; graded kernels still account for the
+    flipped swap gate inside the two-row window.
+    """
+
+
+@jax.tree_util.register_pytree_node_class
+@dataclass(frozen=True)
 class PlaquetteOperator(TransitionOperator):
     """Plaquette term on the square with top-left corner at (row, col)."""
 
@@ -231,7 +258,7 @@ class BucketedOperators:
     n_ops: InitVar[int] = 1
 
     def __post_init__(self, n_ops: int) -> None:
-        object.__setattr__(self, 'n_ops', n_ops)
+        object.__setattr__(self, "n_ops", n_ops)
 
     def __len__(self) -> int:
         """Number of source operators before bucketing."""
@@ -313,7 +340,9 @@ def merge_operators(
     span_of = support_span if eval_span is None else eval_span
 
     # Flatten all terms with source tracking
-    flat_terms: list[tuple[Operator, int, int]] = []  # (term, op_idx, term_within_op_idx)
+    flat_terms: list[
+        tuple[Operator, int, int]
+    ] = []  # (term, op_idx, term_within_op_idx)
     base_coeffs: list[jax.Array] = []
     schedules: list = []
     for op_idx, op in enumerate(operators):

@@ -150,8 +150,7 @@ def build_fermionic_kernels(
     terms, coeff_structure = merge_operators(
         all_operators, shape, eval_span=type(model).eval_span
     )
-    has_time_dep = any(s is not None for s in coeff_structure.schedules)
-    static_coeffs = None if has_time_dep else coeff_structure.build_coeffs()
+    static_coeffs = coeff_structure.static_coeffs()
 
     def bottom_envs_from_mpos(mpos: list, first_row: int = 0) -> tuple:
         dtype = mpos[n_rows - 1][0].dtype
@@ -182,7 +181,7 @@ def build_fermionic_kernels(
         return Cache(
             bottom_envs=jax.vmap(build_one)(samples_flat),
             coeffs=_broadcast_coeffs(
-                None if not has_time_dep else coeff_structure.build_coeffs(t),
+                coeff_structure.dynamic_coeffs(t),
                 samples_flat.shape[0],
             ),
         )

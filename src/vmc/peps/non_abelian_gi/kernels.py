@@ -1313,8 +1313,7 @@ def build_mc_kernels(
         shape,
         eval_span=type(model).eval_span,
     )
-    has_time_dep = any(s is not None for s in coeff_structure.schedules)
-    static_coeffs = None if has_time_dep else coeff_structure.build_coeffs()
+    static_coeffs = coeff_structure.static_coeffs()
     eval_schedule = build_eval_schedule(bucketed_terms, type(model).eval_span)
     matter_hopping_terms = tuple(
         term
@@ -1369,7 +1368,7 @@ def build_mc_kernels(
         return Cache(
             bottom_envs=jax.vmap(lambda s: build_bottom_envs(tensors, s))(samples),
             coeffs=_broadcast_coeffs(
-                None if not has_time_dep else coeff_structure.build_coeffs(t),
+                coeff_structure.dynamic_coeffs(t),
                 samples.shape[0],
             ),
         )

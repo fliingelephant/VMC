@@ -78,8 +78,7 @@ def build_mc_kernels(
         shape,
         eval_span=type(model).eval_span,
     )
-    has_time_dep = any(s is not None for s in coeff_structure.schedules)
-    static_coeffs = None if has_time_dep else coeff_structure.build_coeffs()
+    static_coeffs = coeff_structure.static_coeffs()
 
     def init_cache(
         tensors: Any,
@@ -102,7 +101,7 @@ def build_mc_kernels(
         return Cache(
             bottom_envs=jax.vmap(build_one_bottom_envs)(samples_flat),
             coeffs=_broadcast_coeffs(
-                None if not has_time_dep else coeff_structure.build_coeffs(t),
+                coeff_structure.dynamic_coeffs(t),
                 samples_flat.shape[0],
             ),
         )

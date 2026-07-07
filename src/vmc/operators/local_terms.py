@@ -321,6 +321,18 @@ class CoefficientStructure:
             parts.append(base * sched_coeffs)
         return jnp.concatenate(parts) if len(parts) > 1 else parts[0]
 
+    def static_coeffs(self) -> jax.Array | None:
+        """Flat coefficients when time-independent, else ``None``."""
+        return (
+            None if any(s is not None for s in self.schedules) else self.build_coeffs()
+        )
+
+    def dynamic_coeffs(self, t: float | jax.Array | None) -> jax.Array | None:
+        """Flat coefficients at time *t* when time-dependent, else ``None``."""
+        return (
+            self.build_coeffs(t) if any(s is not None for s in self.schedules) else None
+        )
+
 
 def merge_operators(
     operators: tuple[LocalHamiltonian | TimeDependentHamiltonian, ...],
